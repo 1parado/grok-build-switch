@@ -1,0 +1,31 @@
+# Build outputs
+grok_switch.exe
+*.exe
+*.syso
+*.test
+*.out
+
+# Go
+bin/
+vendor/
+
+# IDE / local agent
+.claude/
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local working notes (not required at runtime)
+notes.md
+task_plan.md
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs / temp
+*.log
+*.tmp
+*.temp

@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>grok_switch</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="appHeader">
+      <div class="headerLeft">
+        <button type="button" id="navHomeBtn" class="ghostBtn" hidden>← 返回</button>
+        <div class="brand">
+          <img src="/icon.svg" alt="" class="brandIcon">
+          <div>
+            <div class="brandTitle">grok_switch</div>
+            <div class="brandSub" id="headerSubtitle">供应商</div>
+          </div>
+        </div>
+      </div>
+      <div class="headerRight">
+        <button type="button" id="addBtn" class="btn primary" data-home-only>添加供应商</button>
+        <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
+        <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
+      </div>
+    </header>
+
+    <div id="driftBanner" class="alert warn" hidden style="display:none">
+      <div>
+        <strong>配置与当前供应商不一致</strong>
+        <span id="driftDetail">config.toml 内容与当前启用的供应商不匹配</span>
+      </div>
+      <div class="inlineActions">
+        <button type="button" id="reapplyBtn" class="btn sm primary">用供应商覆盖文件</button>
+        <button type="button" id="openConfigFromDriftBtn" class="btn sm">编辑 config.toml</button>
+      </div>
+    </div>
+
+    <!-- HOME -->
+    <main id="viewHome" class="view">
+      <div class="toolbar">
+        <div>
+          <h1 class="pageTitle">供应商</h1>
+          <p class="pageDesc">点击「启用」切换 Grok 上游，新开会话生效</p>
+        </div>
+        <span id="profileCount" class="muted count">0 个</span>
+      </div>
+
+      <div class="listControls" id="listControls">
+        <input id="providerSearch" class="search providerSearch" type="search" placeholder="搜索供应商名称…" autocomplete="off">
+        <div class="layoutToggle" role="group" aria-label="布局">
+          <button type="button" id="layoutCardBtn" class="btn sm layoutBtn active" data-layout="card" title="卡片">卡片</button>
+          <button type="button" id="layoutListBtn" class="btn sm layoutBtn" data-layout="list" title="列表">列表</button>
+        </div>
+      </div>
+
+      <div id="emptyState" class="empty" hidden>
+        <h2>还没有供应商</h2>
+        <p>从当前 config.toml 导入，或添加一个新的上游配置。</p>
+        <div class="emptyActions">
+          <button type="button" id="emptyImportBtn" class="btn primary">导入现有配置</button>
+          <button type="button" id="emptyNewBtn" class="btn">添加供应商</button>
+        </div>
+      </div>
+
+      <div id="searchEmpty" class="empty searchEmpty" hidden>
+        <p>没有匹配的供应商</p>
+      </div>
+
+      <div id="profiles" class="providerGrid" data-layout="card"></div>
+    </main>
+
+    <!-- EDIT -->
+    <main id="viewEdit" class="view" hidden>
+      <div class="pageHead">
+        <h1 class="pageTitle" id="formTitle">添加供应商</h1>
+        <p class="pageDesc" id="formHint">名称、类型与 API Key 即可开始</p>
+      </div>
+
+      <form id="profileForm" class="formCard">
+        <input type="hidden" id="profileId">
+
+        <div class="formGrid">
+          <label class="field">名称
+            <input id="name" required placeholder="例如 OpenRouter">
+          </label>
+          <label class="field">类型模板
+            <select id="templateSelect">
+              <option value="">自定义</option>
+              <option value="openai">OpenAI 兼容</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="ollama">Ollama 本地</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+          </label>
+          <label class="field span2">服务地址
+            <input id="baseUrl" required class="mono" placeholder="https://api.example.com/v1">
+          </label>
+          <label class="field span2">API Key
+            <div class="keyRow">
+              <input id="profileApiKey" type="password" autocomplete="off" placeholder="粘贴 API Key">
+              <button type="button" id="toggleProfileKey" class="btn sm">显示</button>
+            </div>
+          </label>
+        </div>
+
+        <details class="fold" id="connectBlock">
+          <summary>连接与模型（可选）</summary>
+          <div class="foldBody">
+            <div class="inlineActions">
+              <button type="button" id="testConnectionBtn" class="btn sm">测试上游连接</button>
+              <button type="button" id="fetchModelsBtn" class="btn sm">拉取模型列表</button>
+              <p id="connectionStatus" class="connStatus" hidden></p>
+            </div>
+            <p class="muted tiny">拉取列表后点 chip 启用；不会自动设置默认模型。每个已启用模型可单独测试连通。</p>
+
+            <div class="formGrid">
+              <label class="field">默认模型
+                <select id="defaultModel" class="mono">
+                  <option value="">（请先启用模型）</option>
+                </select>
+              </label>
+              <label class="field">协议格式
+                <select id="upstreamFormat">
+                  <option value="openai_chat">OpenAI Chat</option>
+                  <option value="openai_responses">OpenAI Responses</option>
+                  <option value="anthropic">Anthropic Messages</option>
+                </select>
+              </label>
+              <label class="field">联网搜索模型
+                <select id="webSearchModel" class="mono">
+                  <option value="">（可选）</option>
+                </select>
+              </label>
+              <label class="field">Subagents 模型
+                <select id="subagentsDefaultModel" class="mono">
+                  <option value="">（可选）</option>
+                </select>
+              </label>
+            </div>
+            <input id="modelSearchInput" class="mono search" placeholder="搜索上游模型…">
+            <div id="modelSuggestions" class="chips"></div>
+            <p id="modelPoolStatus" class="muted tiny">尚未拉取模型。点 chip 启用后，会出现在上方下拉框中。</p>
+            <div class="rowBetween">
+              <span class="muted tiny">已启用模型</span>
+              <div class="inlineActions">
+                <button type="button" id="toggleAdvancedBtn" class="btn sm ghost">高级字段</button>
+                <button type="button" id="addModelBtn" class="btn sm">手动添加</button>
+              </div>
+            </div>
+            <div id="modelsBody" class="modelCards" data-advanced="0"></div>
+          </div>
+        </details>
+
+        <details class="fold">
+          <summary>更多操作</summary>
+          <div class="foldBody inlineActions wrap">
+            <button type="button" id="copyProfileBtn" class="btn sm">复制</button>
+            <button type="button" id="exportProfileBtn" class="btn sm">导出 JSON</button>
+            <button type="button" id="importProfileJsonBtn" class="btn sm">导入 JSON</button>
+            <button type="button" id="importBtn" class="btn sm">从 config 导入</button>
+            <button type="button" id="cancelBtn" class="btn sm ghost">清空</button>
+          </div>
+          <input type="file" id="importProfileFile" accept="application/json,.json" hidden>
+        </details>
+
+        <details class="fold" id="configPreviewBlock">
+          <summary>config.toml（预览）</summary>
+          <div class="foldBody">
+            <div class="inlineActions">
+              <button type="button" id="refreshPreviewBtn" class="btn sm">刷新预览</button>
+              <label class="check" style="margin:0">
+                <input type="checkbox" id="previewFullConfig">完整 config.toml
+              </label>
+            </div>
+            <textarea id="providerConfigPreview" class="configTextarea mono" readonly rows="12" placeholder="填写名称、地址、Key 并启用模型后，点刷新预览"></textarea>
+            <p id="providerConfigPreviewStatus" class="muted tiny"></p>
+          </div>
+        </details>
+
+        <div class="formFooter">
+          <button type="button" id="backFromEditBtn" class="btn">取消</button>
+          <div class="inlineActions">
+            <button type="submit" id="saveProfileBtn" class="btn">保存</button>
+            <button type="button" id="activateCurrentBtn" class="btn primary">保存并启用</button>
+          </div>
+        </div>
+      </form>
+    </main>
+
+    <!-- SETTINGS -->
+    <main id="viewSettings" class="view" hidden>
+      <div class="pageHead">
+        <h1 class="pageTitle">设置</h1>
+        <p class="pageDesc">自启与外观</p>
+      </div>
+
+      <form id="settingsForm" class="formCard">
+        <label class="check"><input type="checkbox" id="autostart"> 开机自启</label>
+        <label class="check"><input type="checkbox" id="silentAutostart"> 自启时静默</label>
+        <label class="check"><input type="checkbox" id="autoOpenBrowser"> 启动时打开面板</label>
+        <label class="field">端口
+          <input id="port" type="number" min="1024" max="65535">
+        </label>
+        <p id="portHint" class="muted tiny" hidden></p>
+        <button type="submit" id="saveSettingsBtn" class="btn primary">保存设置</button>
+      </form>
+
+      <section class="formCard configEditor">
+        <div class="rowBetween">
+          <div>
+            <h2 class="sectionTitle">config.toml</h2>
+            <p class="muted tiny" id="configPathLabel">加载中…</p>
+          </div>
+          <div class="inlineActions">
+            <button type="button" id="reloadConfigBtn" class="btn sm ghost">重新加载</button>
+            <button type="button" id="saveConfigBtn" class="btn sm primary">保存到文件</button>
+          </div>
+        </div>
+        <p class="muted tiny">这是 grok <strong>当前生效</strong>的唯一配置文件（不是「每个供应商各一份」）。各供应商档案在列表里；启用某个供应商后，其 URL/Key/模型会写进此文件。</p>
+        <textarea id="configEditor" class="configTextarea mono" spellcheck="false" rows="18" placeholder="config.toml 内容"></textarea>
+        <p id="configEditorStatus" class="muted tiny"></p>
+      </section>
+
+      <details class="fold advancedFold" id="backupFold">
+        <summary>高级 · 备份与恢复</summary>
+        <div class="foldBody">
+          <p class="muted tiny">切换供应商或保存 config 时会自动备份。备份含 API Key，请勿外传。</p>
+          <p id="statusDetail" class="mono tiny pathBox"></p>
+          <div class="rowBetween">
+            <span class="muted tiny" id="backupCountLabel">—</span>
+            <button type="button" id="refreshBackupsBtn" class="btn sm ghost">刷新</button>
+          </div>
+          <div id="backups" class="backupList"></div>
+        </div>
+      </details>
+
+      <button type="button" id="backFromSettingsBtn" class="btn">返回供应商列表</button>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js?v=11"></script>
+</body>
+</html>

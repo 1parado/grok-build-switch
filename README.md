@@ -114,3 +114,7 @@ assets/           # 图标
 ## License
 
 [MIT](./LICENSE)
+
+## 友链
+学AI 上L站！
+[L站链接](https://linux.do/)

@@ -96,6 +96,7 @@ func main() {
 		ExePath:  exePath,
 		DataDir:  resolved.DataDir,
 		LogFile:  resolved.LogFile,
+		AuthFile: filepath.Join(resolved.GrokHome, "auth.json"),
 		Assets:   assets,
 	}
 	if !*noTray {

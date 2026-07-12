@@ -16,7 +16,7 @@
           <img src="/icon.svg" alt="" class="brandIcon">
           <div>
             <div class="brandTitle">grok_switch</div>
-            <div class="brandSub" id="headerSubtitle">供应商</div>
+            <div class="brandSub" id="headerSubtitle">登录方式</div>
           </div>
         </div>
       </div>
@@ -42,14 +42,14 @@
     <main id="viewHome" class="view">
       <div class="toolbar">
         <div>
-          <h1 class="pageTitle">供应商</h1>
-          <p class="pageDesc">点击「启用」切换 Grok 上游，新开会话生效</p>
+          <h1 class="pageTitle">登录方式</h1>
+          <p class="pageDesc">在官方账号与 API 供应商之间切换，拖动调整顺序</p>
         </div>
         <span id="profileCount" class="muted count">0 个</span>
       </div>
 
       <div class="listControls" id="listControls">
-        <input id="providerSearch" class="search providerSearch" type="search" placeholder="搜索供应商名称…" autocomplete="off">
+        <input id="providerSearch" class="search providerSearch" type="search" placeholder="搜索登录方式…" autocomplete="off">
         <div class="layoutToggle" role="group" aria-label="布局">
           <button type="button" id="layoutCardBtn" class="btn sm layoutBtn active" data-layout="card" title="卡片">卡片</button>
           <button type="button" id="layoutListBtn" class="btn sm layoutBtn" data-layout="list" title="列表">列表</button>
@@ -161,6 +161,7 @@
             <button type="button" id="exportProfileBtn" class="btn sm">导出 JSON</button>
             <button type="button" id="importProfileJsonBtn" class="btn sm">导入 JSON</button>
             <button type="button" id="importBtn" class="btn sm">从 config 导入</button>
+            <button type="button" id="privacyProtectBtn" class="btn sm">保护隐私安全</button>
             <button type="button" id="cancelBtn" class="btn sm ghost">清空</button>
           </div>
           <input type="file" id="importProfileFile" accept="application/json,.json" hidden>
@@ -242,6 +243,6 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=11"></script>
+  <script src="/app.js?v=13"></script>
 </body>
 </html>

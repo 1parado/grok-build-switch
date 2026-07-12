@@ -137,6 +137,26 @@ func (s *Store) SetActive(id string) error {
 	return s.writeLocked(profiles)
 }
 
+func (s *Store) ClearActive() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	profiles, err := s.readLocked()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for i := range profiles {
+		if profiles[i].IsActive {
+			profiles[i].IsActive = false
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.writeLocked(profiles)
+}
+
 func (s *Store) EnsureDir() error {
 	return os.MkdirAll(filepath.Dir(s.path), 0o755)
 }

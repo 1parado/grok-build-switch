@@ -46,6 +46,108 @@ func ApplyProfileToFile(path string, profile profiles.Profile) error {
 	return atomicWrite(path, next)
 }
 
+// UseOfficialAuthToFile removes provider-owned endpoint and model overrides so
+// Grok can fall back to the session token managed by `grok login`.
+func UseOfficialAuthToFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	next := UseOfficialAuthText(data)
+	return atomicWrite(path, next)
+}
+
+func UseOfficialAuthText(data []byte) []byte {
+	data = trimUTF8BOM(data)
+	lines := splitLines(string(data))
+	var out []string
+	for i := 0; i < len(lines); {
+		header := parseHeader(lines[i])
+		if header == "" {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		if header == "model" || strings.HasPrefix(header, "model.") {
+			i = skipSection(lines, i+1)
+			continue
+		}
+		end := skipSection(lines, i+1)
+		switch header {
+		case "endpoints":
+			out = append(out, removeAssignments(lines[i:end], "models_base_url")...)
+		case "models":
+			out = append(out, removeAssignments(lines[i:end], "default", "web_search")...)
+		case "subagents":
+			out = append(out, removeAssignments(lines[i:end], "default_model")...)
+		default:
+			out = append(out, lines[i:end]...)
+		}
+		i = end
+	}
+	result := strings.TrimRight(strings.Join(out, "\n"), "\n")
+	if result == "" {
+		return []byte{}
+	}
+	return []byte(result + "\n")
+}
+
+func ApplyPrivacyProtectionToFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	next := ApplyPrivacyProtectionText(data)
+	return atomicWrite(path, next)
+}
+
+func ApplyPrivacyProtectionText(data []byte) []byte {
+	settings := map[string]map[string]string{
+		"features": {
+			"telemetry": "false",
+		},
+		"telemetry": {
+			"trace_upload":     "false",
+			"mixpanel_enabled": "false",
+		},
+		"harness": {
+			"disable_codebase_upload": "true",
+		},
+	}
+	data = trimUTF8BOM(data)
+	lines := splitLines(string(data))
+	var out []string
+	seen := make(map[string]bool, len(settings))
+	for i := 0; i < len(lines); {
+		header := parseHeader(lines[i])
+		if header == "" {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		end := skipSection(lines, i+1)
+		values, ok := settings[header]
+		if ok {
+			out = append(out, rewriteValues(lines[i:end], values)...)
+			seen[header] = true
+		} else {
+			out = append(out, lines[i:end]...)
+		}
+		i = end
+	}
+	for _, section := range []string{"features", "telemetry", "harness"} {
+		if seen[section] {
+			continue
+		}
+		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+			out = append(out, "")
+		}
+		out = append(out, rewriteValues([]string{"[" + section + "]"}, settings[section])...)
+	}
+	result := strings.TrimRight(strings.Join(out, "\n"), "\n")
+	return []byte(result + "\n")
+}
+
 // PreviewApply returns the full config.toml text that would result from
 // applying profile onto the existing file (or an empty template if missing).
 func PreviewApply(path string, profile profiles.Profile) ([]byte, error) {
@@ -323,6 +425,50 @@ func assignmentKey(line string) string {
 		return ""
 	}
 	return strings.TrimSpace(trimmed[:idx])
+}
+
+func removeAssignments(lines []string, keys ...string) []string {
+	removed := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		removed[key] = true
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !removed[assignmentKey(line)] {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func rewriteValues(lines []string, values map[string]string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(lines)+len(values))
+	if len(lines) == 0 {
+		return out
+	}
+	out = append(out, lines[0])
+	for _, line := range lines[1:] {
+		key := assignmentKey(line)
+		value, ok := values[key]
+		if ok {
+			out = append(out, key+" = "+value)
+			seen[key] = true
+			continue
+		}
+		out = append(out, line)
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if !seen[key] {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		out = append(out, key+" = "+values[key])
+	}
+	return out
 }
 
 func quote(value string) string {

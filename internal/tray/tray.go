@@ -2,6 +2,7 @@ package tray
 
 import (
 	"embed"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -25,6 +26,7 @@ type Tray struct {
 	ExePath  string
 	DataDir  string
 	LogFile  string
+	AuthFile string
 	Assets   embed.FS
 
 	refreshCh chan struct{}
@@ -119,6 +121,7 @@ func (t *Tray) buildMenu(stop <-chan struct{}) {
 	drifted := false
 	list, err := t.Profiles.List()
 	if err == nil {
+		activeName = "官方账号"
 		for _, profile := range list {
 			if profile.IsActive {
 				activeName = profile.Name
@@ -142,24 +145,57 @@ func (t *Tray) buildMenu(stop <-chan struct{}) {
 	current := systray.AddMenuItem(currentLabel, "")
 	current.Disable()
 	systray.AddSeparator()
-	if err == nil {
-		for _, profile := range list {
-			label := profile.Name
-			if profile.IsActive {
-				label = "✓ " + label
-			}
-			item := systray.AddMenuItem(label, profile.BaseURL)
-			p := profile
-			t.watch(stop, item, "activate:"+p.ID, func() {
-				if _, err := t.Switcher.Activate(p.ID); err != nil {
-					crash.Logf("activate %s failed: %v", p.ID, err)
-					notify.Info("grok_switch", "切换失败："+err.Error())
-					return
-				}
-				notify.Info("grok_switch", "已切换到 "+p.Name+"\n新开 grok 会话生效")
-				t.Refresh()
-			})
+	providers := systray.AddMenuItem("供应商", "选择供应商 Profile")
+	officialLabel := "官方账号登录"
+	if activeID == "" && err == nil {
+		officialLabel = "✓ " + officialLabel
+	}
+	official := providers.AddSubMenuItem(officialLabel, "使用 grok login 的官方账号凭据")
+	t.watch(stop, official, "activate:official", func() {
+		if err := t.Switcher.ActivateOfficial(); err != nil {
+			crash.Logf("activate official auth failed: %v", err)
+			notify.Info("grok_switch", "切换官方账号失败："+err.Error())
+			return
 		}
+		if _, err := os.Stat(t.AuthFile); os.IsNotExist(err) {
+			if err := StartGrokLogin(); err != nil {
+				crash.Logf("start grok login failed: %v", err)
+				notify.Info("grok_switch", "已切换到官方配置，请运行 grok login")
+			} else {
+				notify.Info("grok_switch", "已切换到官方配置，请在浏览器完成登录")
+			}
+		} else {
+			notify.Info("grok_switch", "已切换到官方账号\n新开 grok 会话生效")
+		}
+		t.Refresh()
+	})
+	providers.AddSeparator()
+	if err == nil {
+		if len(list) == 0 {
+			empty := providers.AddSubMenuItem("暂无供应商", "请在 Web 管理界面添加供应商")
+			empty.Disable()
+		} else {
+			for _, profile := range list {
+				label := profile.Name
+				if profile.IsActive {
+					label = "✓ " + label
+				}
+				item := providers.AddSubMenuItem(label, profile.BaseURL)
+				p := profile
+				t.watch(stop, item, "activate:"+p.ID, func() {
+					if _, err := t.Switcher.Activate(p.ID); err != nil {
+						crash.Logf("activate %s failed: %v", p.ID, err)
+						notify.Info("grok_switch", "切换失败："+err.Error())
+						return
+					}
+					notify.Info("grok_switch", "已切换到 "+p.Name+"\n新开 grok 会话生效")
+					t.Refresh()
+				})
+			}
+		}
+	} else {
+		failed := providers.AddSubMenuItem("供应商加载失败", err.Error())
+		failed.Disable()
 	}
 	if activeID != "" {
 		reapply := systray.AddMenuItem("重新应用当前 Profile", "用当前 Profile 覆盖 config.toml")
@@ -271,6 +307,10 @@ func OpenBrowser(url string) error {
 		cmd = exec.Command("xdg-open", url)
 	}
 	return cmd.Start()
+}
+
+func StartGrokLogin() error {
+	return exec.Command("grok", "login").Start()
 }
 
 var iconData = []byte{

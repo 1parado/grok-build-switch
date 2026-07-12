@@ -114,6 +114,106 @@ max_turns = 2
 	}
 }
 
+func TestUseOfficialAuthTextRemovesProviderOverrides(t *testing.T) {
+	original := `
+# keep this comment
+[cli]
+installer = "local"
+
+[endpoints]
+models_base_url = "https://provider.example/v1"
+image_base_url = "https://images.example/v1"
+
+[models]
+default = "provider-default"
+web_search = "provider-search"
+temperature = 0.4
+
+[subagents]
+enabled = true
+default_model = "provider-agent"
+
+[ui]
+yolo = false
+
+[model."provider-default"]
+model = "provider-model"
+api_key = "secret"
+base_url = "https://provider.example/v1"
+`
+	data := UseOfficialAuthText([]byte(strings.TrimSpace(original) + "\n"))
+	doc := map[string]any{}
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tableAt(doc, "endpoints")["models_base_url"]; ok {
+		t.Fatalf("models_base_url was not removed:\n%s", string(data))
+	}
+	if tableAt(doc, "endpoints")["image_base_url"] != "https://images.example/v1" {
+		t.Fatalf("unrelated endpoint was not preserved: %#v", tableAt(doc, "endpoints"))
+	}
+	if _, ok := tableAt(doc, "models")["default"]; ok {
+		t.Fatalf("default model was not removed: %#v", tableAt(doc, "models"))
+	}
+	if _, ok := tableAt(doc, "models")["web_search"]; ok {
+		t.Fatalf("web search model was not removed: %#v", tableAt(doc, "models"))
+	}
+	if tableAt(doc, "models")["temperature"] != 0.4 {
+		t.Fatalf("unrelated model default was not preserved: %#v", tableAt(doc, "models"))
+	}
+	if _, ok := tableAt(doc, "subagents")["default_model"]; ok {
+		t.Fatalf("subagent default was not removed: %#v", tableAt(doc, "subagents"))
+	}
+	if tableAt(doc, "subagents")["enabled"] != true {
+		t.Fatalf("subagents enabled flag was not preserved: %#v", tableAt(doc, "subagents"))
+	}
+	if len(tableAt(doc, "model")) != 0 {
+		t.Fatalf("custom model sections were not removed: %#v", tableAt(doc, "model"))
+	}
+	if tableAt(doc, "ui")["yolo"] != false || !strings.Contains(string(data), "# keep this comment") {
+		t.Fatalf("unrelated configuration was not preserved:\n%s", string(data))
+	}
+}
+
+func TestApplyPrivacyProtectionTextPreservesOtherSettings(t *testing.T) {
+	original := `
+[features]
+telemetry = true
+feedback = true
+
+[telemetry]
+trace_upload = true
+events_url = "https://telemetry.example/events"
+
+[ui]
+yolo = false
+`
+	data := ApplyPrivacyProtectionText([]byte(strings.TrimSpace(original) + "\n"))
+	doc := map[string]any{}
+	if err := toml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if tableAt(doc, "features")["telemetry"] != false {
+		t.Fatalf("telemetry feature was not disabled: %#v", tableAt(doc, "features"))
+	}
+	if tableAt(doc, "features")["feedback"] != true {
+		t.Fatalf("unrelated feature was not preserved: %#v", tableAt(doc, "features"))
+	}
+	telemetry := tableAt(doc, "telemetry")
+	if telemetry["trace_upload"] != false || telemetry["mixpanel_enabled"] != false {
+		t.Fatalf("telemetry privacy settings were not applied: %#v", telemetry)
+	}
+	if telemetry["events_url"] != "https://telemetry.example/events" {
+		t.Fatalf("unrelated telemetry setting was not preserved: %#v", telemetry)
+	}
+	if tableAt(doc, "harness")["disable_codebase_upload"] != true {
+		t.Fatalf("harness privacy setting was not applied: %#v", tableAt(doc, "harness"))
+	}
+	if tableAt(doc, "ui")["yolo"] != false {
+		t.Fatalf("unrelated section was not preserved: %#v", tableAt(doc, "ui"))
+	}
+}
+
 func TestApplyProfileOmitsZeroTokenLimits(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -329,4 +429,3 @@ default_model = "x"
 		t.Fatalf("api key not written to config, got %q", imported.EffectiveAPIKey())
 	}
 }
-

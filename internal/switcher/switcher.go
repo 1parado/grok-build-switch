@@ -49,6 +49,37 @@ func (s *Switcher) Activate(id string) (profiles.Profile, error) {
 	return profile, nil
 }
 
+func (s *Switcher) ActivateOfficial() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := os.Stat(s.ConfigPath); err == nil {
+		if _, err := s.Backup(); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := grokconfig.UseOfficialAuthToFile(s.ConfigPath); err != nil {
+		return err
+	}
+	return s.Profiles.ClearActive()
+}
+
+func (s *Switcher) ApplyPrivacyProtection() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := os.Stat(s.ConfigPath); err == nil {
+		if _, err := s.Backup(); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return grokconfig.ApplyPrivacyProtectionToFile(s.ConfigPath)
+}
+
 func (s *Switcher) ImportCurrent(name string, active bool) (profiles.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

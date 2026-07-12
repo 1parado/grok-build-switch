@@ -13,7 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -84,14 +86,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
 	mux.HandleFunc("/api/profiles/", s.handleProfileByID)
+	mux.HandleFunc("/api/official/activate", s.handleOfficialActivate)
 	mux.HandleFunc("/api/import", s.handleImport)
 	mux.HandleFunc("/api/backups", s.handleBackups)
 	mux.HandleFunc("/api/backups/", s.handleBackupByFile)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/models/fetch", s.handleFetchModels)
-mux.HandleFunc("/api/connection/test", s.handleConnectionTest)
+	mux.HandleFunc("/api/connection/test", s.handleConnectionTest)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/config/preview", s.handleConfigPreview)
+	mux.HandleFunc("/api/config/privacy", s.handleConfigPrivacy)
 	mux.HandleFunc("/", s.handleStatic)
 }
 
@@ -106,13 +110,42 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	currentSettings, _ := s.Settings.Get()
+	_, authErr := os.Stat(filepath.Join(s.Paths.GrokHome, "auth.json"))
 	writeJSON(w, map[string]any{
 		"active_profile":        active,
+		"official_active":       active.ID == "",
+		"official_logged_in":    authErr == nil,
 		"config_path":           s.Paths.GrokConfig,
 		"data_dir":              s.Paths.DataDir,
 		"port":                  s.ActualPort,
 		"settings":              currentSettings,
 		"config_matches_active": matches,
+	})
+}
+
+func (s *Server) handleOfficialActivate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.Switcher.ActivateOfficial(); err != nil {
+		writeError(w, err, http.StatusInternalServerError)
+		return
+	}
+	authFile := filepath.Join(s.Paths.GrokHome, "auth.json")
+	loginRequired := false
+	if _, err := os.Stat(authFile); os.IsNotExist(err) {
+		loginRequired = true
+		if err := exec.Command("grok", "login").Start(); err != nil {
+			writeError(w, fmt.Errorf("已切换到官方配置，但启动 grok login 失败: %w", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	s.changed()
+	writeJSON(w, map[string]any{
+		"ok":             true,
+		"login_required": loginRequired,
+		"message":        "已切换到官方账号，新开 grok 会话生效",
 	})
 }
 
@@ -488,6 +521,23 @@ func (s *Server) handleConfigPreview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleConfigPrivacy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if err := s.Switcher.ApplyPrivacyProtection(); err != nil {
+		writeError(w, err, http.StatusInternalServerError)
+		return
+	}
+	s.changed()
+	writeJSON(w, map[string]any{
+		"ok":      true,
+		"path":    s.Paths.GrokConfig,
+		"message": "隐私保护配置已写入 config.toml",
+	})
+}
+
 func fetchModelList(ctx context.Context, baseURL, apiKey, upstreamFormat string) ([]string, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
@@ -549,8 +599,8 @@ func probeModel(ctx context.Context, baseURL, apiKey, upstreamFormat, apiBackend
 	case "responses":
 		endpoint = baseURL + "/responses"
 		body = map[string]any{
-			"model": model,
-			"input": "ping",
+			"model":             model,
+			"input":             "ping",
 			"max_output_tokens": 1,
 		}
 		if apiKey != "" {

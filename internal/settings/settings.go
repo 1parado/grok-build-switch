@@ -11,12 +11,14 @@ import (
 )
 
 type Settings struct {
-	Port            int    `json:"port"`
-	ActualPort      int    `json:"actual_port"`
-	Theme           string `json:"theme"`
-	Autostart       bool   `json:"autostart"`
-	SilentAutostart bool   `json:"silent_autostart"`
-	AutoOpenBrowser bool   `json:"auto_open_browser"`
+	Port              int      `json:"port"`
+	ActualPort        int      `json:"actual_port"`
+	Theme             string   `json:"theme"`
+	Autostart         bool     `json:"autostart"`
+	SilentAutostart   bool     `json:"silent_autostart"`
+	AutoOpenBrowser   bool     `json:"auto_open_browser"`
+	ProviderOrder     []string `json:"provider_order"`
+	PinnedProviderIDs []string `json:"pinned_provider_ids"`
 }
 
 type Store struct {
@@ -134,5 +136,20 @@ func normalize(s Settings) Settings {
 	if s.Autostart {
 		s.SilentAutostart = true
 	}
+	s.ProviderOrder = uniqueStrings(s.ProviderOrder)
+	s.PinnedProviderIDs = uniqueStrings(s.PinnedProviderIDs)
 	return s
+}
+
+func uniqueStrings(items []string) []string {
+	seen := make(map[string]bool, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		out = append(out, item)
+	}
+	return out
 }

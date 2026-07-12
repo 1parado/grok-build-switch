@@ -8,7 +8,10 @@ const state = {
   view: "home",
   layout: localStorage.getItem("gs_layout") || "card",
   search: "",
+  draggedProviderKey: "",
 };
+
+const OFFICIAL_PROVIDER_KEY = "official";
 
 const $ = (id) => document.getElementById(id);
 let toastTimer = null;
@@ -246,18 +249,46 @@ function showView(name) {
 }
 
 function renderEmptyState() {
-  const empty = !state.profiles.length;
-  $("emptyState").hidden = !empty;
-  if ($("listControls")) $("listControls").hidden = empty;
-  $("profiles").hidden = empty;
-  if ($("searchEmpty")) $("searchEmpty").hidden = true;
-  $("profileCount").textContent = `${state.profiles.length} 个`;
+	const empty = false;
+	$("emptyState").hidden = true;
+	if ($("listControls")) $("listControls").hidden = false;
+	$("profiles").hidden = false;
+	if ($("searchEmpty")) $("searchEmpty").hidden = true;
+	$("profileCount").textContent = `${state.profiles.length + 1} 个`;
+}
+
+function providerCards() {
+	const settings = state.settings || {};
+	const order = Array.isArray(settings.provider_order) ? settings.provider_order : [];
+	const pinned = new Set(Array.isArray(settings.pinned_provider_ids) ? settings.pinned_provider_ids : []);
+	const position = new Map(order.map((key, index) => [key, index]));
+	const cards = [
+		{
+			key: OFFICIAL_PROVIDER_KEY,
+			kind: "official",
+			name: "官方账号",
+			is_active: !!state.status?.official_active,
+			logged_in: !!state.status?.official_logged_in,
+		},
+		...state.profiles.map((profile) => ({
+			...profile,
+			key: `profile:${profile.id}`,
+			kind: "profile",
+		})),
+	];
+	cards.forEach((card, index) => {
+		card.pinned = pinned.has(card.key);
+		card.position = position.has(card.key) ? position.get(card.key) : order.length + index;
+	});
+	cards.sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.position - b.position);
+	return cards;
 }
 
 function filteredProfiles() {
-  const q = (state.search || "").trim().toLowerCase();
-  if (!q) return state.profiles;
-  return state.profiles.filter((p) => (p.name || "").toLowerCase().includes(q));
+	const q = (state.search || "").trim().toLowerCase();
+	const cards = providerCards();
+	if (!q) return cards;
+	return cards.filter((p) => (p.name || "").toLowerCase().includes(q));
 }
 
 function applyLayoutUI() {
@@ -286,58 +317,146 @@ function hostOf(url) {
 function renderProfiles() {
   applyLayoutUI();
   $("profiles").innerHTML = "";
-  const list = filteredProfiles();
-  const emptyAll = !state.profiles.length;
+	const list = filteredProfiles();
+	const emptyAll = false;
   if ($("searchEmpty")) {
     $("searchEmpty").hidden = emptyAll || list.length > 0;
   }
   if (emptyAll) return;
 
-  list.forEach((profile) => {
-    const el = document.createElement("article");
-    el.className = `provider${profile.is_active ? " active" : ""}`;
-    el.innerHTML = `
-      <div class="providerTop">
-        <div>
-          <h3 class="providerName">${escapeHtml(profile.name)}</h3>
-          <p class="providerUrl">${escapeHtml(profile.base_url || hostOf(profile.base_url))}</p>
-          <p class="providerMeta">${escapeHtml(profile.default_model || "未设默认模型")} · ${formatUpstream(profile.upstream_format)} · ${profile.models?.length || 0} 模型</p>
-        </div>
-        ${profile.is_active ? '<span class="badge">当前启用</span>' : ""}
-      </div>
-      <div class="providerActions">
-        <button type="button" class="btn sm primary" data-action="enable">${profile.is_active ? "当前启用" : "启用"}</button>
-        <button type="button" class="btn sm" data-action="edit">编辑</button>
-        <button type="button" class="btn sm ghost" data-action="copy">复制</button>
-        <button type="button" class="btn sm ghost" data-action="export">导出</button>
-        <button type="button" class="btn sm danger" data-action="delete">删除</button>
-      </div>
-    `;
+	list.forEach((profile) => {
+		const el = document.createElement("article");
+		el.className = `provider${profile.is_active ? " active" : ""}${profile.pinned ? " pinned" : ""}`;
+		el.dataset.providerKey = profile.key;
+		el.dataset.pinned = profile.pinned ? "1" : "0";
+		const official = profile.kind === "official";
+		const meta = official
+			? `${profile.logged_in ? "已登录 grok.com" : "尚未登录"} · OAuth 官方模型`
+			: `${escapeHtml(profile.default_model || "未设默认模型")} · ${formatUpstream(profile.upstream_format)} · ${profile.models?.length || 0} 模型`;
+		el.innerHTML = `
+			<div class="providerTop">
+				<button type="button" class="dragHandle" draggable="true" data-action="drag" title="拖动排序" aria-label="拖动 ${escapeHtml(profile.name)} 排序">↕</button>
+				<div class="providerInfo">
+					<h3 class="providerName">${escapeHtml(profile.name)}</h3>
+					<p class="providerUrl">${official ? "grok.com / auth.json" : escapeHtml(profile.base_url || hostOf(profile.base_url))}</p>
+					<p class="providerMeta">${meta}</p>
+				</div>
+				<div class="providerFlags">
+					${profile.pinned ? '<span class="pinBadge">已置顶</span>' : ""}
+					${profile.is_active ? '<span class="badge">当前启用</span>' : ""}
+				</div>
+			</div>
+			<div class="providerActions">
+				<button type="button" class="btn sm primary" data-action="enable">${profile.is_active ? "当前启用" : "启用"}</button>
+				<button type="button" class="btn sm ghost" data-action="pin">${profile.pinned ? "取消置顶" : "置顶"}</button>
+				${official ? "" : '<button type="button" class="btn sm" data-action="edit">编辑</button><button type="button" class="btn sm ghost" data-action="copy">复制</button><button type="button" class="btn sm ghost" data-action="export">导出</button><button type="button" class="btn sm danger" data-action="delete">删除</button>'}
+			</div>
+		`;
 
     const enableBtn = el.querySelector('[data-action="enable"]');
     if (profile.is_active) {
       enableBtn.disabled = true;
       enableBtn.classList.add("current");
-    } else {
-      enableBtn.onclick = () => activateProfile(profile.id, enableBtn, profile.name);
-    }
+		} else {
+			enableBtn.onclick = () => official
+				? activateOfficial(enableBtn)
+				: activateProfile(profile.id, enableBtn, profile.name);
+		}
+		el.querySelector('[data-action="pin"]').onclick = () => toggleProviderPin(profile.key);
+		bindProviderDrag(el, profile.key);
 
-    el.querySelector('[data-action="edit"]').onclick = () => openEdit(profile);
-    el.querySelector('[data-action="copy"]').onclick = () => {
-      copyProfile(profile);
-      showView("edit");
-      $("name").focus();
-    };
-    el.querySelector('[data-action="export"]').onclick = () => exportProfile(profile);
-    el.querySelector('[data-action="delete"]').onclick = () => run(async () => {
-      if (!confirm(`删除「${profile.name}」？不可撤销。`)) return false;
-      await api(`/api/profiles/${profile.id}`, { method: "DELETE" });
-      await refreshAll();
-      showView("home");
-    }, { button: el.querySelector('[data-action="delete"]'), busyLabel: "删除中…", success: "已删除" });
+		if (!official) {
+			el.querySelector('[data-action="edit"]').onclick = () => openEdit(profile);
+			el.querySelector('[data-action="copy"]').onclick = () => {
+				copyProfile(profile);
+				showView("edit");
+				$("name").focus();
+			};
+			el.querySelector('[data-action="export"]').onclick = () => exportProfile(profile);
+			el.querySelector('[data-action="delete"]').onclick = () => run(async () => {
+				if (!confirm(`删除「${profile.name}」？不可撤销。`)) return false;
+				await api(`/api/profiles/${profile.id}`, { method: "DELETE" });
+				await refreshAll();
+				showView("home");
+			}, { button: el.querySelector('[data-action="delete"]'), busyLabel: "删除中…", success: "已删除" });
+		}
 
     $("profiles").appendChild(el);
   });
+}
+
+async function saveProviderLayout(order, pinned) {
+	const next = {
+		...(state.settings || {}),
+		provider_order: order,
+		pinned_provider_ids: pinned,
+	};
+	state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(next) });
+}
+
+async function toggleProviderPin(key) {
+	await run(async () => {
+		const cards = providerCards();
+		const pinned = new Set(state.settings?.pinned_provider_ids || []);
+		if (pinned.has(key)) pinned.delete(key); else pinned.add(key);
+		await saveProviderLayout(cards.map((card) => card.key), [...pinned]);
+		renderProfiles();
+	}, { success: "卡片顺序已保存" });
+}
+
+function bindProviderDrag(card, key) {
+	const handle = card.querySelector('[data-action="drag"]');
+	handle.addEventListener("dragstart", (event) => {
+		state.draggedProviderKey = key;
+		card.classList.add("dragging");
+		event.dataTransfer.effectAllowed = "move";
+		event.dataTransfer.setData("text/plain", key);
+	});
+	handle.addEventListener("dragend", () => {
+		state.draggedProviderKey = "";
+		card.classList.remove("dragging");
+		document.querySelectorAll(".provider.dragOver").forEach((item) => item.classList.remove("dragOver"));
+	});
+	card.addEventListener("dragover", (event) => {
+		const source = document.querySelector(`[data-provider-key="${CSS.escape(state.draggedProviderKey)}"]`);
+		if (!source || source === card || source.dataset.pinned !== card.dataset.pinned) return;
+		event.preventDefault();
+		card.classList.add("dragOver");
+	});
+	card.addEventListener("dragleave", () => card.classList.remove("dragOver"));
+	card.addEventListener("drop", (event) => {
+		event.preventDefault();
+		card.classList.remove("dragOver");
+		reorderProviderCards(state.draggedProviderKey, key);
+	});
+}
+
+async function reorderProviderCards(sourceKey, targetKey) {
+	if (!sourceKey || sourceKey === targetKey) return;
+	await run(async () => {
+		const cards = providerCards();
+		const order = cards.map((card) => card.key);
+		const sourceIndex = order.indexOf(sourceKey);
+		const targetIndex = order.indexOf(targetKey);
+		if (sourceIndex < 0 || targetIndex < 0) return false;
+		order.splice(sourceIndex, 1);
+		order.splice(targetIndex, 0, sourceKey);
+		await saveProviderLayout(order, state.settings?.pinned_provider_ids || []);
+		renderProfiles();
+	}, { success: "卡片顺序已保存" });
+}
+
+async function activateOfficial(button) {
+	await run(async () => {
+		const result = await api("/api/official/activate", { method: "POST" });
+		await refreshAll();
+		showView("home");
+		if (result.login_required) toast("请在浏览器完成官方账号登录", "success");
+	}, {
+		button,
+		busyLabel: "切换中…",
+		success: "已切换到官方账号。新开 grok 会话生效。",
+	});
 }
 
 async function activateProfile(id, button, name) {
@@ -976,6 +1095,14 @@ $("importProfileFile").onchange = async (event) => {
   }
 };
 $("importBtn").onclick = () => importCurrentConfig($("importBtn"));
+$("privacyProtectBtn").onclick = () => run(async () => {
+	await api("/api/config/privacy", { method: "POST" });
+	if ($("configPreviewBlock")?.open) await refreshProviderConfigPreview();
+}, {
+	button: $("privacyProtectBtn"),
+	busyLabel: "应用中…",
+	success: "隐私保护配置已写入 config.toml",
+});
 $("toggleAdvancedBtn").onclick = () => {
   state.showAdvanced = !state.showAdvanced;
   syncAdvancedUI();

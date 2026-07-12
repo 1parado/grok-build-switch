@@ -245,6 +245,19 @@ body {
   transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
+.provider.dragging {
+  opacity: 0.5;
+}
+
+.provider.dragOver {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+
+.provider.pinned {
+  border-top-color: var(--primary-border);
+}
+
 .providerGrid[data-layout="list"] .provider {
   flex-direction: row;
   align-items: center;
@@ -292,6 +305,55 @@ body {
   gap: 10px;
 }
 
+.providerInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.providerFlags {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dragHandle {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: grab;
+  font: 16px/1 var(--font);
+}
+
+.dragHandle:hover,
+.dragHandle:focus-visible {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--line);
+  outline: none;
+}
+
+.dragHandle:active {
+  cursor: grabbing;
+}
+
+.pinBadge {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--surface-2);
+}
+
 .providerName {
   margin: 0;
   font-size: 15px;
@@ -330,6 +392,17 @@ body {
   gap: 8px;
   margin-top: auto;
   padding-top: 4px;
+}
+
+@media (max-width: 719px) {
+  .providerGrid[data-layout="list"] .provider {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .providerFlags {
+    max-width: 42%;
+  }
 }
 
 .searchEmpty {

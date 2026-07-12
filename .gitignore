@@ -4,6 +4,7 @@ grok_switch.exe
 *.syso
 *.test
 *.out
+site/
 
 # Go
 bin/

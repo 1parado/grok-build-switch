@@ -1,0 +1,46 @@
+site_name: grok_switch
+site_description: 用供应商 Profile 管理 Grok CLI 配置的本地托盘工具
+site_url: https://1parado.github.io/grok-build-switch/
+
+repo_name: 1parado/grok-build-switch
+repo_url: https://github.com/1parado/grok-build-switch
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: teal
+      accent: deep orange
+
+nav:
+  - 首页: index.md
+  - 使用教程: usage.md
+  - 博客: blog/index.md
+  - 联系方式: contact.md
+
+plugins:
+  - search
+  - blog:
+      blog_dir: blog
+      post_dir: "{blog}/posts"
+      post_date_format: full
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+extra_css:
+  - assets/stylesheets/extra.css

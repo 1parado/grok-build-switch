@@ -1,0 +1,8 @@
+:root {
+  --md-primary-fg-color: #087f8c;
+  --md-accent-fg-color: #e4572e;
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+}

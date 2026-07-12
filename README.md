@@ -24,6 +24,12 @@
 
 ## 安装与使用
 
+### 在线文档
+
+使用教程、截图说明和联系方式会整理在项目文档站：
+
+[https://1parado.github.io/grok-build-switch/](https://1parado.github.io/grok-build-switch/)
+
 ### 方式一：从 Release 下载（推荐）
 
 1. 打开本仓库的 [Releases](../../releases) 页面
@@ -102,6 +108,16 @@ go test ./...
 go run . -no-tray   # 仅 HTTP，无托盘（调试用）
 ```
 
+### 文档站本地预览
+
+文档站使用 MkDocs Material，内容位于 `docs/`：
+
+```powershell
+uvx --with mkdocs-material mkdocs serve
+```
+
+打开终端输出的本地地址即可预览。提交到 `main` 后，GitHub Actions 会自动发布到 GitHub Pages。
+
 主要目录：
 
 ```
@@ -109,6 +125,7 @@ main.go           # 入口
 internal/         # 配置读写、供应商、HTTP、托盘
 ui/               # Web 前端（嵌入 exe）
 assets/           # 图标
+docs/             # MkDocs 文档站
 ```
 
 ## License

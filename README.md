@@ -128,6 +128,10 @@ assets/           # 图标
 docs/             # MkDocs 文档站
 ```
 
+##
+
+[使用教程](https://1parado.github.io/grok-build-switch/)
+
 ## License
 
 [MIT](./LICENSE)

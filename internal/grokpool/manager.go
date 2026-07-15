@@ -467,8 +467,16 @@ func (m *Manager) Transport() http.RoundTripper {
 	return m.transport
 }
 
-func clientForTransport(transport http.RoundTripper) *http.Client {
-	return &http.Client{Transport: transport, Timeout: 25 * time.Second}
+// clientForTransport builds an HTTP client for pool probes.
+// A nil *http.Transport must stay a true nil RoundTripper: assigning a typed-nil
+// *http.Transport into Client.Transport makes net/http treat Transport as set and
+// panic on request (nil pointer in alternateRoundTripper) when no proxy is configured.
+func clientForTransport(transport *http.Transport) *http.Client {
+	client := &http.Client{Timeout: 25 * time.Second}
+	if transport != nil {
+		client.Transport = transport
+	}
+	return client
 }
 
 func credentialID(credential grokauth.Credential) string {

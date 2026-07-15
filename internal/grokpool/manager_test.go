@@ -284,6 +284,35 @@ func TestInspectionUsesConfiguredHTTPProxy(t *testing.T) {
 	}
 }
 
+func TestClientForTransportNilDoesNotInstallTypedNil(t *testing.T) {
+	client := clientForTransport(nil)
+	if client.Transport != nil {
+		t.Fatalf("nil *http.Transport must leave Client.Transport unset, got %#v", client.Transport)
+	}
+
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.client == nil || manager.client.Transport != nil {
+		t.Fatalf("empty proxy should use default transport path, client=%#v", manager.client)
+	}
+	if manager.Transport() != nil {
+		t.Fatal("Manager.Transport() should stay nil when no proxy is configured")
+	}
+
+	// A typed-nil RoundTripper panics inside net/http; a true-nil Transport does not.
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := manager.client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected connection error, not success")
+	}
+}
+
 func TestEnsureMigratesMissingCredentialWithoutResettingExistingResult(t *testing.T) {
 	manager, err := NewManager(t.TempDir())
 	if err != nil {

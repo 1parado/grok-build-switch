@@ -1011,8 +1011,16 @@ function syncAdvancedUI() {
   $("toggleAdvancedBtn").textContent = state.showAdvanced ? "收起高级" : "高级字段";
 }
 
+function syncModelBaseURLs() {
+  const baseURL = $("baseUrl")?.value.trim() || "";
+  $("modelsBody")?.querySelectorAll('[data-field="base_url"]').forEach((input) => {
+    input.value = baseURL;
+  });
+}
+
 function addModelCard(model = {}) {
   const backend = model.api_backend || apiBackendFor($("upstreamFormat").value);
+  const modelBaseURL = model.base_url || $("baseUrl")?.value.trim() || "";
   const card = document.createElement("div");
   card.className = "modelCard";
   card.innerHTML = `
@@ -1032,7 +1040,7 @@ function addModelCard(model = {}) {
         <input data-field="model" class="mono" value="${escapeAttr(model.model || "")}" placeholder="上游模型 ID">
       </label>
       <label class="field advancedOnly">Base URL
-        <input data-field="base_url" class="mono" value="${escapeAttr(model.base_url || "")}" placeholder="空=供应商地址">
+        <input data-field="base_url" class="mono" value="${escapeAttr(modelBaseURL)}" placeholder="与供应商服务地址保持一致">
       </label>
       <label class="field advancedOnly">API Backend
         <select data-field="api_backend" class="mono">
@@ -1263,6 +1271,10 @@ if ($("configPreviewBlock")) {
   if (!el) return;
   el.addEventListener("input", scheduleProviderPreview);
   el.addEventListener("change", scheduleProviderPreview);
+  if (id === "baseUrl") {
+    el.addEventListener("input", syncModelBaseURLs);
+    el.addEventListener("change", syncModelBaseURLs);
+  }
 });
 
 if ($("providerSearch")) {

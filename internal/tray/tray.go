@@ -65,14 +65,26 @@ func (t *Tray) Refresh() {
 }
 
 func (t *Tray) onReady() {
-	if icon, err := t.Assets.ReadFile("assets/icon.ico"); err == nil {
-		systray.SetIcon(icon)
-	} else {
-		systray.SetIcon(iconData)
-	}
+	systray.SetIcon(t.icon())
 	systray.SetTitle("grok_switch")
 	t.rebuild()
 	go t.loop()
+}
+
+func (t *Tray) icon() []byte {
+	if runtime.GOOS == "windows" {
+		if icon, err := t.Assets.ReadFile("assets/icon.ico"); err == nil {
+			return icon
+		}
+		return iconData
+	}
+	if icon, err := t.Assets.ReadFile("assets/icon.png"); err == nil {
+		return icon
+	}
+	if icon, err := t.Assets.ReadFile("icon.svg"); err == nil {
+		return icon
+	}
+	return iconData
 }
 
 func (t *Tray) onExit() {
@@ -140,7 +152,7 @@ func (t *Tray) buildMenu(stop <-chan struct{}) {
 	systray.SetTooltip(tip)
 	currentLabel := "当前：" + activeName
 	if drifted {
-		currentLabel += " ⚠"
+		currentLabel += "（配置不一致）"
 	}
 	current := systray.AddMenuItem(currentLabel, "")
 	current.Disable()
@@ -148,7 +160,7 @@ func (t *Tray) buildMenu(stop <-chan struct{}) {
 	providers := systray.AddMenuItem("供应商", "选择供应商 Profile")
 	officialLabel := "官方账号登录"
 	if activeID == "" && err == nil {
-		officialLabel = "✓ " + officialLabel
+		officialLabel = "当前：" + officialLabel
 	}
 	official := providers.AddSubMenuItem(officialLabel, "使用 grok login 的官方账号凭据")
 	t.watch(stop, official, "activate:official", func() {
@@ -178,7 +190,7 @@ func (t *Tray) buildMenu(stop <-chan struct{}) {
 			for _, profile := range list {
 				label := profile.Name
 				if profile.IsActive {
-					label = "✓ " + label
+					label = "当前：" + label
 				}
 				item := providers.AddSubMenuItem(label, profile.BaseURL)
 				p := profile
@@ -251,7 +263,7 @@ func (t *Tray) buildMenu(stop <-chan struct{}) {
 	currentSettings, _ := t.Settings.Get()
 	autoLabel := "开机自启"
 	if currentSettings.Autostart {
-		autoLabel = "✓ " + autoLabel
+		autoLabel = "开机自启：已开启"
 	}
 	auto := systray.AddMenuItem(autoLabel, "")
 	t.watch(stop, auto, "autostart", func() {

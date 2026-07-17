@@ -27,7 +27,7 @@ import (
 	"grok_switch/internal/tray"
 )
 
-//go:embed ui/index.html ui/app.js ui/style.css icon.svg assets/icon.ico
+//go:embed ui/index.html ui/app.js ui/style.css icon.svg assets/icon.ico assets/icon.png
 var assets embed.FS
 
 func main() {

@@ -1,6 +1,6 @@
 module grok_switch
 
-go 1.26
+go 1.21.0
 
 require (
 	fyne.io/systray v1.11.0

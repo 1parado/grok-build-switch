@@ -1,6 +1,7 @@
 package grokauth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -110,7 +111,7 @@ func TestRefreshUpdatesCredentialAndUsesExpectedForm(t *testing.T) {
 	if _, err := store.Import([]byte(raw)); err != nil {
 		t.Fatalf("Import() error = %v", err)
 	}
-	status, err := store.Refresh(t.Context())
+	status, err := store.Refresh(context.Background())
 	if err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}

@@ -14,8 +14,8 @@
 - 导入 CPA `xai-*.json` 或 Grok CLI `auth.json`，由内嵌代理提供稳定的本地 URL/key 并自动刷新 token
 - Grok 多账号池：批量导入、定时自动巡检、健康分类、坏号自动隔离、健康号轮换与单账号回退
 - Web UI 仅监听 `127.0.0.1`（默认端口 `17878`，被占用时自动递增）
-- 可设置Windows 开机自启
-- Windows 单实例运行；再次双击 EXE 会打开已运行实例的管理页面
+- 可设置 Windows / Linux 开机自启
+- Windows / Linux 单实例运行；再次启动会打开已运行实例的管理页面
 - 启动失败时显示原生错误对话框，并尽可能写入诊断日志
 - 托盘菜单：快速切换、打开面板、复制地址、打开数据/日志目录
 
@@ -23,9 +23,10 @@
 
 | 项目 | 说明 |
 |------|------|
-| 系统 | **Windows 10 / 11 x64**（当前主要支持） |
-| 运行 | 双击 `grok_switch.exe` 即可，**无需**安装 Go / Node |
-| 可选 | 本机已安装 [Grok CLI](https://x.ai)，配置目录默认为 `%USERPROFILE%\.grok` |
+| 系统 | **Windows 10 / 11 x64**、Linux x64 桌面环境 |
+| 运行 | Windows 双击 `grok_switch.exe`；Linux 运行 `grok_switch`，**无需**安装 Go / Node |
+| 可选 | 本机已安装 [Grok CLI](https://x.ai)，配置目录默认为 `~/.grok` |
+| Linux 桌面 | 需要桌面环境支持系统托盘；建议安装 `xdg-open`、`notify-send`、`xclip` 或 `xsel` |
 
 ## 安装与使用
 
@@ -38,10 +39,10 @@
 ### 方式一：从 Release 下载（推荐）
 
 1. 打开本仓库的 [Releases](../../releases) 页面
-2. 下载 `grok_switch.exe`（或压缩包内的 exe）
-3. 放到任意目录，双击运行
+2. Windows 下载 `grok_switch.exe`（或压缩包内的 exe）；Linux 下载 `grok_switch`
+3. 放到任意目录，Windows 双击运行，Linux 赋予执行权限后运行
 4. 托盘出现图标；浏览器会打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
-5. 再次双击 EXE 不会启动第二个后台实例，而是打开已经运行的管理页面
+5. 再次启动不会创建第二个后台实例，而是打开已经运行的管理页面
 
 普通用户只需下载并运行，**不需要**配置证书、签名密码、Go 或 Node。发布流程会在
 仓库配置了代码签名证书时自动签名；未配置证书的版本仍可直接运行，但 Windows 可能显示
@@ -83,14 +84,14 @@ SmartScreen 提示。下方签名配置仅供项目发布维护者使用。
 
 | 路径 | 内容 |
 |------|------|
-| `%USERPROFILE%\.grok\config.toml` | Grok CLI **当前生效**配置 |
-| `%USERPROFILE%\.grok_switch\profiles.json` | 供应商档案（**含 API Key 明文**） |
-| `%USERPROFILE%\.grok_switch\backups\` | config 自动备份（**含 Key**） |
-| `%USERPROFILE%\.grok_switch\settings.json` | 本工具设置 |
-| `%USERPROFILE%\.grok_switch\grok_auth.json` | 单账号 xAI OAuth 凭据与本地代理 key（**敏感**） |
-| `%USERPROFILE%\.grok_switch\grok_pool\pool.json` | 号池展示状态与巡检/代理设置（不含 token；代理 URL 可能包含认证信息） |
-| `%USERPROFILE%\.grok_switch\grok_pool\accounts\` | 号池各账号 OAuth 凭据副本（**敏感**） |
-| `%USERPROFILE%\.grok_switch\grok_switch.log` | 日志 |
+| Windows `%USERPROFILE%\.grok\config.toml` / Linux `~/.grok/config.toml` | Grok CLI **当前生效**配置 |
+| Windows `%USERPROFILE%\.grok_switch\profiles.json` / Linux `~/.grok_switch/profiles.json` | 供应商档案（**含 API Key 明文**） |
+| Windows `%USERPROFILE%\.grok_switch\backups\` / Linux `~/.grok_switch/backups/` | config 自动备份（**含 Key**） |
+| Windows `%USERPROFILE%\.grok_switch\settings.json` / Linux `~/.grok_switch/settings.json` | 本工具设置 |
+| Windows `%USERPROFILE%\.grok_switch\grok_auth.json` / Linux `~/.grok_switch/grok_auth.json` | 单账号 xAI OAuth 凭据与本地代理 key（**敏感**） |
+| Windows `%USERPROFILE%\.grok_switch\grok_pool\pool.json` / Linux `~/.grok_switch/grok_pool/pool.json` | 号池展示状态与巡检/代理设置（不含 token；代理 URL 可能包含认证信息） |
+| Windows `%USERPROFILE%\.grok_switch\grok_pool\accounts\` / Linux `~/.grok_switch/grok_pool/accounts/` | 号池各账号 OAuth 凭据副本（**敏感**） |
+| Windows `%USERPROFILE%\.grok_switch\grok_switch.log` / Linux `~/.grok_switch/grok_switch.log` | 日志 |
 
 如果持久化 JSON 因断电、手动编辑或同步软件冲突而损坏，程序会先将原文件重命名为
 `<文件名>.corrupt-<时间>.bak`，再恢复安全默认值。恢复过程会写入 `grok_switch.log`，
@@ -100,8 +101,8 @@ SmartScreen 提示。下方签名配置仅供项目发布维护者使用。
 
 ### 环境
 
-- [Go](https://go.dev/dl/) **1.26+**（与 `go.mod` 保持一致）
-- Windows x64
+- [Go](https://go.dev/dl/) **1.21+**（与 `go.mod` 保持一致）
+- Windows x64 或 Linux x64
 - 可选：`rsrc`（嵌入 exe 图标）、ImageMagick `magick`（从 svg 生成 ico）
 
 ```powershell
@@ -109,13 +110,29 @@ SmartScreen 提示。下方签名配置仅供项目发布维护者使用。
 go install github.com/akavel/rsrc@latest
 ```
 
-### 一键构建
+### Windows 一键构建
 
 ```powershell
 .\build.ps1
 ```
 
 会运行测试并生成 `grok_switch.exe`。
+
+### Linux 一键构建
+
+```bash
+./build-linux.sh
+```
+
+会运行测试并生成 `dist/linux/grok_switch` 与 `dist/linux/grok_switch.sha256`。
+
+### Debian 安装包构建
+
+```bash
+./build-deb.sh
+```
+
+会运行 Linux 构建并生成 `dist/grok-switch_<version>_amd64.deb`，安装后会写入应用菜单入口与 hicolor 图标。
 
 以下内容只适用于从源码构建或发布 Release 的维护者，Release 下载用户无需操作。
 
@@ -144,7 +161,7 @@ $env:GROK_SWITCH_SIGN_THUMBPRINT = "<certificate-thumbprint>"
 
 证书私钥和密码不得提交到仓库。
 
-### 手动构建
+### Windows 手动构建
 
 ```powershell
 go test ./...
@@ -154,12 +171,27 @@ go build -ldflags "-s -w -H windowsgui" -o grok_switch.exe .
 - `-H windowsgui`：无控制台黑窗
 - `-s -w`：减小体积
 
+### Linux 手动构建
+
+```bash
+go test ./...
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/linux/grok_switch .
+```
+
 
 ## 开发
 
 ```powershell
 go test ./...
 go run . -no-tray   # 仅 HTTP，无托盘（调试用）
+```
+
+Linux 桌面调试：
+
+```bash
+go test ./...
+go run .            # 启动托盘与 Web 管理界面
+go run . -no-tray   # 仅 HTTP，无托盘
 ```
 
 ### 文档站本地预览

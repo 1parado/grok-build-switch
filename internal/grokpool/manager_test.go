@@ -1,6 +1,7 @@
 package grokpool
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,7 +116,7 @@ func TestAutomaticInspectionClassifiesAndRoutesOnlyAvailableAccount(t *testing.T
 	if status.Summary.Available != 1 || status.Summary.Quota != 1 {
 		t.Fatalf("summary = %#v", status.Summary)
 	}
-	token, _, err := manager.NextToken(t.Context(), "conversation-1")
+	token, _, err := manager.NextToken(context.Background(), "conversation-1")
 	if err != nil || token != "healthy-token" {
 		t.Fatalf("NextToken() = %q, %v", token, err)
 	}

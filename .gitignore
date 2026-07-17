@@ -5,6 +5,7 @@ grok_switch.exe
 *.test
 *.out
 grok_switch.exe.sha256
+dist/
 site/
 
 # Code-signing private keys must never be committed

@@ -13,7 +13,7 @@ site/
 
 # Go
 bin/
-vendor/
+/vendor/
 
 # IDE / local agent
 .claude/
@@ -39,3 +39,4 @@ Desktop.ini
 *.log
 *.tmp
 *.temp
+/docs/design/chat-agent-integration.md

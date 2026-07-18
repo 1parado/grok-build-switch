@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -28,21 +29,30 @@ import (
 	"grok_switch/internal/grokpool"
 	"grok_switch/internal/paths"
 	"grok_switch/internal/profiles"
+	"grok_switch/internal/remoteaccess"
 	"grok_switch/internal/settings"
 	"grok_switch/internal/switcher"
 )
 
 type Server struct {
-	Paths      paths.Paths
-	Profiles   *profiles.Store
-	Settings   *settings.Store
-	GrokAuth   *grokauth.Store
-	GrokPool   *grokpool.Manager
-	Switcher   *switcher.Switcher
-	Assets     embed.FS
-	ExePath    string
-	ActualPort int
-	onChanged  func()
+	Paths        paths.Paths
+	Profiles     *profiles.Store
+	Settings     *settings.Store
+	RemoteAccess *remoteaccess.Store
+	GrokAuth     *grokauth.Store
+	GrokPool     *grokpool.Manager
+	Switcher     *switcher.Switcher
+	Agent        AgentService
+	Assets       embed.FS
+	ExePath      string
+	ActualPort   int
+	onChanged    func()
+	listenerMu   sync.Mutex
+	listener     net.Listener
+	bindHost     string
+	httpServer   *http.Server
+	loginMu      sync.Mutex
+	loginFails   map[string]loginFailure
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -58,15 +68,23 @@ func (s *Server) Listen(preferred int) (*http.Server, int, error) {
 	var listener net.Listener
 	var err error
 	port := preferred
+	currentSettings := settings.Default()
+	if s.Settings != nil {
+		currentSettings, err = s.Settings.Get()
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	bindHost := s.bindHostFor(currentSettings.LANAccessEnabled)
 	for i := 0; i < 20 && port <= settings.MaxPort; i++ {
-		listener, err = net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+		listener, err = net.Listen("tcp", bindHost+":"+strconv.Itoa(port))
 		if err == nil {
 			break
 		}
 		port++
 	}
 	if listener == nil {
-		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		listener, err = net.Listen("tcp", bindHost+":0")
 		if err == nil {
 			if tcpAddr, ok := listener.Addr().(*net.TCPAddr); ok {
 				port = tcpAddr.Port
@@ -80,20 +98,61 @@ func (s *Server) Listen(preferred int) (*http.Server, int, error) {
 	if err := s.ensureGrokAuthProfile(); err != nil {
 		fmt.Fprintf(os.Stderr, "grok auth profile: %v\n", err)
 	}
-	if err := s.Settings.SetActualPort(port); err != nil {
-		listener.Close()
-		return nil, 0, err
+	if s.Settings != nil {
+		if err := s.Settings.SetActualPort(port); err != nil {
+			listener.Close()
+			return nil, 0, err
+		}
 	}
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           s.withAccess(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	s.listenerMu.Lock()
+	s.listener = listener
+	s.bindHost = bindHost
+	s.httpServer = srv
+	s.listenerMu.Unlock()
 	go func() {
-		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			fmt.Fprintf(os.Stderr, "http server: %v\n", err)
 		}
 	}()
 	return srv, port, nil
+}
+
+func (s *Server) reconfigureLANAccess(enabled bool) error {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	desired := s.bindHostFor(enabled)
+	if s.listener == nil || s.bindHost == desired {
+		return nil
+	}
+	oldListener := s.listener
+	oldHost := s.bindHost
+	_ = oldListener.Close()
+	listener, err := net.Listen("tcp", net.JoinHostPort(desired, strconv.Itoa(s.ActualPort)))
+	if err != nil {
+		restored, restoreErr := net.Listen("tcp", net.JoinHostPort(oldHost, strconv.Itoa(s.ActualPort)))
+		if restoreErr == nil {
+			s.listener = restored
+			go s.serveListenerLocked(restored)
+		}
+		return err
+	}
+	s.listener = listener
+	s.bindHost = desired
+	go s.serveListenerLocked(listener)
+	return nil
+}
+
+func (s *Server) serveListenerLocked(listener net.Listener) {
+	if s.httpServer == nil {
+		return
+	}
+	if err := s.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+		fmt.Fprintf(os.Stderr, "http server reconfigure: %v\n", err)
+	}
 }
 
 func (s *Server) Shutdown(ctx context.Context, srv *http.Server) error {
@@ -101,6 +160,8 @@ func (s *Server) Shutdown(ctx context.Context, srv *http.Server) error {
 }
 
 func (s *Server) routes(mux *http.ServeMux) {
+	mux.HandleFunc("/pair", s.handlePair)
+	mux.HandleFunc("/api/lan-access", s.handleLANAccess)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
 	mux.HandleFunc("/api/profiles/", s.handleProfileByID)
@@ -120,9 +181,24 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grok-pool/inspect", s.handleGrokPoolInspect)
 	mux.HandleFunc("/api/grok-pool/bulk", s.handleGrokPoolBulk)
 	mux.HandleFunc("/api/grok-pool/accounts/", s.handleGrokPoolAccount)
+	mux.HandleFunc("/api/agent/status", s.handleAgentStatus)
+	mux.HandleFunc("/api/agent/start", s.handleAgentStart)
+	mux.HandleFunc("/api/agent/stop", s.handleAgentStop)
+	mux.HandleFunc("/api/agent/session", s.handleAgentSession)
+	mux.HandleFunc("/api/agent/session/load", s.handleAgentSessionLoad)
+	mux.HandleFunc("/api/agent/sessions", s.handleAgentSessions)
+	mux.HandleFunc("/api/agent/sessions/", s.handleAgentSessionHistory)
+	mux.HandleFunc("/api/agent/ws", s.handleAgentWebSocket)
 	mux.HandleFunc("/grok/v1", s.handleGrokProxy)
 	mux.HandleFunc("/grok/v1/", s.handleGrokProxy)
 	mux.HandleFunc("/", s.handleStatic)
+}
+
+func (s *Server) bindHostFor(enabled bool) string {
+	if enabled {
+		return "0.0.0.0"
+	}
+	return "127.0.0.1"
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -333,10 +409,24 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, current)
 	case http.MethodPut:
+		current, currentErr := s.Settings.Get()
+		if currentErr != nil {
+			writeError(w, currentErr, http.StatusInternalServerError)
+			return
+		}
 		var next settings.Settings
 		if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
 			writeError(w, err, http.StatusBadRequest)
 			return
+		}
+		if !isLoopbackRequest(r) {
+			next.LANAccessEnabled = current.LANAccessEnabled
+		}
+		if current.LANAccessEnabled && !next.LANAccessEnabled && s.RemoteAccess != nil {
+			if err := s.RemoteAccess.ResetSessions(); err != nil {
+				writeError(w, fmt.Errorf("撤销局域网会话失败: %w", err), http.StatusInternalServerError)
+				return
+			}
 		}
 		updated, err := s.Settings.Update(next)
 		if err != nil {
@@ -345,6 +435,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				status = http.StatusBadRequest
 			}
 			writeError(w, err, status)
+			return
+		}
+		if err := s.reconfigureLANAccess(updated.LANAccessEnabled); err != nil {
+			current.LANAccessEnabled = !updated.LANAccessEnabled
+			_, _ = s.Settings.Update(current)
+			writeError(w, fmt.Errorf("切换局域网监听失败: %w", err), http.StatusInternalServerError)
 			return
 		}
 		if err := autostart.Sync(updated.Autostart, s.ExePath, updated.SilentAutostart); err != nil {

@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>grok_switch</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
+  <link rel="stylesheet" href="/style.css?v=27">
 </head>
 <body>
   <div class="shell">
@@ -21,6 +23,7 @@
         </div>
       </div>
       <div class="headerRight">
+        <button type="button" id="chatBtn" class="btn" data-home-only>聊天</button>
         <button type="button" id="addBtn" class="btn primary" data-home-only>添加供应商</button>
         <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
         <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
@@ -195,6 +198,122 @@
       </form>
     </main>
 
+    <!-- CHAT -->
+    <main id="viewChat" class="view chatView" hidden>
+      <section class="nativeChatShell" aria-label="Grok Build AI 工作台">
+        <aside id="sessionSidebar" class="sessionSidebar" aria-label="历史会话">
+          <div class="nativePaneHead">
+            <div>
+              <span class="nativeEyebrow">GROK VAULT</span>
+              <strong>对话库</strong>
+            </div>
+            <button type="button" id="closeSessionSidebarBtn" class="nativeIconBtn" aria-label="隐藏会话列表">×</button>
+          </div>
+          <button type="button" id="agentNewSessionBtn" class="newChatBtn">新对话</button>
+          <label class="sessionSearchWrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="agentSessionSearch" type="search" placeholder="搜索对话、目录、模型" autocomplete="off">
+          </label>
+          <div class="sessionSectionLabel"><span>最近</span><span id="agentSessionCount">0</span></div>
+          <div id="agentSessionList" class="agentSessionList">
+            <p class="sessionListEmpty">正在读取会话…</p>
+          </div>
+        </aside>
+
+        <div id="sessionSidebarResizer" class="panelResizer sessionResizer" role="separator"
+          aria-label="调整会话列表宽度" aria-orientation="vertical" aria-valuemin="200"
+          aria-valuemax="480" aria-valuenow="264" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
+
+        <section class="conversationPane">
+          <header class="conversationTopbar">
+            <button type="button" id="openSessionSidebarBtn" class="nativeIconBtn" aria-label="切换会话列表">☰</button>
+            <div class="conversationIdentity">
+              <strong id="activeChatTitle">新对话</strong>
+              <span id="activeChatPath">尚未选择工作目录</span>
+            </div>
+            <div class="conversationSignals">
+              <span id="agentModelBadge" class="modelBadge">MODEL —</span>
+              <span id="agentStatusBadge" class="agentStatusBadge" data-state="idle">
+                <span class="statusDot" aria-hidden="true"></span>
+                <span id="agentStatusText">未启动</span>
+              </span>
+              <button type="button" id="openContextRailBtn" class="nativeIconBtn railToggle" aria-label="打开会话信息">···</button>
+            </div>
+          </header>
+
+          <div id="chatMessages" class="chatMessages" role="log" aria-live="polite">
+            <div id="chatEmpty" class="chatEmpty">
+              <span class="chatEmptyMark">G</span>
+              <strong>从一个问题开始</strong>
+              <span>Markdown、代码、表格与 Mermaid 图表将在这里原生呈现</span>
+            </div>
+          </div>
+
+          <div id="permissionBar" class="permissionBar" hidden>
+            <div class="permissionCopy">
+              <span class="permissionLabel">工具权限</span>
+              <strong id="permissionSummary">等待确认</strong>
+              <code id="permissionDetail"></code>
+            </div>
+            <div class="permissionActions">
+              <button type="button" id="permissionRejectBtn" class="btn danger">拒绝</button>
+              <button type="button" id="permissionAllowBtn" class="btn primary">允许一次</button>
+            </div>
+          </div>
+
+          <form id="chatComposer" class="chatComposer">
+            <div class="composerInputWrap">
+              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…" aria-label="消息" disabled></textarea>
+              <span class="composerHint">Enter 发送 · Shift + Enter 换行</span>
+            </div>
+            <button type="submit" id="chatSendBtn" class="sendChatBtn" aria-label="发送" disabled>↑</button>
+          </form>
+        </section>
+
+        <div id="contextRailResizer" class="panelResizer contextResizer" role="separator"
+          aria-label="调整会话信息宽度" aria-orientation="vertical" aria-valuemin="220"
+          aria-valuemax="460" aria-valuenow="252" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
+
+        <aside id="contextRail" class="contextRail" aria-label="会话信息">
+          <div class="nativePaneHead">
+            <div>
+              <span class="nativeEyebrow">CONTEXT</span>
+              <strong>会话信息</strong>
+            </div>
+            <button type="button" id="closeContextRailBtn" class="nativeIconBtn railClose" aria-label="关闭会话信息">×</button>
+          </div>
+
+          <div class="contextSection">
+            <span class="contextLabel">当前模型</span>
+            <strong id="contextModel">—</strong>
+          </div>
+          <div class="contextSection">
+            <span class="contextLabel">工作目录</span>
+            <label class="field chatCwdField">
+              <input id="agentCwd" class="mono" autocomplete="off" placeholder="E:\\projects\\my-app">
+            </label>
+          </div>
+          <div class="contextSection">
+            <span class="contextLabel">会话 ID</span>
+            <code id="contextSessionId">—</code>
+          </div>
+          <label class="check autoApproveCheck" title="自动允许 Grok Build 执行工具">
+            <input type="checkbox" id="agentAlwaysApprove"> 自动批准工具
+          </label>
+          <div class="contextActions">
+            <button type="button" id="agentStartBtn" class="btn primary">启动 Agent</button>
+            <button type="button" id="agentStopBtn" class="btn danger" disabled>停止</button>
+          </div>
+
+          <div class="contextSection activitySection">
+            <div class="contextSectionHead"><span class="contextLabel">本轮活动</span><span id="toolActivityCount">0</span></div>
+            <div id="toolActivityList" class="toolActivityList"><span>暂无工具活动</span></div>
+          </div>
+        </aside>
+      </section>
+      <div id="nativeChatScrim" class="nativeChatScrim" hidden></div>
+    </main>
+
     <!-- SETTINGS -->
     <main id="viewSettings" class="view" hidden>
       <div class="pageHead">
@@ -206,12 +325,63 @@
         <label class="check"><input type="checkbox" id="autostart"> 开机自启</label>
         <label class="check"><input type="checkbox" id="silentAutostart"> 自启时静默</label>
         <label class="check"><input type="checkbox" id="autoOpenBrowser"> 启动时打开面板</label>
+        <label class="check"><input type="checkbox" id="lanAccessEnabled"> 允许同一局域网的手机访问</label>
+        <p class="muted tiny settingsHint">关闭后会立即注销所有已配对手机。</p>
         <label class="field">端口
           <input id="port" type="number" min="1024" max="65535">
         </label>
         <p id="portHint" class="muted tiny" hidden></p>
         <button type="submit" id="saveSettingsBtn" class="btn primary">保存设置</button>
       </form>
+
+      <section class="formCard lanAccessCard" id="lanAccessCard">
+        <div class="rowBetween">
+          <div>
+            <h2 class="sectionTitle">手机连接</h2>
+            <p class="muted tiny">手机与电脑连接同一网络后，扫描二维码打开供应商管理页面。</p>
+          </div>
+          <span id="lanAccessBadge" class="badge">未开启</span>
+        </div>
+
+        <div id="lanAccessDisabled" class="lanAccessEmpty">
+          <strong>仅允许本机访问</strong>
+          <p>勾选上方“允许同一局域网的手机访问”并保存设置后，才会生成配对二维码。</p>
+        </div>
+
+        <div id="lanAccessDetails" hidden>
+          <div class="lanPairLayout">
+            <figure class="lanQRCode">
+              <img id="lanAccessQr" alt="手机配对二维码" width="220" height="220">
+              <figcaption>一次性二维码</figcaption>
+            </figure>
+            <div class="lanPairInfo">
+              <label class="field">电脑局域网地址
+                <select id="lanAccessAddress"></select>
+              </label>
+              <label class="field">手机配对地址
+                <div class="keyRow">
+                  <input id="lanAccessUrl" class="mono" readonly>
+                  <button type="button" id="copyLanAccessUrlBtn" class="btn sm">复制</button>
+                </div>
+              </label>
+              <div class="lanCodeRow">
+                <div>
+                  <span class="muted tiny">一次性配对码</span>
+                  <strong id="lanAccessCode" class="mono">—</strong>
+                </div>
+                <span id="lanAccessExpiry" class="muted tiny"></span>
+              </div>
+              <button type="button" id="refreshLanPairingBtn" class="btn">重新生成二维码</button>
+            </div>
+          </div>
+          <div class="alert lanFirewallHint">
+            <div>
+              <strong>首次连接请检查 Windows 防火墙</strong>
+              <span>只允许 grok_switch 通过“专用网络”。不要勾选公共网络。</span>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section class="formCard" id="grokAuthCard">
         <div class="rowBetween">
@@ -343,6 +513,12 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js?v=18"></script>
+  <script src="/vendor/marked.umd.js?v=18.0.6"></script>
+  <script src="/vendor/purify.min.js?v=3.4.12"></script>
+  <script src="/vendor/highlight.min.js?v=11.11.1"></script>
+  <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
+  <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
+  <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
+  <script src="/app.js?v=27"></script>
 </body>
 </html>

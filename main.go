@@ -14,12 +14,14 @@ import (
 	"syscall"
 	"time"
 
+	"grok_switch/internal/agentbridge"
 	"grok_switch/internal/autostart"
 	"grok_switch/internal/crash"
 	"grok_switch/internal/grokauth"
 	"grok_switch/internal/grokpool"
 	"grok_switch/internal/paths"
 	"grok_switch/internal/profiles"
+	"grok_switch/internal/remoteaccess"
 	"grok_switch/internal/server"
 	"grok_switch/internal/settings"
 	"grok_switch/internal/singleinstance"
@@ -27,7 +29,7 @@ import (
 	"grok_switch/internal/tray"
 )
 
-//go:embed ui/index.html ui/app.js ui/style.css icon.svg assets/icon.ico
+//go:embed ui/index.html ui/app.js ui/style.css ui/vendor icon.svg assets/icon.ico
 var assets embed.FS
 
 func main() {
@@ -109,16 +111,21 @@ func main() {
 	if err := autostart.Sync(currentSettings.Autostart, exePath, currentSettings.SilentAutostart); err != nil {
 		crash.Logf("autostart sync failed: %v", err)
 	}
+	agent := agentbridge.New(resolved.GrokHome, filepath.Join(resolved.DataDir, "agent.log"))
+	agent.SetDefaultCwd(currentSettings.AgentDefaultCwd)
+	defer agent.Stop()
 
 	appServer := &server.Server{
-		Paths:    resolved,
-		Profiles: profileStore,
-		Settings: settingsStore,
-		GrokAuth: grokAuthStore,
-		GrokPool: grokPool,
-		Switcher: sw,
-		Assets:   assets,
-		ExePath:  exePath,
+		Paths:        resolved,
+		Profiles:     profileStore,
+		Settings:     settingsStore,
+		RemoteAccess: remoteaccess.NewStore(resolved.RemoteAccessFile),
+		GrokAuth:     grokAuthStore,
+		GrokPool:     grokPool,
+		Switcher:     sw,
+		Agent:        agent,
+		Assets:       assets,
+		ExePath:      exePath,
 	}
 	httpServer, port, err := appServer.Listen(currentSettings.Port)
 	if err != nil {

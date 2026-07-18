@@ -13,7 +13,10 @@
 - 首次运行可从当前 `config.toml` 导入 Default 供应商
 - 导入 CPA `xai-*.json` 或 Grok CLI `auth.json`，由内嵌代理提供稳定的本地 URL/key 并自动刷新 token
 - Grok 多账号池：批量导入、定时自动巡检、健康分类、坏号自动隔离、健康号轮换与单账号回退
-- Web UI 仅监听 `127.0.0.1`（默认端口 `17878`，被占用时自动递增）
+- 内置 Grok Build AI 对话工作台：流式回复、工具权限、历史会话续接与工作目录选择
+- AI Native 富文本回复：GFM、代码高亮与复制、Mermaid、KaTeX、图片和引用
+- Web UI 默认仅监听 `127.0.0.1`；开启局域网访问后监听 `0.0.0.0`（默认端口 `17878`）
+- 可选开启局域网手机访问：同一网络内扫码配对后管理供应商或继续 AI 对话
 - 可设置Windows 开机自启
 - Windows 单实例运行；再次双击 EXE 会打开已运行实例的管理页面
 - 启动失败时显示原生错误对话框，并尽可能写入诊断日志
@@ -60,6 +63,19 @@ SmartScreen 提示。下方签名配置仅供项目发布维护者使用。
 3. **查看生效配置**：设置 → `config.toml` 编辑区（磁盘上只有一份生效配置；各供应商档案在本地 profiles 中）
 4. **说明**：切换后**不会**结束已运行的 grok 会话；**新开**的 grok 会话才会读新 config
 
+### 手机访问与 AI 对话
+
+1. 在电脑端打开 **设置 → 允许同一局域网的手机访问** 并保存。
+2. 确认手机和电脑连接同一个 Wi-Fi 或热点；在“手机连接”区域扫描二维码。
+3. 手机完成一次性配对后，会打开同一个页面，可以管理供应商、查看历史对话并继续使用 Grok Build。
+4. 配对码有效期为 10 分钟且只能使用一次；需要重新授权时，在电脑端点击“重新生成二维码”。
+
+聊天功能要求运行 EXE 的电脑已经安装并登录 Grok Build，且终端中可以执行 `grok`。工具调用、命令和文件读写始终发生在电脑端，手机只作为经过配对的操作界面。
+
+局域网访问默认关闭。启用后只建议在可信的家庭或办公网络中使用，Windows 防火墙只允许
+`grok_switch` 通过“专用网络”，不要将端口转发到公网。跨网络访问请使用 Tailscale、
+ZeroTier 或 WireGuard 等 VPN。
+
 ### Grok Auth 与号池
 
 1. 打开 **设置 → Grok Auth JSON**，可导入单个 CPA `xai-*.json` 或 `%USERPROFILE%\.grok\auth.json`；该入口与下方自动巡检使用同一个号池。
@@ -87,6 +103,7 @@ SmartScreen 提示。下方签名配置仅供项目发布维护者使用。
 | `%USERPROFILE%\.grok_switch\profiles.json` | 供应商档案（**含 API Key 明文**） |
 | `%USERPROFILE%\.grok_switch\backups\` | config 自动备份（**含 Key**） |
 | `%USERPROFILE%\.grok_switch\settings.json` | 本工具设置 |
+| `%USERPROFILE%\.grok_switch\remote_access.json` | 局域网手机会话与一次性配对凭据（**敏感**） |
 | `%USERPROFILE%\.grok_switch\grok_auth.json` | 单账号 xAI OAuth 凭据与本地代理 key（**敏感**） |
 | `%USERPROFILE%\.grok_switch\grok_pool\pool.json` | 号池展示状态与巡检/代理设置（不含 token；代理 URL 可能包含认证信息） |
 | `%USERPROFILE%\.grok_switch\grok_pool\accounts\` | 号池各账号 OAuth 凭据副本（**敏感**） |

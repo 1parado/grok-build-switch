@@ -6,15 +6,16 @@ import (
 )
 
 type Paths struct {
-	GrokConfig   string
-	GrokHome     string
-	DataDir      string
-	ProfilesFile string
-	SettingsFile string
-	GrokAuthFile string
-	GrokPoolDir  string
-	BackupsDir   string
-	LogFile      string
+	GrokConfig       string
+	GrokHome         string
+	DataDir          string
+	ProfilesFile     string
+	SettingsFile     string
+	RemoteAccessFile string
+	GrokAuthFile     string
+	GrokPoolDir      string
+	BackupsDir       string
+	LogFile          string
 }
 
 func Resolve() (Paths, error) {
@@ -32,15 +33,16 @@ func Resolve() (Paths, error) {
 	}
 	dataDir := filepath.Join(home, ".grok_switch")
 	return Paths{
-		GrokConfig:   grokConfig,
-		GrokHome:     grokHome,
-		DataDir:      dataDir,
-		ProfilesFile: filepath.Join(dataDir, "profiles.json"),
-		SettingsFile: filepath.Join(dataDir, "settings.json"),
-		GrokAuthFile: filepath.Join(dataDir, "grok_auth.json"),
-		GrokPoolDir:  filepath.Join(dataDir, "grok_pool"),
-		BackupsDir:   filepath.Join(dataDir, "backups"),
-		LogFile:      filepath.Join(dataDir, "grok_switch.log"),
+		GrokConfig:       grokConfig,
+		GrokHome:         grokHome,
+		DataDir:          dataDir,
+		ProfilesFile:     filepath.Join(dataDir, "profiles.json"),
+		SettingsFile:     filepath.Join(dataDir, "settings.json"),
+		RemoteAccessFile: filepath.Join(dataDir, "remote_access.json"),
+		GrokAuthFile:     filepath.Join(dataDir, "grok_auth.json"),
+		GrokPoolDir:      filepath.Join(dataDir, "grok_pool"),
+		BackupsDir:       filepath.Join(dataDir, "backups"),
+		LogFile:          filepath.Join(dataDir, "grok_switch.log"),
 	}, nil
 }
 

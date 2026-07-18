@@ -4,6 +4,7 @@ const state = {
   status: null,
   grokAuth: null,
   grokPool: null,
+  lanAccess: null,
   availableModels: [],
   backups: [],
   showAdvanced: false,
@@ -11,6 +12,10 @@ const state = {
   layout: localStorage.getItem("gs_layout") || "card",
   search: "",
   draggedProviderKey: "",
+  agentStatus: null,
+  agentMessages: [],
+  agentSessions: [],
+  activeAgentSession: null,
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -19,6 +24,37 @@ const $ = (id) => document.getElementById(id);
 let toastTimer = null;
 let refreshTimer = null;
 let grokPoolPollTimer = null;
+let agentSocket = null;
+let agentReconnectTimer = null;
+let agentActiveAssistant = null;
+let agentActiveThought = null;
+let agentRetryNotice = null;
+let agentSessionSearchTimer = null;
+let mermaidReady = false;
+let mermaidRenderID = 0;
+let chatLayoutResizeTimer = null;
+const agentTools = new Map();
+
+const CHAT_PANEL_LAYOUT = {
+  left: {
+    property: "--session-sidebar-width",
+    storage: "gs_chat_sidebar_width",
+    panel: "sessionSidebar",
+    resizer: "sessionSidebarResizer",
+    defaultWidth: 264,
+    minWidth: 200,
+    maxWidth: 480,
+  },
+  right: {
+    property: "--context-rail-width",
+    storage: "gs_chat_context_width",
+    panel: "contextRail",
+    resizer: "contextRailResizer",
+    defaultWidth: 252,
+    minWidth: 220,
+    maxWidth: 460,
+  },
+};
 
 const TEMPLATES = {
   openai: {
@@ -128,13 +164,14 @@ async function run(fn, { button, busyLabel, success } = {}) {
 }
 
 async function refreshAll() {
-  const [status, profiles, backups, settings, grokAuth, grokPool] = await Promise.all([
+  const [status, profiles, backups, settings, grokAuth, grokPool, lanAccess] = await Promise.all([
     api("/api/status"),
     api("/api/profiles"),
     api("/api/backups"),
     api("/api/settings"),
     api("/api/grok-auth"),
     api("/api/grok-pool"),
+    api("/api/lan-access"),
   ]);
   state.status = status;
   state.profiles = profiles;
@@ -142,6 +179,7 @@ async function refreshAll() {
   state.settings = settings;
   state.grokAuth = grokAuth;
   state.grokPool = grokPool;
+  state.lanAccess = lanAccess;
   // Coerce to strict boolean for UI.
   if (state.status && typeof state.status.config_matches_active !== "boolean") {
     state.status.config_matches_active = true;
@@ -151,6 +189,7 @@ async function refreshAll() {
   renderProfiles();
   renderBackups(backups);
   renderSettings(settings);
+  renderLANAccess(lanAccess);
   renderGrokAuth(grokAuth);
   renderGrokPool(grokPool);
   syncAdvancedUI();
@@ -240,9 +279,11 @@ function scheduleProviderPreview() {
 
 function showView(name) {
   state.view = name;
+  document.body.classList.toggle("chatMode", name === "chat");
   const home = $("viewHome");
   const edit = $("viewEdit");
   const settings = $("viewSettings");
+  const chat = $("viewChat");
   if (home) {
     home.hidden = name !== "home";
     home.style.display = name === "home" ? "" : "none";
@@ -255,6 +296,10 @@ function showView(name) {
     settings.hidden = name !== "settings";
     settings.style.display = name === "settings" ? "" : "none";
   }
+  if (chat) {
+    chat.hidden = name !== "chat";
+    chat.style.display = name === "chat" ? "" : "none";
+  }
   if ($("navHomeBtn")) $("navHomeBtn").hidden = name === "home";
   document.querySelectorAll("[data-home-only]").forEach((el) => {
     el.hidden = name !== "home";
@@ -262,11 +307,871 @@ function showView(name) {
   // Keep header add/import only on home list.
   if ($("headerSubtitle")) {
     $("headerSubtitle").textContent =
-      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : "供应商";
+      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : "供应商";
   }
   if (name === "settings") {
     loadConfigEditor().catch((err) => toast(err.message, "error"));
   }
+  if (name === "chat") {
+    openAgentView().catch((err) => toast(err.message, "error"));
+  } else {
+    closeNativeChatPanels();
+  }
+}
+
+async function openAgentView() {
+  const [status] = await Promise.all([
+    api("/api/agent/status"),
+    loadAgentSessions(),
+  ]);
+  state.agentStatus = status;
+  const cwdInput = $("agentCwd");
+  if (cwdInput && !cwdInput.value.trim()) {
+    cwdInput.value = status.cwd || state.settings?.agent_default_cwd || status.default_cwd || "";
+  }
+  renderAgentStatus(status);
+  updateConversationIdentity();
+  applyStoredChatPanelWidths();
+  if (window.matchMedia("(min-width: 821px)").matches) {
+    const shell = $("viewChat")?.querySelector(".nativeChatShell");
+    shell?.classList.toggle("sidebarCollapsed", localStorage.getItem("gs_chat_sidebar_hidden") === "1");
+    if (window.matchMedia("(min-width: 1181px)").matches) {
+      shell?.classList.toggle("contextCollapsed", localStorage.getItem("gs_chat_context_hidden") === "1");
+    }
+  }
+  connectAgentSocket();
+}
+
+async function loadAgentSessions(query = $("agentSessionSearch")?.value || "") {
+  const sessions = await api(`/api/agent/sessions?limit=100&query=${encodeURIComponent(query.trim())}`);
+  state.agentSessions = Array.isArray(sessions) ? sessions : [];
+  renderAgentSessionList();
+  return state.agentSessions;
+}
+
+function renderAgentSessionList() {
+  const list = $("agentSessionList");
+  if (!list) return;
+  list.innerHTML = "";
+  if ($("agentSessionCount")) $("agentSessionCount").textContent = String(state.agentSessions.length);
+  if (!state.agentSessions.length) {
+    list.innerHTML = `<p class="sessionListEmpty">没有匹配的历史会话</p>`;
+    return;
+  }
+  for (const session of state.agentSessions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `sessionItem${session.id === state.activeAgentSession?.id ? " active" : ""}`;
+    button.dataset.sessionId = session.id;
+    const title = document.createElement("span");
+    title.className = "sessionItemTitle";
+    title.textContent = session.title || "未命名会话";
+    const meta = document.createElement("span");
+    meta.className = "sessionItemMeta";
+    meta.textContent = [formatSessionTime(session.updated_at), session.model].filter(Boolean).join(" · ");
+    const path = document.createElement("span");
+    path.className = "sessionItemPath";
+    path.textContent = session.cwd || "";
+    button.append(title, meta, path);
+    button.onclick = async () => {
+      try {
+        button.disabled = true;
+        button.classList.add("busy");
+        await resumeAgentSession(session);
+      } catch (err) {
+        toast(err.message || String(err), "error");
+      } finally {
+        button.disabled = false;
+        button.classList.remove("busy");
+      }
+    };
+    list.append(button);
+  }
+}
+
+function formatSessionTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return date.toLocaleDateString([], { month: "2-digit", day: "2-digit" });
+}
+
+async function resumeAgentSession(session) {
+  const history = await api(`/api/agent/sessions/${encodeURIComponent(session.id)}`);
+  state.activeAgentSession = history.session || session;
+  if ($("agentCwd")) $("agentCwd").value = state.activeAgentSession.cwd || "";
+  clearAgentTranscript(false);
+  renderStoredHistory(history.messages || []);
+  updateConversationIdentity();
+  renderAgentSessionList();
+  connectAgentSocket();
+  const status = await api("/api/agent/session/load", {
+    method: "POST",
+    body: JSON.stringify({
+      cwd: state.activeAgentSession.cwd,
+      session_id: state.activeAgentSession.id,
+      always_approve: $("agentAlwaysApprove").checked,
+    }),
+  });
+  state.agentStatus = status;
+  renderAgentStatus({ ...status, model: status.model || state.activeAgentSession.model });
+  closeNativeChatPanels();
+  scrollChatToBottom();
+  return true;
+}
+
+function renderStoredHistory(messages) {
+  for (const message of messages) {
+    switch (message.role) {
+      case "user":
+        appendChatMessage("user", message.content || "", "", true);
+        break;
+      case "assistant":
+        appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true);
+        break;
+      case "thought":
+        appendThoughtChunk(message.content || "");
+        agentActiveThought = null;
+        break;
+      case "tool":
+        renderAgentTool(message.tool || {}, false);
+        break;
+      case "tool_result":
+        renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", status: "completed" }, true);
+        break;
+    }
+  }
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+}
+
+function updateConversationIdentity() {
+  const session = state.activeAgentSession;
+  if ($("activeChatTitle")) $("activeChatTitle").textContent = session?.title || "新对话";
+  if ($("activeChatPath")) $("activeChatPath").textContent = session?.cwd || state.agentStatus?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
+  if ($("contextSessionId")) $("contextSessionId").textContent = session?.id || state.agentStatus?.session_id || "—";
+  renderAgentSessionList();
+}
+
+function setNativePanel(name, open) {
+  const panel = name === "sessions" ? $("sessionSidebar") : $("contextRail");
+  panel?.classList.toggle("open", open);
+  const anyOpen = !!$("sessionSidebar")?.classList.contains("open") || !!$("contextRail")?.classList.contains("open");
+  if ($("nativeChatScrim")) $("nativeChatScrim").hidden = !anyOpen;
+}
+
+function toggleSessionSidebar(forceOpen) {
+  if (window.matchMedia("(max-width: 820px)").matches) {
+    setNativePanel("sessions", forceOpen ?? !$("sessionSidebar")?.classList.contains("open"));
+    return;
+  }
+  const shell = $("viewChat")?.querySelector(".nativeChatShell");
+  if (!shell) return;
+  const collapsed = forceOpen === true ? false : forceOpen === false ? true : !shell.classList.contains("sidebarCollapsed");
+  shell.classList.toggle("sidebarCollapsed", collapsed);
+  localStorage.setItem("gs_chat_sidebar_hidden", collapsed ? "1" : "0");
+  requestAnimationFrame(applyStoredChatPanelWidths);
+}
+
+function toggleContextRail(forceOpen) {
+  if (window.matchMedia("(max-width: 1180px)").matches) {
+    setNativePanel("context", forceOpen ?? !$("contextRail")?.classList.contains("open"));
+    return;
+  }
+  const shell = $("viewChat")?.querySelector(".nativeChatShell");
+  if (!shell) return;
+  const collapsed = forceOpen === true ? false : forceOpen === false ? true : !shell.classList.contains("contextCollapsed");
+  shell.classList.toggle("contextCollapsed", collapsed);
+  localStorage.setItem("gs_chat_context_hidden", collapsed ? "1" : "0");
+  requestAnimationFrame(applyStoredChatPanelWidths);
+}
+
+function closeNativeChatPanels() {
+  $("sessionSidebar")?.classList.remove("open");
+  $("contextRail")?.classList.remove("open");
+  if ($("nativeChatScrim")) $("nativeChatScrim").hidden = true;
+}
+
+function chatPanelWidthLimit(side, shell) {
+  const config = CHAT_PANEL_LAYOUT[side];
+  if (!config || !shell) return config?.maxWidth || 0;
+  const desktop = window.matchMedia("(min-width: 1181px)").matches;
+  const otherSide = side === "left" ? "right" : "left";
+  const otherConfig = CHAT_PANEL_LAYOUT[otherSide];
+  const otherDocked = otherSide === "left"
+    ? window.matchMedia("(min-width: 821px)").matches && !shell.classList.contains("sidebarCollapsed")
+    : desktop && !shell.classList.contains("contextCollapsed");
+  const otherWidth = otherDocked ? $(otherConfig.panel)?.getBoundingClientRect().width || otherConfig.defaultWidth : 0;
+  const dividerWidth = otherDocked ? 10 : 5;
+  const roomForConversation = 400;
+  return Math.max(config.minWidth, Math.min(config.maxWidth, shell.clientWidth - otherWidth - dividerWidth - roomForConversation));
+}
+
+function setChatPanelWidth(side, width, persist = false) {
+  const config = CHAT_PANEL_LAYOUT[side];
+  const shell = $("viewChat")?.querySelector(".nativeChatShell");
+  if (!config || !shell || !Number.isFinite(width)) return config?.defaultWidth || 0;
+  const maximum = chatPanelWidthLimit(side, shell);
+  const nextWidth = Math.round(Math.min(maximum, Math.max(config.minWidth, width)));
+  shell.style.setProperty(config.property, `${nextWidth}px`);
+  const resizer = $(config.resizer);
+  resizer?.setAttribute("aria-valuenow", String(nextWidth));
+  resizer?.setAttribute("aria-valuemax", String(Math.round(maximum)));
+  if (persist) localStorage.setItem(config.storage, String(nextWidth));
+  return nextWidth;
+}
+
+function applyStoredChatPanelWidths() {
+  for (const [side, config] of Object.entries(CHAT_PANEL_LAYOUT)) {
+    const stored = Number.parseFloat(localStorage.getItem(config.storage));
+    setChatPanelWidth(side, Number.isFinite(stored) ? stored : config.defaultWidth);
+  }
+}
+
+function resetChatPanelWidth(side) {
+  const config = CHAT_PANEL_LAYOUT[side];
+  if (!config) return;
+  localStorage.removeItem(config.storage);
+  setChatPanelWidth(side, config.defaultWidth);
+}
+
+function bindChatPanelResizer(side) {
+  const config = CHAT_PANEL_LAYOUT[side];
+  const resizer = $(config?.resizer);
+  if (!config || !resizer) return;
+
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const shell = $("viewChat")?.querySelector(".nativeChatShell");
+    const panel = $(config.panel);
+    if (!shell || !panel) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = panel.getBoundingClientRect().width;
+    let latestWidth = startWidth;
+    resizer.classList.add("active");
+    document.body.classList.add("resizingChatPanels");
+
+    const handleMove = (moveEvent) => {
+      const delta = moveEvent.clientX - startX;
+      latestWidth = setChatPanelWidth(side, startWidth + (side === "left" ? delta : -delta));
+    };
+    const finish = () => {
+      document.removeEventListener("pointermove", handleMove);
+      document.removeEventListener("pointerup", finish);
+      document.removeEventListener("pointercancel", finish);
+      resizer.classList.remove("active");
+      document.body.classList.remove("resizingChatPanels");
+      setChatPanelWidth(side, latestWidth, true);
+    };
+    document.addEventListener("pointermove", handleMove);
+    document.addEventListener("pointerup", finish);
+    document.addEventListener("pointercancel", finish);
+  });
+
+  resizer.addEventListener("dblclick", () => resetChatPanelWidth(side));
+  resizer.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Home") {
+      resetChatPanelWidth(side);
+      return;
+    }
+    const panelWidth = $(config.panel)?.getBoundingClientRect().width || config.defaultWidth;
+    const direction = event.key === "ArrowRight" ? 1 : -1;
+    const spatialDelta = (event.shiftKey ? 40 : 12) * direction;
+    setChatPanelWidth(side, panelWidth + (side === "left" ? spatialDelta : -spatialDelta), true);
+  });
+}
+
+function agentIsRunning(status = state.agentStatus) {
+  return !!status?.running || ["starting", "ready", "busy", "stopping"].includes(status?.state);
+}
+
+function renderAgentStatus(status) {
+  if (!status) return;
+  state.agentStatus = status;
+  const badge = $("agentStatusBadge");
+  const stateName = status.state || "idle";
+  const labels = {
+    idle: "未启动",
+    starting: "启动中",
+    ready: "已连接",
+    busy: "处理中",
+    stopping: "停止中",
+    dead: "连接异常",
+  };
+  if (badge) badge.dataset.state = stateName;
+  if ($("agentStatusText")) $("agentStatusText").textContent = labels[stateName] || stateName;
+  const model = status.model || state.activeAgentSession?.model || "";
+  if (model && state.activeAgentSession && (!status.session_id || status.session_id === state.activeAgentSession.id)) {
+    state.activeAgentSession.model = model;
+  }
+  if ($("agentModelBadge")) $("agentModelBadge").textContent = model ? `MODEL ${model}` : "MODEL —";
+  if ($("contextModel")) $("contextModel").textContent = model || "—";
+  if ($("contextSessionId")) $("contextSessionId").textContent = status.session_id || state.activeAgentSession?.id || "—";
+  if ($("activeChatPath")) $("activeChatPath").textContent = status.cwd || state.activeAgentSession?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
+  const running = agentIsRunning(status);
+  const busy = stateName === "busy" || !!status.busy;
+  if ($("agentStartBtn")) {
+    $("agentStartBtn").disabled = stateName === "starting" || stateName === "stopping" || busy;
+    $("agentStartBtn").textContent = running ? "重启 Agent" : "启动 Agent";
+  }
+  if ($("agentNewSessionBtn")) $("agentNewSessionBtn").disabled = !running || busy || stateName === "stopping";
+  if ($("agentStopBtn")) $("agentStopBtn").disabled = !running || stateName === "stopping";
+  if ($("agentAlwaysApprove")) {
+    $("agentAlwaysApprove").disabled = running;
+    if (typeof status.always_approve === "boolean") $("agentAlwaysApprove").checked = status.always_approve;
+  }
+  if ($("chatInput")) $("chatInput").disabled = stateName !== "ready";
+  if ($("chatSendBtn")) $("chatSendBtn").disabled = stateName !== "ready" || !$("chatInput")?.value.trim();
+  if (!status.available && status.error) {
+    const empty = $("chatEmpty");
+    if (empty) {
+      empty.querySelector("strong").textContent = "未找到 Grok Build";
+      empty.querySelector("span").textContent = status.error;
+    }
+  }
+}
+
+function connectAgentSocket() {
+  if (agentSocket && (agentSocket.readyState === WebSocket.OPEN || agentSocket.readyState === WebSocket.CONNECTING)) return;
+  clearTimeout(agentReconnectTimer);
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${protocol}//${location.host}/api/agent/ws`);
+  agentSocket = socket;
+  socket.onopen = () => clearTimeout(agentReconnectTimer);
+  socket.onmessage = (message) => {
+    try {
+      handleAgentEvent(JSON.parse(message.data));
+    } catch (err) {
+      toast(`对话事件无效：${err.message}`, "error");
+    }
+  };
+  socket.onerror = () => socket.close();
+  socket.onclose = () => {
+    if (agentSocket === socket) agentSocket = null;
+    if (state.view === "chat") {
+      agentReconnectTimer = setTimeout(connectAgentSocket, 1500);
+    }
+  };
+}
+
+function handleAgentEvent(event) {
+  switch (event.type) {
+    case "agent_status": {
+      const current = state.agentStatus || {};
+      const stateName = event.status || current.state || "idle";
+      renderAgentStatus({
+        ...current,
+        state: stateName,
+        session_id: event.session_id || current.session_id,
+        running: ["starting", "ready", "busy", "stopping"].includes(stateName),
+        busy: stateName === "busy",
+        model: event.model || current.model,
+        error: event.error || (stateName === "dead" ? current.error : ""),
+      });
+      break;
+    }
+    case "assistant_chunk":
+      appendAssistantChunk(event.text || "");
+      break;
+    case "thought_chunk":
+      appendThoughtChunk(event.text || "");
+      break;
+    case "tool_call":
+    case "tool_update":
+      renderAgentTool(event.tool || {}, event.type === "tool_update");
+      break;
+    case "permission_request":
+      showAgentPermission(event.permission);
+      break;
+    case "retry_state":
+      renderAgentRetry(event.retry);
+      break;
+    case "turn_done":
+      finalizeAssistantMessage();
+      agentActiveAssistant = null;
+      agentActiveThought = null;
+      agentRetryNotice = null;
+      renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "" });
+      loadAgentSessions().catch(() => {});
+      break;
+    case "error":
+      finalizeAssistantMessage();
+      appendAgentNotice(event.error || "Grok Agent 出错", true);
+      renderAgentStatus({ ...state.agentStatus, state: agentIsRunning() ? "ready" : "dead", busy: false, error: event.error || "" });
+      break;
+  }
+}
+
+function clearAgentTranscript(showEmpty = true) {
+  const messages = $("chatMessages");
+  if (!messages) return;
+  messages.innerHTML = showEmpty
+    ? `<div id="chatEmpty" class="chatEmpty"><span class="chatEmptyMark">G</span><strong>从一个问题开始</strong><span>Markdown、代码、表格与 Mermaid 图表将在这里原生呈现</span></div>`
+    : "";
+  agentTools.clear();
+  if ($("toolActivityCount")) $("toolActivityCount").textContent = "0";
+  if ($("toolActivityList")) $("toolActivityList").innerHTML = "<span>暂无工具活动</span>";
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+  agentRetryNotice = null;
+  state.agentPermission = null;
+  if ($("permissionBar")) $("permissionBar").hidden = true;
+}
+
+function removeChatEmpty() {
+  $("chatEmpty")?.remove();
+}
+
+function appendChatMessage(role, text, model = "", final = false) {
+  removeChatEmpty();
+  const article = document.createElement("article");
+  article.className = `chatMessage ${role}`;
+  article._rawText = text || "";
+  const header = document.createElement("div");
+  header.className = "chatMessageHeader";
+  const label = document.createElement("span");
+  label.className = "chatMessageRole";
+  label.textContent = role === "user" ? "你" : role === "assistant" ? "Grok" : "系统";
+  header.append(label);
+  if (role === "assistant" && model) {
+    const modelLabel = document.createElement("span");
+    modelLabel.className = "messageModel";
+    modelLabel.textContent = model;
+    header.append(modelLabel);
+  }
+  const body = document.createElement("div");
+  body.className = "chatMessageText markdownBody";
+  article.append(header, body);
+  $("chatMessages").append(article);
+  renderMessageMarkdown(article, final);
+  scrollChatToBottom();
+  return article;
+}
+
+function appendAssistantChunk(text) {
+  if (!text) return;
+  markAgentRetryRecovered();
+  if (!agentActiveAssistant || !agentActiveAssistant.isConnected) {
+    agentActiveAssistant = appendChatMessage("assistant", "", state.agentStatus?.model || state.activeAgentSession?.model || "");
+  }
+  agentActiveAssistant._rawText = (agentActiveAssistant._rawText || "") + text;
+  scheduleMessageMarkdown(agentActiveAssistant);
+  scrollChatToBottom();
+}
+
+function scheduleMessageMarkdown(article) {
+  clearTimeout(article._markdownTimer);
+  article._markdownTimer = setTimeout(() => renderMessageMarkdown(article, false), 60);
+}
+
+function finalizeAssistantMessage() {
+  if (!agentActiveAssistant?.isConnected) return;
+  clearTimeout(agentActiveAssistant._markdownTimer);
+  renderMessageMarkdown(agentActiveAssistant, true);
+}
+
+async function renderMessageMarkdown(article, renderDiagrams) {
+  if (!article?.isConnected) return;
+  const body = article.querySelector(".chatMessageText");
+  const raw = article._rawText || "";
+  if (!window.marked?.parse || !window.DOMPurify) {
+    body.textContent = raw;
+    return;
+  }
+  try {
+    const parsed = window.marked.parse(prepareMarkdownCitations(raw), { gfm: true, breaks: true });
+    body.innerHTML = window.DOMPurify.sanitize(parsed, { USE_PROFILES: { html: true } });
+    body.querySelectorAll("a").forEach((link) => {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      if (/^\[?\d+\]?$/.test(link.textContent.trim()) || link.closest(".citation")) {
+        link.classList.add("citationLink");
+      }
+    });
+    body.querySelectorAll("img").forEach((image) => {
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.referrerPolicy = "no-referrer";
+    });
+    body.querySelectorAll("table").forEach((table) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "markdownTableWrap";
+      table.replaceWith(wrapper);
+      wrapper.append(table);
+    });
+    body.querySelectorAll('li > input[type="checkbox"]').forEach((checkbox) => {
+      checkbox.disabled = true;
+      checkbox.closest("li")?.classList.add("task-list-item");
+      checkbox.closest("ul, ol")?.classList.add("contains-task-list");
+    });
+    decorateCodeBlocks(body);
+    renderMathBlocks(body);
+    if (renderDiagrams) await renderMermaidBlocks(body);
+  } catch (err) {
+    body.textContent = raw;
+    body.title = `Markdown 渲染失败: ${err.message}`;
+  }
+}
+
+function prepareMarkdownCitations(markdown) {
+  const definitions = new Map();
+  const lines = String(markdown || "").split(/\r?\n/);
+  let fenced = false;
+  const retained = [];
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (!fenced) {
+      const match = line.match(/^\s*\[\^([^\]]+)\]:\s+(https?:\/\/\S+)(?:\s+(.+))?\s*$/);
+      if (match) {
+        try {
+          const parsed = new URL(match[2]);
+          if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+            definitions.set(match[1], { url: parsed.href, title: (match[3] || "").trim() });
+            continue;
+          }
+        } catch {
+          // Keep malformed definitions as ordinary Markdown text.
+        }
+      }
+    }
+    retained.push(line);
+  }
+  if (!definitions.size) return markdown;
+  fenced = false;
+  return retained.map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (fenced) return line;
+    return line.replace(/\[\^([^\]]+)\]/g, (whole, id) => {
+      const citation = definitions.get(id);
+      if (!citation) return whole;
+      const title = citation.title ? ` title="${escapeAttr(citation.title)}"` : "";
+      return `<sup class="citation"><a href="${escapeAttr(citation.url)}"${title}>[${escapeHtml(id)}]</a></sup>`;
+    });
+  }).join("\n");
+}
+
+function decorateCodeBlocks(root) {
+  root.querySelectorAll("pre").forEach((pre) => {
+    const code = pre.querySelector("code");
+    if (!code || code.classList.contains("language-mermaid")) return;
+    const declaredLanguage = [...code.classList].find((name) => name.startsWith("language-"))?.slice(9) || "";
+    const highlighter = window.hljs;
+    if (highlighter) {
+      try {
+        if (declaredLanguage && highlighter.getLanguage(declaredLanguage)) {
+          highlighter.highlightElement(code);
+        } else if (!declaredLanguage) {
+          const result = highlighter.highlightAuto(code.textContent || "");
+          code.innerHTML = result.value;
+          code.classList.add("hljs");
+          if (result.language) code.dataset.detectedLanguage = result.language;
+        }
+      } catch {
+        // Keep the original escaped code if highlighting fails.
+      }
+    }
+    const language = declaredLanguage || code.dataset.detectedLanguage || "text";
+    const languageLabel = document.createElement("span");
+    languageLabel.className = "codeLanguageLabel";
+    languageLabel.textContent = language;
+    pre.append(languageLabel);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "codeCopyBtn";
+    button.textContent = "复制";
+    button.onclick = () => copyText(code.textContent || "", "代码已复制");
+    pre.append(button);
+  });
+}
+
+function renderMathBlocks(root) {
+  if (typeof window.renderMathInElement !== "function") return;
+  try {
+    window.renderMathInElement(root, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "\\[", right: "\\]", display: true },
+        { left: "$", right: "$", display: false },
+        { left: "\\(", right: "\\)", display: false },
+      ],
+      ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      throwOnError: false,
+      strict: "warn",
+      trust: false,
+    });
+  } catch {
+    // Incomplete streaming formulas remain as source until the next chunk.
+  }
+}
+
+async function renderMermaidBlocks(root) {
+  const mermaidAPI = window.mermaid;
+  if (!mermaidAPI?.render) return;
+  if (!mermaidReady) {
+    mermaidAPI.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "base",
+      themeVariables: {
+        background: "#ecebe7",
+        primaryColor: "#dedaf7",
+        primaryTextColor: "#202023",
+        primaryBorderColor: "#665bb2",
+        lineColor: "#54545b",
+        secondaryColor: "#dce7df",
+        tertiaryColor: "#f2e3ca",
+        fontFamily: "Aptos, Segoe UI, sans-serif",
+      },
+      flowchart: { htmlLabels: true },
+    });
+    mermaidReady = true;
+  }
+  const blocks = [...root.querySelectorAll("pre > code.language-mermaid")];
+  for (const code of blocks) {
+    const pre = code.parentElement;
+    const container = document.createElement("div");
+    container.className = "mermaidDiagram";
+    pre.replaceWith(container);
+    try {
+      const id = `grok-mermaid-${++mermaidRenderID}`;
+      const result = await mermaidAPI.render(id, code.textContent || "");
+      // Mermaid strict mode sanitizes labels itself. DOMPurify 3.4+ removes
+      // foreignObject contents on a second pass, which leaves node labels blank.
+      container.innerHTML = result.svg;
+      result.bindFunctions?.(container);
+    } catch (err) {
+      container.classList.add("mermaidError");
+      container.textContent = `Mermaid 图表无法渲染\n${err.message}`;
+    }
+  }
+}
+
+function renderAgentRetry(retry) {
+  if (!retry) return;
+  removeChatEmpty();
+  const stateName = retry.state || "retrying";
+  if (!agentRetryNotice || !agentRetryNotice.isConnected) {
+    agentRetryNotice = appendChatMessage("system", "");
+    agentRetryNotice.classList.add("agentRetry", "error");
+  }
+  const label = agentRetryNotice.querySelector(".chatMessageRole");
+  const body = agentRetryNotice.querySelector(".chatMessageText");
+  if (stateName === "retrying") {
+    label.textContent = retry.max_retries
+      ? `上游重试 ${retry.attempt || 0}/${retry.max_retries}`
+      : "上游重试中";
+    agentRetryNotice._rawText = compactAgentError(retry.reason || retry.message || "模型请求失败，正在重试");
+  } else if (stateName === "exhausted") {
+    label.textContent = "上游重试已耗尽";
+    agentRetryNotice._rawText = compactAgentError(retry.reason || retry.message || "模型请求重试已耗尽");
+    agentRetryNotice = null;
+  } else {
+    label.textContent = "上游请求失败";
+    agentRetryNotice._rawText = compactAgentError(retry.message || retry.reason || "模型请求失败");
+    agentRetryNotice = null;
+  }
+  renderMessageMarkdown(agentRetryNotice || body.closest(".chatMessage"), true);
+  scrollChatToBottom();
+}
+
+function compactAgentError(message) {
+  const text = String(message || "").trim();
+  const firstBlock = text.split(/\r?\n\r?\n/)[0] || text;
+  return firstBlock.length > 600 ? `${firstBlock.slice(0, 600)}…` : firstBlock;
+}
+
+function markAgentRetryRecovered() {
+  if (!agentRetryNotice || !agentRetryNotice.isConnected) return;
+  agentRetryNotice.classList.remove("error");
+  agentRetryNotice.classList.add("recovered");
+  agentRetryNotice.querySelector(".chatMessageRole").textContent = "上游已恢复";
+  agentRetryNotice = null;
+}
+
+function appendThoughtChunk(text) {
+  if (!text) return;
+  removeChatEmpty();
+  if (!agentActiveThought || !agentActiveThought.isConnected) {
+    const details = document.createElement("details");
+    details.className = "agentThought";
+    const summary = document.createElement("summary");
+    summary.textContent = "思考过程";
+    const body = document.createElement("pre");
+    details.append(summary, body);
+    $("chatMessages").append(details);
+    agentActiveThought = details;
+  }
+  agentActiveThought.querySelector("pre").textContent += text;
+  scrollChatToBottom();
+}
+
+function renderAgentTool(tool, isUpdate) {
+  removeChatEmpty();
+  const id = tool.id || `tool-${agentTools.size + 1}`;
+  let details = agentTools.get(id);
+  if (!details) {
+    details = document.createElement("details");
+    details.className = "agentTool";
+    details.innerHTML = `<summary><span class="agentToolTitle"></span><span class="agentToolStatus"></span></summary><pre></pre>`;
+    $("chatMessages").append(details);
+    agentTools.set(id, details);
+  }
+  const title = tool.title || details.querySelector(".agentToolTitle").textContent || "工具调用";
+  const status = tool.status || details.dataset.status || (isUpdate ? "更新" : "等待");
+  details.dataset.status = status;
+  details.querySelector(".agentToolTitle").textContent = title;
+  details.querySelector(".agentToolStatus").textContent = agentToolStatusLabel(status);
+  const payload = tool.raw_output ?? tool.raw_input;
+  if (payload != null) details.querySelector("pre").textContent = formatAgentPayload(payload);
+  renderToolActivity(tool, id, title, status);
+  scrollChatToBottom();
+}
+
+function renderToolActivity(tool, id, title, status) {
+  const list = $("toolActivityList");
+  if (!list) return;
+  if (list.children.length === 1 && list.firstElementChild?.tagName === "SPAN") list.innerHTML = "";
+  let item = [...list.querySelectorAll(".toolActivityItem")].find((element) => element.dataset.toolId === id);
+  if (!item) {
+    item = document.createElement("div");
+    item.className = "toolActivityItem";
+    item.dataset.toolId = id;
+    item.innerHTML = `<strong></strong><span></span>`;
+    list.prepend(item);
+  }
+  item.classList.remove("pending", "in_progress", "completed", "failed");
+  if (status) item.classList.add(status);
+  item.querySelector("strong").textContent = title;
+  item.querySelector("span").textContent = [agentToolStatusLabel(status), tool.kind].filter(Boolean).join(" · ");
+  if ($("toolActivityCount")) $("toolActivityCount").textContent = String(agentTools.size);
+}
+
+function agentToolStatusLabel(status) {
+  return ({ pending: "等待", in_progress: "执行中", completed: "完成", failed: "失败" })[status] || status || "";
+}
+
+function formatAgentPayload(payload) {
+  if (typeof payload === "string") return payload;
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return String(payload);
+  }
+}
+
+function appendAgentNotice(text, isError = false) {
+  const notice = appendChatMessage("system", text);
+  if (isError) notice.classList.add("error");
+}
+
+function scrollChatToBottom() {
+  const messages = $("chatMessages");
+  if (!messages) return;
+  requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+}
+
+function showAgentPermission(permission) {
+  if (!permission) return;
+  state.agentPermission = permission;
+  $("permissionSummary").textContent = permission.summary || permission.tool?.title || "工具执行请求";
+  $("permissionDetail").textContent = permission.tool?.raw_input == null ? "" : formatAgentPayload(permission.tool.raw_input);
+  $("permissionBar").hidden = false;
+  scrollChatToBottom();
+}
+
+function respondAgentPermission(allow) {
+  const permission = state.agentPermission;
+  if (!permission) return;
+  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    toast("对话连接已断开，请稍后重试", "error");
+    return;
+  }
+  agentSocket.send(JSON.stringify({ type: "permission_response", request_id: permission.request_id, allow }));
+  state.agentPermission = null;
+  $("permissionBar").hidden = true;
+  appendAgentNotice(allow ? "已允许本次工具执行" : "已拒绝本次工具执行");
+}
+
+async function startAgent() {
+  const cwd = $("agentCwd").value.trim();
+  if (!cwd) throw new Error("请提供工作目录");
+  const alwaysApprove = $("agentAlwaysApprove").checked;
+  if (alwaysApprove && !confirm("自动批准会允许 Grok Build 无需确认即可修改文件和执行命令。确定启动？")) return false;
+  const wasRunning = agentIsRunning();
+  if (wasRunning) {
+    await api("/api/agent/stop", { method: "POST", body: "{}" });
+  }
+  const resumable = state.activeAgentSession?.id && state.activeAgentSession?.cwd === cwd;
+  const status = await api("/api/agent/start", {
+    method: "POST",
+    body: JSON.stringify({ cwd, always_approve: alwaysApprove, session_id: resumable ? state.activeAgentSession.id : "" }),
+  });
+  if (!resumable) clearAgentTranscript();
+  state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
+  if (!resumable) {
+    state.activeAgentSession = { id: status.session_id, title: "新对话", cwd: status.cwd || cwd, model: status.model || "" };
+  }
+  renderAgentStatus(status);
+  updateConversationIdentity();
+  connectAgentSocket();
+  return true;
+}
+
+async function newAgentSession() {
+  const cwd = $("agentCwd").value.trim();
+  if (!cwd) throw new Error("请提供工作目录");
+  state.activeAgentSession = null;
+  let status;
+  if (!agentIsRunning()) {
+    const started = await startAgent();
+    if (started === false) return false;
+    status = state.agentStatus;
+  } else {
+    status = await api("/api/agent/session", { method: "POST", body: JSON.stringify({ cwd }) });
+  }
+  clearAgentTranscript();
+  state.activeAgentSession = { id: status.session_id, title: "新对话", cwd: status.cwd || cwd, model: status.model || "" };
+  state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
+  renderAgentStatus(status);
+  updateConversationIdentity();
+  closeNativeChatPanels();
+  loadAgentSessions().catch(() => {});
+  return true;
+}
+
+async function stopAgent() {
+  const status = await api("/api/agent/stop", { method: "POST", body: "{}" });
+  state.agentPermission = null;
+  $("permissionBar").hidden = true;
+  renderAgentStatus(status);
+}
+
+function sendAgentMessage() {
+  const text = $("chatInput").value.trim();
+  if (!text) return;
+  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    toast("对话连接尚未就绪", "error");
+    connectAgentSocket();
+    return;
+  }
+  appendChatMessage("user", text, "", true);
+  if (state.activeAgentSession && (!state.activeAgentSession.title || state.activeAgentSession.title === "新对话")) {
+    state.activeAgentSession.title = text.replace(/\s+/g, " ").slice(0, 60);
+    updateConversationIdentity();
+  }
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+  agentRetryNotice = null;
+  $("chatInput").value = "";
+  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
 }
 
 function renderEmptyState() {
@@ -525,6 +1430,7 @@ function renderSettings(settings) {
   $("autostart").checked = !!settings.autostart;
   $("silentAutostart").checked = !!settings.silent_autostart;
   $("autoOpenBrowser").checked = !!settings.auto_open_browser;
+  $("lanAccessEnabled").checked = !!settings.lan_access_enabled;
   $("port").value = settings.port;
   const actual = state.status?.port;
   const hint = $("portHint");
@@ -1011,6 +1917,58 @@ function syncAdvancedUI() {
   $("toggleAdvancedBtn").textContent = state.showAdvanced ? "收起高级" : "高级字段";
 }
 
+function renderLANAccess(access) {
+  const remote = !!access?.remote;
+  if ($("lanAccessCard")) $("lanAccessCard").hidden = remote;
+  if ($("lanAccessEnabled")) $("lanAccessEnabled").disabled = remote;
+  if (remote) return;
+  const enabled = !!state.settings?.lan_access_enabled && !!access?.enabled;
+  const badge = $("lanAccessBadge");
+  const empty = $("lanAccessDisabled");
+  const details = $("lanAccessDetails");
+  if (badge) {
+    badge.textContent = enabled ? "已开启" : "未开启";
+    badge.classList.toggle("active", enabled);
+  }
+  if (empty) empty.hidden = enabled;
+  if (details) details.hidden = !enabled;
+  if (!enabled) return;
+
+  const addresses = access?.addresses || [];
+  const select = $("lanAccessAddress");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = addresses.length
+    ? addresses.map((item, index) => `<option value="${index}">${escapeHtml(item.address)}</option>`).join("")
+    : `<option value="">未找到局域网地址</option>`;
+  if (addresses.length) {
+    const selected = Number.isInteger(Number(current)) && Number(current) < addresses.length ? Number(current) : 0;
+    select.value = String(selected);
+    renderLANAddress(addresses[selected], access);
+  } else {
+    renderLANAddress(null, access);
+  }
+}
+
+function renderLANAddress(address, access) {
+  const qr = $("lanAccessQr");
+  const url = $("lanAccessUrl");
+  const code = $("lanAccessCode");
+  const expiry = $("lanAccessExpiry");
+  if (qr) {
+    qr.hidden = !address?.qr_code;
+    if (address?.qr_code) qr.src = address.qr_code;
+    else qr.removeAttribute("src");
+  }
+  if (url) url.value = address?.pair_url || "";
+  if (code) code.textContent = access?.pairing_code || "—";
+  if (expiry) {
+    expiry.textContent = access?.pairing_expiry
+      ? `有效至 ${new Date(access.pairing_expiry).toLocaleTimeString()}`
+      : "";
+  }
+}
+
 function syncModelBaseURLs() {
   const baseURL = $("baseUrl")?.value.trim() || "";
   $("modelsBody")?.querySelectorAll('[data-field="base_url"]').forEach((input) => {
@@ -1239,6 +2197,7 @@ $("navHomeBtn").onclick = () => showView("home");
 $("navSettingsBtn").onclick = () => showView("settings");
 $("backFromEditBtn").onclick = () => showView("home");
 $("backFromSettingsBtn").onclick = () => showView("home");
+$("chatBtn").onclick = () => showView("chat");
 $("addBtn").onclick = () => openEdit(newProfileDraft());
 $("emptyNewBtn").onclick = () => openEdit(newProfileDraft());
 $("emptyImportBtn").onclick = () => importCurrentConfig($("emptyImportBtn"));
@@ -1249,6 +2208,35 @@ $("reapplyBtn").onclick = () => {
   activateProfile(id, $("reapplyBtn"), name);
 };
 $("openConfigFromDriftBtn").onclick = () => showView("settings");
+
+$("agentStartBtn").onclick = () => run(startAgent, { button: $("agentStartBtn"), busyLabel: "连接中…" });
+$("agentNewSessionBtn").onclick = () => run(newAgentSession, { button: $("agentNewSessionBtn"), busyLabel: "创建中…" });
+$("agentStopBtn").onclick = () => run(stopAgent, { button: $("agentStopBtn"), busyLabel: "停止中…" });
+$("agentSessionSearch").oninput = () => {
+  clearTimeout(agentSessionSearchTimer);
+  agentSessionSearchTimer = setTimeout(() => loadAgentSessions().catch((err) => toast(err.message, "error")), 180);
+};
+$("openSessionSidebarBtn").onclick = () => toggleSessionSidebar();
+$("closeSessionSidebarBtn").onclick = () => toggleSessionSidebar(false);
+$("openContextRailBtn").onclick = () => toggleContextRail();
+$("closeContextRailBtn").onclick = () => toggleContextRail(false);
+$("nativeChatScrim").onclick = closeNativeChatPanels;
+bindChatPanelResizer("left");
+bindChatPanelResizer("right");
+$("agentCwd").oninput = updateConversationIdentity;
+$("permissionAllowBtn").onclick = () => respondAgentPermission(true);
+$("permissionRejectBtn").onclick = () => respondAgentPermission(false);
+$("chatComposer").onsubmit = (event) => {
+  event.preventDefault();
+  sendAgentMessage();
+};
+$("chatInput").oninput = () => renderAgentStatus(state.agentStatus);
+$("chatInput").onkeydown = (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    $("chatComposer").requestSubmit();
+  }
+};
 $("reloadConfigBtn").onclick = () => run(async () => {
   await loadConfigEditor();
 }, { button: $("reloadConfigBtn"), busyLabel: "加载中…", success: "已重新加载" });
@@ -1433,6 +2421,7 @@ $("settingsForm").onsubmit = (event) => {
       autostart: $("autostart").checked,
       silent_autostart: $("silentAutostart").checked,
       auto_open_browser: $("autoOpenBrowser").checked,
+      lan_access_enabled: $("lanAccessEnabled").checked,
       theme: "light",
       port: Number($("port").value || 17878),
     };
@@ -1440,6 +2429,20 @@ $("settingsForm").onsubmit = (event) => {
     await refreshAll();
   }, { button: $("saveSettingsBtn"), busyLabel: "保存中…", success: "设置已保存" });
 };
+
+$("lanAccessAddress").onchange = () => {
+  const index = Number($("lanAccessAddress").value);
+  renderLANAddress(state.lanAccess?.addresses?.[index], state.lanAccess);
+};
+
+$("copyLanAccessUrlBtn").onclick = () => run(async () => {
+  await copyText($("lanAccessUrl").value, "手机配对地址已复制");
+}, { button: $("copyLanAccessUrlBtn"), busyLabel: "复制中…" });
+
+$("refreshLanPairingBtn").onclick = () => run(async () => {
+  state.lanAccess = await api("/api/lan-access", { method: "POST" });
+  renderLANAccess(state.lanAccess);
+}, { button: $("refreshLanPairingBtn"), busyLabel: "生成中…", success: "新的配对二维码已生成" });
 
 $("importGrokAuthBtn").onclick = () => $("grokAuthFile").click();
 $("grokAuthFile").onchange = async (event) => {
@@ -1653,6 +2656,10 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") scheduleRefresh();
 });
 window.addEventListener("focus", () => scheduleRefresh());
+window.addEventListener("resize", () => {
+  clearTimeout(chatLayoutResizeTimer);
+  chatLayoutResizeTimer = setTimeout(applyStoredChatPanelWidths, 100);
+});
 
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {

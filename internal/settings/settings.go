@@ -25,6 +25,8 @@ type Settings struct {
 	Autostart         bool     `json:"autostart"`
 	SilentAutostart   bool     `json:"silent_autostart"`
 	AutoOpenBrowser   bool     `json:"auto_open_browser"`
+	LANAccessEnabled  bool     `json:"lan_access_enabled"`
+	AgentDefaultCwd   string   `json:"agent_default_cwd,omitempty"`
 	ProviderOrder     []string `json:"provider_order"`
 	PinnedProviderIDs []string `json:"pinned_provider_ids"`
 }
@@ -187,6 +189,10 @@ func normalize(s Settings) Settings {
 	}
 	s.ProviderOrder = uniqueStrings(s.ProviderOrder)
 	s.PinnedProviderIDs = uniqueStrings(s.PinnedProviderIDs)
+	s.AgentDefaultCwd = filepath.Clean(s.AgentDefaultCwd)
+	if s.AgentDefaultCwd == "." {
+		s.AgentDefaultCwd = ""
+	}
 	return s
 }
 

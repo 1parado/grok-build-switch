@@ -39,7 +39,9 @@ jobs:
       - name: Build, sign, and verify
         if: env.WINDOWS_SIGNING_CERT_BASE64 != ''
         shell: pwsh
-        run: .\build.ps1 -RequireSignature
+        run: |
+          .\build.ps1 -RequireSignature
+          .\build-gui.ps1 -RequireSignature
 
       - name: Build unsigned fallback
         if: env.WINDOWS_SIGNING_CERT_BASE64 == ''
@@ -47,6 +49,7 @@ jobs:
         run: |
           Write-Warning "No code-signing certificate is configured; publishing an unsigned Windows build."
           .\build.ps1
+          .\build-gui.ps1
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -55,6 +58,8 @@ jobs:
           path: |
             grok_switch.exe
             grok_switch.exe.sha256
+            grok_switch_gui.exe
+            grok_switch_gui.exe.sha256
           if-no-files-found: error
 
       - name: Create or update GitHub Release
@@ -71,7 +76,7 @@ jobs:
           if (-not $releaseExists) {
             gh release create $env:RELEASE_TAG --verify-tag --generate-notes --title $env:RELEASE_TAG
           }
-          gh release upload $env:RELEASE_TAG grok_switch.exe grok_switch.exe.sha256 --clobber
+          gh release upload $env:RELEASE_TAG grok_switch.exe grok_switch.exe.sha256 grok_switch_gui.exe grok_switch_gui.exe.sha256 --clobber
 
       - name: Remove temporary certificate
         if: always()

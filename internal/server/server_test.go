@@ -37,6 +37,50 @@ func TestRemoteRequestsAreRejectedByDefault(t *testing.T) {
 	}
 }
 
+func TestRemoteRequestWithoutSessionPromptsPairing(t *testing.T) {
+	settingsStore := settings.NewStore(filepath.Join(t.TempDir(), "settings.json"))
+	current := settings.Default()
+	current.LANAccessEnabled = true
+	if _, err := settingsStore.Update(current); err != nil {
+		t.Fatal(err)
+	}
+	remote := remoteaccess.NewStore(filepath.Join(t.TempDir(), "remote_access.json"))
+	s := &Server{Settings: settingsStore, RemoteAccess: remote}
+	next := s.withAccess(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	t.Run("browser page redirects to pairing", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "http://192.168.1.10:17878/", nil)
+		req.RemoteAddr = "192.168.1.20:40000"
+		response := httptest.NewRecorder()
+		next.ServeHTTP(response, req)
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusSeeOther, response.Body.String())
+		}
+		if location := response.Header().Get("Location"); location != "/pair" {
+			t.Fatalf("Location = %q, want /pair", location)
+		}
+	})
+
+	t.Run("API returns friendly unauthorized response", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "http://192.168.1.10:17878/api/status", nil)
+		req.RemoteAddr = "192.168.1.20:40001"
+		response := httptest.NewRecorder()
+		next.ServeHTTP(response, req)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusUnauthorized, response.Body.String())
+		}
+		body := response.Body.String()
+		if !strings.Contains(body, "请先使用电脑端生成的二维码完成配对") {
+			t.Fatalf("unexpected body: %s", body)
+		}
+		if strings.Contains(body, "named cookie not present") {
+			t.Fatalf("raw missing-cookie error leaked: %s", body)
+		}
+	})
+}
+
 func TestRemoteSessionAndOriginProtection(t *testing.T) {
 	settingsStore := settings.NewStore(filepath.Join(t.TempDir(), "settings.json"))
 	current := settings.Default()
@@ -95,7 +139,7 @@ func TestPairingSetsHTTPOnlySessionCookie(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusSeeOther)
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != lanSessionCookie || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+	if len(cookies) != 1 || cookies[0].Name != lanSessionCookie || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Fatalf("unexpected session cookies: %#v", cookies)
 	}
 }

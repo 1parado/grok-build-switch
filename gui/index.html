@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>grok_switch GUI</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      background: #f7f7f5;
+      color: #232321;
+    }
+    main { display: grid; justify-items: center; gap: 18px; padding: 32px; text-align: center; }
+    .mark {
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #cbc9c4;
+      border-radius: 8px;
+      background: #fff;
+      color: #6553ad;
+      font: 600 25px/1 Georgia, serif;
+      box-shadow: 0 12px 30px rgb(35 35 33 / 8%);
+    }
+    h1 { margin: 0; font: 600 18px/1.3 Georgia, "Microsoft YaHei UI", serif; }
+    p { margin: -8px 0 0; color: #77746e; font-size: 12px; }
+    .track { width: 180px; height: 2px; overflow: hidden; background: #dedbd5; }
+    .track::after {
+      content: "";
+      display: block;
+      width: 44%;
+      height: 100%;
+      background: #6553ad;
+      animation: travel 1.15s ease-in-out infinite alternate;
+    }
+    @keyframes travel { to { transform: translateX(128%); } }
+    @media (prefers-reduced-motion: reduce) { .track::after { animation: none; width: 100%; } }
+  </style>
+</head>
+<body>
+  <main aria-live="polite">
+    <div class="mark" aria-hidden="true">G</div>
+    <h1>正在打开 grok_switch</h1>
+    <p>连接本地服务与会话工作台…</p>
+    <div class="track" aria-hidden="true"></div>
+  </main>
+</body>
+</html>

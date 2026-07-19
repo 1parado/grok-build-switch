@@ -1,10 +1,12 @@
 # Build outputs
 grok_switch.exe
+grok_switch_gui.exe
 *.exe
 *.syso
 *.test
 *.out
 grok_switch.exe.sha256
+grok_switch_gui.exe.sha256
 site/
 
 # Code-signing private keys must never be committed
@@ -17,6 +19,7 @@ bin/
 
 # IDE / local agent
 .claude/
+.codex-*/
 .idea/
 .vscode/
 *.swp

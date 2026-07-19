@@ -3,13 +3,49 @@ package agentbridge
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 )
+
+func TestIsSessionLoadOverflow(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "queue overflow", err: errors.New("notification queue overflow"), want: true},
+		{name: "peer disconnected in wrapped rpc error", err: fmt.Errorf("恢复失败: %w", errors.New("peer disconnected before response")), want: true},
+		{name: "connection closed", err: errors.New("peer connection closed"), want: true},
+		{name: "typed load error", err: &SessionLoadError{Cause: errors.New("unexpected eof")}, want: true},
+		{name: "ordinary load failure", err: errors.New("session not found"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsSessionLoadOverflow(test.err); got != test.want {
+				t.Fatalf("IsSessionLoadOverflow(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSessionLoadErrorMessageReflectsRecovery(t *testing.T) {
+	recovered := (&SessionLoadError{Cause: errors.New("connection closed")}).Error()
+	if !strings.Contains(recovered, "Agent 已自动重启") {
+		t.Fatalf("recovered error did not explain recovery: %q", recovered)
+	}
+	failed := (&SessionLoadError{Cause: errors.New("connection closed"), RecoveryErr: errors.New("start failed")}).Error()
+	if !strings.Contains(failed, "自动重启失败") || !strings.Contains(failed, "start failed") {
+		t.Fatalf("failed recovery error did not include cause: %q", failed)
+	}
+}
 
 func TestRetryExtensionBroadcastsState(t *testing.T) {
 	bridge := New(t.TempDir(), filepath.Join(t.TempDir(), "agent.log"))

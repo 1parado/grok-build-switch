@@ -16,6 +16,8 @@ const state = {
   agentMessages: [],
   agentSessions: [],
   activeAgentSession: null,
+  agentEngineState: "none",
+  agentFallbackSessionReady: false,
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -55,6 +57,258 @@ const CHAT_PANEL_LAYOUT = {
     maxWidth: 460,
   },
 };
+
+const CHAT_THEME_CONFIG_KEY = "gs_chat_theme_v1";
+const CHAT_THEME_IMAGE_KEY = "gs_chat_theme_image_v1";
+const CHAT_THEME_MODES = new Set(["none", "frost", "night", "warm", "custom"]);
+const DEFAULT_CHAT_THEME = Object.freeze({
+  version: 2,
+  mode: "none",
+  shade: 24,
+  blur: 0,
+  focusX: 50,
+  focusY: 50,
+  imageName: "",
+});
+let chatTheme = { ...DEFAULT_CHAT_THEME };
+let chatThemeImageData = "";
+
+function clampThemeNumber(value, minimum, maximum, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
+}
+
+function normalizeChatTheme(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const mode = CHAT_THEME_MODES.has(source.mode) ? source.mode : DEFAULT_CHAT_THEME.mode;
+  const legacyCustom = mode === "custom" && Number(source.version || 1) < 2;
+  return {
+    version: 2,
+    mode,
+    shade: legacyCustom ? Math.min(8, Math.round(clampThemeNumber(source.shade, 0, 70, 8))) : Math.round(clampThemeNumber(source.shade, 0, 70, DEFAULT_CHAT_THEME.shade)),
+    blur: legacyCustom ? 0 : Math.round(clampThemeNumber(source.blur, 0, 20, DEFAULT_CHAT_THEME.blur)),
+    focusX: Math.round(clampThemeNumber(source.focusX, 0, 100, DEFAULT_CHAT_THEME.focusX)),
+    focusY: Math.round(clampThemeNumber(source.focusY, 0, 100, DEFAULT_CHAT_THEME.focusY)),
+    imageName: typeof source.imageName === "string" ? source.imageName.slice(0, 120) : "",
+  };
+}
+
+function readChatThemeStorage(key) {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function loadChatTheme() {
+  try {
+    const raw = readChatThemeStorage(CHAT_THEME_CONFIG_KEY);
+    return normalizeChatTheme(raw ? JSON.parse(raw) : DEFAULT_CHAT_THEME);
+  } catch {
+    return { ...DEFAULT_CHAT_THEME };
+  }
+}
+
+function persistChatTheme() {
+  try {
+    localStorage.setItem(CHAT_THEME_CONFIG_KEY, JSON.stringify(chatTheme));
+  } catch {
+    // A disabled or full local store should not prevent the chat UI from working.
+  }
+}
+
+function chatThemeImageCSS() {
+  if (!chatThemeImageData) {
+    return "linear-gradient(135deg, #d9dce2, #aa9bc8)";
+  }
+  return `url(${JSON.stringify(chatThemeImageData)})`;
+}
+
+function syncChatThemeControls() {
+  document.querySelectorAll("[data-chat-theme-choice]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.chatThemeChoice === chatTheme.mode));
+  });
+  const values = {
+    chatThemeShade: chatTheme.shade,
+    chatThemeBlur: chatTheme.blur,
+    chatThemeFocusX: chatTheme.focusX,
+    chatThemeFocusY: chatTheme.focusY,
+  };
+  for (const [id, value] of Object.entries(values)) {
+    if ($(id)) $(id).value = String(value);
+  }
+  if ($("chatThemeShadeValue")) $("chatThemeShadeValue").textContent = `${chatTheme.shade}%`;
+  if ($("chatThemeBlurValue")) $("chatThemeBlurValue").textContent = `${chatTheme.blur}px`;
+  if ($("chatThemeFocusXValue")) $("chatThemeFocusXValue").textContent = `${chatTheme.focusX}%`;
+  if ($("chatThemeFocusYValue")) $("chatThemeFocusYValue").textContent = `${chatTheme.focusY}%`;
+  if ($("chatThemeImageName")) {
+    $("chatThemeImageName").textContent = chatThemeImageData ? (chatTheme.imageName || "已保存本地图片") : "选择本地图片";
+  }
+  if ($("clearChatThemeImageBtn")) $("clearChatThemeImageBtn").disabled = !chatThemeImageData;
+}
+
+function applyChatTheme(next = chatTheme, persist = false) {
+  chatTheme = normalizeChatTheme(next);
+  if (chatTheme.mode === "custom" && !chatThemeImageData) chatTheme.mode = "none";
+  const root = document.documentElement;
+  root.dataset.chatTheme = chatTheme.mode;
+  root.style.setProperty("--chat-theme-shade", String(chatTheme.shade / 100));
+  root.style.setProperty("--chat-theme-blur", `${chatTheme.blur}px`);
+  root.style.setProperty("--chat-theme-position", `${chatTheme.focusX}% ${chatTheme.focusY}%`);
+  root.style.setProperty("--chat-theme-custom-image", chatThemeImageCSS());
+  if (persist) persistChatTheme();
+  syncChatThemeControls();
+}
+
+function openChatThemeDialog() {
+  const dialog = $("chatThemeDialog");
+  if (!dialog) return;
+  syncChatThemeControls();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeChatThemeDialog() {
+  const dialog = $("chatThemeDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function loadThemeImage(file) {
+  return new Promise((resolve, reject) => {
+    const objectURL = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectURL);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectURL);
+      reject(new Error("无法读取这张图片，请选择 PNG、JPEG 或 WebP 文件"));
+    };
+    image.src = objectURL;
+  });
+}
+
+function encodeThemeImage(image, maximumEdge, maximumPixels, quality) {
+  const pixelScale = Math.sqrt(maximumPixels / (image.naturalWidth * image.naturalHeight));
+  const scale = Math.min(1, maximumEdge / image.naturalWidth, maximumEdge / image.naturalHeight, pixelScale);
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("当前浏览器无法处理背景图片");
+  context.fillStyle = "#e8e7e3";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+async function importChatThemeImage(file) {
+  if (!file) return;
+  if (file.size > 16 * 1024 * 1024) throw new Error("背景图片不能超过 16 MB");
+  const image = await loadThemeImage(file);
+  if (image.naturalWidth > 16384 || image.naturalHeight > 16384 || image.naturalWidth * image.naturalHeight > 50_000_000) {
+    throw new Error("图片尺寸过大：单边不能超过 16384 像素，总像素不能超过 5000 万");
+  }
+
+  const attempts = [
+    { edge: 3200, pixels: 6_000_000, quality: 0.92 },
+    { edge: 2560, pixels: 4_000_000, quality: 0.88 },
+    { edge: 1920, pixels: 2_400_000, quality: 0.78 },
+    { edge: 1440, pixels: 1_500_000, quality: 0.72 },
+  ];
+  let storageError = null;
+  for (const attempt of attempts) {
+    const data = encodeThemeImage(image, attempt.edge, attempt.pixels, attempt.quality);
+    if (data.length > 3_800_000) continue;
+    try {
+      const replacingCustomImage = chatTheme.mode === "custom" && !!chatThemeImageData;
+      localStorage.setItem(CHAT_THEME_IMAGE_KEY, data);
+      chatThemeImageData = data;
+      applyChatTheme({
+        ...chatTheme,
+        mode: "custom",
+        shade: replacingCustomImage ? chatTheme.shade : 8,
+        blur: replacingCustomImage ? chatTheme.blur : 0,
+        imageName: file.name,
+      }, true);
+      toast("聊天背景已保存在当前设备", "success");
+      return;
+    } catch (err) {
+      storageError = err;
+    }
+  }
+  throw new Error(storageError ? "本地存储空间不足，请选择更小的图片" : "图片压缩后仍然过大，请选择尺寸更小的图片");
+}
+
+function clearChatThemeImage() {
+  try {
+    localStorage.removeItem(CHAT_THEME_IMAGE_KEY);
+  } catch {
+    // Keep reset usable even when storage is unavailable.
+  }
+  chatThemeImageData = "";
+  applyChatTheme({ ...chatTheme, mode: "none", imageName: "" }, true);
+  toast("已移除自定义背景", "success");
+}
+
+function initialiseChatThemes() {
+  chatTheme = loadChatTheme();
+  chatThemeImageData = readChatThemeStorage(CHAT_THEME_IMAGE_KEY);
+  applyChatTheme(chatTheme);
+
+  document.querySelectorAll("[data-chat-theme-choice]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.chatThemeChoice;
+      if (mode === "custom" && !chatThemeImageData) {
+        $("chatThemeImageFile")?.click();
+        return;
+      }
+      applyChatTheme({ ...chatTheme, mode }, true);
+    });
+  });
+
+  const rangeBindings = {
+    chatThemeShade: "shade",
+    chatThemeBlur: "blur",
+    chatThemeFocusX: "focusX",
+    chatThemeFocusY: "focusY",
+  };
+  for (const [id, field] of Object.entries(rangeBindings)) {
+    $(id)?.addEventListener("input", (event) => {
+      applyChatTheme({ ...chatTheme, [field]: Number(event.target.value) }, true);
+    });
+  }
+
+  $("openChatThemeBtn")?.addEventListener("click", openChatThemeDialog);
+  $("closeChatThemeBtn")?.addEventListener("click", closeChatThemeDialog);
+  $("doneChatThemeBtn")?.addEventListener("click", closeChatThemeDialog);
+  $("chooseChatThemeImageBtn")?.addEventListener("click", () => $("chatThemeImageFile")?.click());
+  $("clearChatThemeImageBtn")?.addEventListener("click", clearChatThemeImage);
+  $("chatThemeImageFile")?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      await importChatThemeImage(file);
+    } catch (err) {
+      toast(err.message || String(err), "error");
+    }
+  });
+  $("chatThemeDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("chatThemeDialog")) closeChatThemeDialog();
+  });
+  window.addEventListener("storage", (event) => {
+    if (event.key !== CHAT_THEME_CONFIG_KEY && event.key !== CHAT_THEME_IMAGE_KEY) return;
+    chatThemeImageData = readChatThemeStorage(CHAT_THEME_IMAGE_KEY);
+    applyChatTheme(loadChatTheme());
+  });
+}
 
 const TEMPLATES = {
   openai: {
@@ -118,7 +372,13 @@ async function api(path, options = {}) {
     ...options,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText || "请求失败");
+  if (!res.ok) {
+    const error = new Error(data.error || res.statusText || "请求失败");
+    error.code = data.code || "";
+    error.status = res.status;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 
@@ -406,21 +666,65 @@ async function resumeAgentSession(session) {
   if ($("agentCwd")) $("agentCwd").value = state.activeAgentSession.cwd || "";
   clearAgentTranscript(false);
   renderStoredHistory(history.messages || []);
+  setAgentEngineState("loading", "正在恢复引擎上下文…");
   updateConversationIdentity();
   renderAgentSessionList();
   connectAgentSocket();
-  const status = await api("/api/agent/session/load", {
-    method: "POST",
-    body: JSON.stringify({
-      cwd: state.activeAgentSession.cwd,
-      session_id: state.activeAgentSession.id,
-      always_approve: $("agentAlwaysApprove").checked,
-    }),
-  });
+  let status;
+  try {
+    status = await api("/api/agent/session/load", {
+      method: "POST",
+      body: JSON.stringify({
+        cwd: state.activeAgentSession.cwd,
+        session_id: state.activeAgentSession.id,
+        always_approve: $("agentAlwaysApprove").checked,
+      }),
+    });
+  } catch (err) {
+    if (handleSessionLoadFallback(err)) {
+      closeNativeChatPanels();
+      scrollChatToBottom();
+      return false;
+    }
+    setAgentEngineState("readonly", "仅显示本地历史，引擎上下文恢复失败。请开启新对话后再发送消息。");
+    const latestStatus = await api("/api/agent/status").catch(() => state.agentStatus);
+    if (latestStatus) renderAgentStatus(latestStatus);
+    throw err;
+  }
+  setAgentEngineState("attached");
   state.agentStatus = status;
   renderAgentStatus({ ...status, model: status.model || state.activeAgentSession.model });
   closeNativeChatPanels();
   scrollChatToBottom();
+  return true;
+}
+
+function setAgentEngineState(mode, message = "") {
+  state.agentEngineState = mode;
+  if (mode !== "readonly") state.agentFallbackSessionReady = false;
+  const banner = $("agentEngineBanner");
+  if (!banner) return;
+  const visible = mode === "loading" || mode === "readonly";
+  banner.hidden = !visible;
+  banner.dataset.state = mode;
+  if ($("agentEngineBannerText")) $("agentEngineBannerText").textContent = message;
+  if ($("agentReadonlyNewBtn")) $("agentReadonlyNewBtn").hidden = mode !== "readonly";
+}
+
+function handleSessionLoadFallback(err) {
+  if (err?.code !== "session_load_overflow") return false;
+  const status = err.data?.status;
+  if (status) {
+    state.agentStatus = status;
+    renderAgentStatus(status);
+  }
+  const message = err.data?.agent_restarted
+    ? "仅显示本地历史：会话过大或恢复通知过多，引擎上下文未挂载。Agent 已恢复，可开启新对话。"
+    : "仅显示本地历史：引擎上下文未挂载，Agent 自动重启也未成功。请手动启动新对话。";
+  setAgentEngineState("readonly", message);
+  state.agentFallbackSessionReady = !!err.data?.agent_restarted && status?.state === "ready" && !!status?.session_id;
+  renderAgentStatus(status || state.agentStatus);
+  toast(err.message, "error");
   return true;
 }
 
@@ -627,8 +931,9 @@ function renderAgentStatus(status) {
     $("agentAlwaysApprove").disabled = running;
     if (typeof status.always_approve === "boolean") $("agentAlwaysApprove").checked = status.always_approve;
   }
-  if ($("chatInput")) $("chatInput").disabled = stateName !== "ready";
-  if ($("chatSendBtn")) $("chatSendBtn").disabled = stateName !== "ready" || !$("chatInput")?.value.trim();
+  const composerReady = stateName === "ready" && state.agentEngineState !== "loading";
+  if ($("chatInput")) $("chatInput").disabled = !composerReady;
+  if ($("chatSendBtn")) $("chatSendBtn").disabled = !composerReady || !$("chatInput")?.value.trim();
   if (!status.available && status.error) {
     const empty = $("chatEmpty");
     if (empty) {
@@ -1109,10 +1414,19 @@ async function startAgent() {
     await api("/api/agent/stop", { method: "POST", body: "{}" });
   }
   const resumable = state.activeAgentSession?.id && state.activeAgentSession?.cwd === cwd;
-  const status = await api("/api/agent/start", {
-    method: "POST",
-    body: JSON.stringify({ cwd, always_approve: alwaysApprove, session_id: resumable ? state.activeAgentSession.id : "" }),
-  });
+  if (resumable) setAgentEngineState("loading", "正在恢复引擎上下文…");
+  let status;
+  try {
+    status = await api("/api/agent/start", {
+      method: "POST",
+      body: JSON.stringify({ cwd, always_approve: alwaysApprove, session_id: resumable ? state.activeAgentSession.id : "" }),
+    });
+  } catch (err) {
+    if (resumable && handleSessionLoadFallback(err)) return false;
+    if (resumable) setAgentEngineState("readonly", "仅显示本地历史，引擎上下文恢复失败。请开启新对话后再发送消息。");
+    throw err;
+  }
+  setAgentEngineState("attached");
   if (!resumable) clearAgentTranscript();
   state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
   if (!resumable) {
@@ -1137,6 +1451,7 @@ async function newAgentSession() {
     status = await api("/api/agent/session", { method: "POST", body: JSON.stringify({ cwd }) });
   }
   clearAgentTranscript();
+  setAgentEngineState("attached");
   state.activeAgentSession = { id: status.session_id, title: "新对话", cwd: status.cwd || cwd, model: status.model || "" };
   state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
   renderAgentStatus(status);
@@ -1153,9 +1468,29 @@ async function stopAgent() {
   renderAgentStatus(status);
 }
 
-function sendAgentMessage() {
+async function sendAgentMessage() {
   const text = $("chatInput").value.trim();
   if (!text) return;
+  if (state.agentEngineState === "readonly") {
+    if (!confirm("当前仅显示本地历史，原会话上下文没有恢复。发送这条消息将开启新对话，是否继续？")) return;
+    const status = state.agentStatus;
+    if (state.agentFallbackSessionReady && status?.state === "ready" && status?.session_id) {
+      clearAgentTranscript();
+      state.activeAgentSession = {
+        id: status.session_id,
+        title: "新对话",
+        cwd: status.cwd || $("agentCwd").value.trim(),
+        model: status.model || "",
+      };
+      setAgentEngineState("attached");
+      updateConversationIdentity();
+      renderAgentStatus(status);
+      loadAgentSessions().catch(() => {});
+    } else {
+      const created = await newAgentSession();
+      if (created === false) return;
+    }
+  }
   if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
     toast("对话连接尚未就绪", "error");
     connectAgentSocket();
@@ -2228,8 +2563,9 @@ $("permissionAllowBtn").onclick = () => respondAgentPermission(true);
 $("permissionRejectBtn").onclick = () => respondAgentPermission(false);
 $("chatComposer").onsubmit = (event) => {
   event.preventDefault();
-  sendAgentMessage();
+  sendAgentMessage().catch((err) => toast(err.message || String(err), "error"));
 };
+$("agentReadonlyNewBtn").onclick = () => run(newAgentSession, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
 $("chatInput").oninput = () => renderAgentStatus(state.agentStatus);
 $("chatInput").onkeydown = (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -2668,11 +3004,15 @@ document.addEventListener("keydown", (event) => {
       $("saveProfileBtn").click();
     }
   }
+  if (event.key === "Escape" && $("chatThemeDialog")?.open) {
+    return;
+  }
   if (event.key === "Escape" && state.view !== "home") {
     showView("home");
   }
 });
 
+initialiseChatThemes();
 showView("home");
 refreshAll()
   .then(() => {

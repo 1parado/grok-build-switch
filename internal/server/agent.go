@@ -61,6 +61,10 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := s.Agent.Start(ctx, opts); err != nil {
+		if agentbridge.IsSessionLoadOverflow(err) {
+			writeSessionLoadError(w, err, s.Agent.Status())
+			return
+		}
 		writeAgentError(w, err)
 		return
 	}
@@ -131,6 +135,10 @@ func (s *Server) handleAgentSessionLoad(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	if err := s.Agent.Start(ctx, opts); err != nil {
+		if agentbridge.IsSessionLoadOverflow(err) {
+			writeSessionLoadError(w, err, s.Agent.Status())
+			return
+		}
 		writeAgentError(w, err)
 		return
 	}
@@ -294,6 +302,31 @@ func writeAgentError(w http.ResponseWriter, err error) {
 		status = http.StatusBadRequest
 	}
 	writeError(w, err, status)
+}
+
+func writeSessionLoadError(w http.ResponseWriter, err error, status agentbridge.Status) {
+	restarted := false
+	var loadErr *agentbridge.SessionLoadError
+	if errors.As(err, &loadErr) {
+		restarted = loadErr.Recovered()
+	}
+	writeJSONStatus(w, struct {
+		Error           string             `json:"error"`
+		Code            string             `json:"code"`
+		ReadonlyHistory bool               `json:"readonly_history"`
+		Recoverable     bool               `json:"recoverable"`
+		EngineLoaded    bool               `json:"engine_loaded"`
+		AgentRestarted  bool               `json:"agent_restarted"`
+		Status          agentbridge.Status `json:"status"`
+	}{
+		Error:           err.Error(),
+		Code:            agentbridge.SessionLoadOverflowCode,
+		ReadonlyHistory: true,
+		Recoverable:     true,
+		EngineLoaded:    false,
+		AgentRestarted:  restarted,
+		Status:          status,
+	}, http.StatusConflict)
 }
 
 func agentWebSocketOriginAllowed(r *http.Request) bool {

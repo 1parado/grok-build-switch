@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"html"
 	"net"
@@ -53,7 +54,7 @@ func (s *Server) withAccess(next http.Handler) http.Handler {
 		if err == nil && s.RemoteAccess != nil {
 			authorized, err = s.RemoteAccess.Authorized(cookie.Value)
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, http.ErrNoCookie) {
 			writeError(w, err, http.StatusInternalServerError)
 			return
 		}
@@ -158,7 +159,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   30 * 24 * 60 * 60,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

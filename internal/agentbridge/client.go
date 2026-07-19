@@ -52,10 +52,7 @@ func (b *Bridge) HandleExtensionMethod(_ context.Context, method string, params 
 }
 
 func (b *Bridge) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
-	b.mu.RLock()
-	suppress := b.suppressUpdates
-	b.mu.RUnlock()
-	if suppress {
+	if b.suppressUpdates.Load() {
 		return nil
 	}
 	sessionID := string(params.SessionId)

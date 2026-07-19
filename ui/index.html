@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=27">
+  <link rel="stylesheet" href="/style.css?v=29">
 </head>
 <body>
   <div class="shell">
@@ -237,6 +237,8 @@
                 <span class="statusDot" aria-hidden="true"></span>
                 <span id="agentStatusText">未启动</span>
               </span>
+              <button type="button" id="openChatThemeBtn" class="nativeIconBtn themeToggle"
+                aria-label="设置聊天背景" aria-haspopup="dialog" title="聊天背景">◐</button>
               <button type="button" id="openContextRailBtn" class="nativeIconBtn railToggle" aria-label="打开会话信息">···</button>
             </div>
           </header>
@@ -247,6 +249,11 @@
               <strong>从一个问题开始</strong>
               <span>Markdown、代码、表格与 Mermaid 图表将在这里原生呈现</span>
             </div>
+          </div>
+
+          <div id="agentEngineBanner" class="agentEngineBanner" data-state="loading" role="status" hidden>
+            <span id="agentEngineBannerText">正在恢复引擎上下文…</span>
+            <button type="button" id="agentReadonlyNewBtn" class="btn sm" hidden>开启新对话</button>
           </div>
 
           <div id="permissionBar" class="permissionBar" hidden>
@@ -310,8 +317,8 @@
             <div id="toolActivityList" class="toolActivityList"><span>暂无工具活动</span></div>
           </div>
         </aside>
+        <div id="nativeChatScrim" class="nativeChatScrim" hidden></div>
       </section>
-      <div id="nativeChatScrim" class="nativeChatScrim" hidden></div>
     </main>
 
     <!-- SETTINGS -->
@@ -512,6 +519,71 @@
     </main>
   </div>
 
+  <dialog id="chatThemeDialog" class="chatThemeDialog" aria-labelledby="chatThemeTitle">
+    <div class="chatThemeHead">
+      <div>
+        <span class="nativeEyebrow">WORKSPACE SKIN</span>
+        <h2 id="chatThemeTitle">聊天背景</h2>
+        <p>背景只保存在当前设备，不会进入会话或同步账号。</p>
+      </div>
+      <button type="button" id="closeChatThemeBtn" class="nativeIconBtn" aria-label="关闭聊天背景设置">×</button>
+    </div>
+
+    <div class="chatThemePresets" role="group" aria-label="背景主题">
+      <button type="button" class="chatThemePreset" data-chat-theme-choice="none" aria-pressed="false">
+        <span class="chatThemeSwatch themeSwatchNone" aria-hidden="true"></span>
+        <span><strong>纯净</strong><small>原始工作台</small></span>
+      </button>
+      <button type="button" class="chatThemePreset" data-chat-theme-choice="frost" aria-pressed="false">
+        <span class="chatThemeSwatch themeSwatchFrost" aria-hidden="true"></span>
+        <span><strong>霜蓝</strong><small>清醒、低干扰</small></span>
+      </button>
+      <button type="button" class="chatThemePreset" data-chat-theme-choice="night" aria-pressed="false">
+        <span class="chatThemeSwatch themeSwatchNight" aria-hidden="true"></span>
+        <span><strong>深空</strong><small>夜间专注</small></span>
+      </button>
+      <button type="button" class="chatThemePreset" data-chat-theme-choice="warm" aria-pressed="false">
+        <span class="chatThemeSwatch themeSwatchWarm" aria-hidden="true"></span>
+        <span><strong>余晖</strong><small>柔暖、长阅读</small></span>
+      </button>
+      <button type="button" class="chatThemePreset" data-chat-theme-choice="custom" aria-pressed="false">
+        <span class="chatThemeSwatch themeSwatchCustom" aria-hidden="true"></span>
+        <span><strong>自定义</strong><small id="chatThemeImageName">选择本地图片</small></span>
+      </button>
+    </div>
+
+    <div class="chatThemeControls">
+      <label class="chatThemeRange">
+        <span>遮罩强度 <output id="chatThemeShadeValue">24%</output></span>
+        <input id="chatThemeShade" type="range" min="0" max="70" step="1" value="24">
+      </label>
+      <label class="chatThemeRange">
+        <span>背景模糊 <output id="chatThemeBlurValue">0px</output></span>
+        <input id="chatThemeBlur" type="range" min="0" max="20" step="1" value="0">
+      </label>
+      <div class="chatThemeFocusGrid">
+        <label class="chatThemeRange">
+          <span>水平焦点 <output id="chatThemeFocusXValue">50%</output></span>
+          <input id="chatThemeFocusX" type="range" min="0" max="100" step="1" value="50">
+        </label>
+        <label class="chatThemeRange">
+          <span>垂直焦点 <output id="chatThemeFocusYValue">50%</output></span>
+          <input id="chatThemeFocusY" type="range" min="0" max="100" step="1" value="50">
+        </label>
+      </div>
+    </div>
+
+    <div class="chatThemeActions">
+      <div>
+        <button type="button" id="chooseChatThemeImageBtn" class="btn">选择图片</button>
+        <button type="button" id="clearChatThemeImageBtn" class="btn ghost">移除自定义图</button>
+      </div>
+      <button type="button" id="doneChatThemeBtn" class="btn primary">完成</button>
+    </div>
+    <input id="chatThemeImageFile" type="file" accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" hidden>
+    <p class="chatThemeHint">支持 PNG、JPEG、WebP，最大 16 MB。图片会在本机压缩后保存；建议使用不含文字和界面元素的 16:9 背景。</p>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/marked.umd.js?v=18.0.6"></script>
   <script src="/vendor/purify.min.js?v=3.4.12"></script>
@@ -519,6 +591,6 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=27"></script>
+  <script src="/app.js?v=29"></script>
 </body>
 </html>

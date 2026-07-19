@@ -21,6 +21,51 @@ var (
 	ErrPermissionNotFound = errors.New("权限请求已失效")
 )
 
+const SessionLoadOverflowCode = "session_load_overflow"
+
+// SessionLoadError reports a session/load failure that left the ACP
+// connection unusable. The bridge attempts to start a fresh session before
+// returning this error so callers can keep the stored history as a read-only
+// preview while still offering a working new conversation.
+type SessionLoadError struct {
+	Cause       error
+	RecoveryErr error
+}
+
+func (e *SessionLoadError) Error() string {
+	message := "会话过大或恢复时通知过多，引擎上下文未能加载。已展示本地历史（只读）"
+	if e.RecoveryErr == nil {
+		return message + "；Agent 已自动重启，可开启新对话"
+	}
+	return fmt.Sprintf("%s；Agent 自动重启失败: %v", message, e.RecoveryErr)
+}
+
+func (e *SessionLoadError) Unwrap() error { return e.Cause }
+
+func (e *SessionLoadError) Recovered() bool { return e.RecoveryErr == nil }
+
+func IsSessionLoadOverflow(err error) bool {
+	if err == nil {
+		return false
+	}
+	var loadErr *SessionLoadError
+	if errors.As(err, &loadErr) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"notification queue overflow",
+		"peer disconnected before response",
+		"peer connection closed",
+		"connection closed",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 type pendingPermission struct {
 	options []acp.PermissionOption
 	result  chan acp.PermissionOptionId
@@ -43,13 +88,14 @@ type Bridge struct {
 	alwaysApprove   bool
 	busy            bool
 	model           string
-	suppressUpdates bool
+	suppressUpdates atomic.Bool
 	generation      uint64
 	cmd             *exec.Cmd
 	cancel          context.CancelFunc
 	processDone     chan struct{}
 	closeJob        func()
 	conn            *acp.ClientSideConnection
+	outputFilter    *sessionLoadNotificationFilter
 	processCtx      context.Context
 
 	subscribers map[string]chan Event
@@ -120,7 +166,10 @@ func (b *Bridge) Status() Status {
 func (b *Bridge) Start(ctx context.Context, opts StartOptions) error {
 	b.opMu.Lock()
 	defer b.opMu.Unlock()
+	return b.startLocked(ctx, opts)
+}
 
+func (b *Bridge) startLocked(ctx context.Context, opts StartOptions) error {
 	cwd, err := normalizeCwd(opts.Cwd, b.defaultCwd)
 	if err != nil {
 		return err
@@ -133,7 +182,11 @@ func (b *Bridge) Start(ctx context.Context, opts StartOptions) error {
 	b.mu.RUnlock()
 	if alreadyRunning && sameProcessMode {
 		if opts.SessionID != "" {
-			return b.loadSessionLocked(ctx, opts.SessionID, cwd)
+			err := b.loadSessionLocked(ctx, opts.SessionID, cwd)
+			if IsSessionLoadOverflow(err) {
+				return b.recoverSessionLoadLocked(opts, err)
+			}
+			return err
 		}
 		if sameCwd {
 			return nil
@@ -191,7 +244,8 @@ func (b *Bridge) Start(ctx context.Context, opts StartOptions) error {
 		_, _ = fmt.Fprintf(logFile, "grok_switch: attach process job: %v\n", jobErr)
 		closeJob = func() {}
 	}
-	conn := acp.NewClientSideConnection(b, stdin, stdout)
+	outputFilter := newSessionLoadNotificationFilter(stdout, &b.suppressUpdates)
+	conn := acp.NewClientSideConnection(b, stdin, outputFilter)
 	done := make(chan struct{})
 
 	b.mu.Lock()
@@ -205,12 +259,13 @@ func (b *Bridge) Start(ctx context.Context, opts StartOptions) error {
 	b.alwaysApprove = opts.AlwaysApprove
 	b.busy = false
 	b.model = ""
-	b.suppressUpdates = false
+	b.suppressUpdates.Store(false)
 	b.cmd = cmd
 	b.cancel = cancel
 	b.processDone = done
 	b.closeJob = closeJob
 	b.conn = conn
+	b.outputFilter = outputFilter
 	b.processCtx = processCtx
 	b.mu.Unlock()
 	b.broadcastStatus()
@@ -239,11 +294,29 @@ func (b *Bridge) Start(ctx context.Context, opts StartOptions) error {
 		err = b.newSessionLocked(ctx, cwd)
 	}
 	if err != nil {
+		if IsSessionLoadOverflow(err) {
+			return b.recoverSessionLoadLocked(opts, err)
+		}
 		b.stopLocked()
 		b.setDead(err)
 		return err
 	}
 	return nil
+}
+
+func (b *Bridge) recoverSessionLoadLocked(opts StartOptions, cause error) error {
+	fmt.Fprintf(os.Stderr, "grok_switch: session load failed session=%s: %v\n", opts.SessionID, cause)
+	b.stopLocked()
+	recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	recoveryErr := b.startLocked(recoveryCtx, StartOptions{
+		Cwd:           opts.Cwd,
+		AlwaysApprove: opts.AlwaysApprove,
+	})
+	if recoveryErr != nil {
+		fmt.Fprintf(os.Stderr, "grok_switch: session load recovery failed session=%s: %v\n", opts.SessionID, recoveryErr)
+	}
+	return &SessionLoadError{Cause: cause, RecoveryErr: recoveryErr}
 }
 
 func (b *Bridge) NewSession(ctx context.Context, cwd string) error {
@@ -288,6 +361,7 @@ func (b *Bridge) newSessionLocked(ctx context.Context, cwd string) error {
 func (b *Bridge) loadSessionLocked(ctx context.Context, sessionID, cwd string) error {
 	b.mu.RLock()
 	conn := b.conn
+	outputFilter := b.outputFilter
 	running := b.cmd != nil
 	busy := b.busy
 	b.mu.RUnlock()
@@ -304,14 +378,25 @@ func (b *Bridge) loadSessionLocked(ctx context.Context, sessionID, cwd string) e
 	if filepath.Clean(summary.Info.Cwd) != filepath.Clean(cwd) {
 		return fmt.Errorf("会话工作目录不匹配: %s", summary.Info.Cwd)
 	}
+	var droppedBefore uint64
+	if outputFilter != nil {
+		droppedBefore = outputFilter.Dropped()
+	}
 	b.mu.Lock()
-	b.suppressUpdates = true
+	b.busy = true
 	b.mu.Unlock()
+	b.suppressUpdates.Store(true)
 	response, err := conn.LoadSession(ctx, acp.LoadSessionRequest{
 		SessionId: acp.SessionId(sessionID), Cwd: cwd, McpServers: []acp.McpServer{},
 	})
+	b.suppressUpdates.Store(false)
+	if outputFilter != nil {
+		if dropped := outputFilter.Dropped() - droppedBefore; dropped > 0 {
+			fmt.Fprintf(os.Stderr, "grok_switch: suppressed session replay notifications session=%s count=%d\n", sessionID, dropped)
+		}
+	}
 	b.mu.Lock()
-	b.suppressUpdates = false
+	b.busy = false
 	if err == nil {
 		b.cwd = cwd
 		b.sessionID = sessionID
@@ -458,6 +543,7 @@ func (b *Bridge) stopLocked() {
 	b.processDone = nil
 	b.closeJob = nil
 	b.conn = nil
+	b.outputFilter = nil
 	b.processCtx = nil
 	b.sessionID = ""
 	b.busy = false
@@ -483,6 +569,7 @@ func (b *Bridge) waitProcess(generation uint64, cmd *exec.Cmd, logFile *os.File,
 	b.processDone = nil
 	b.closeJob = nil
 	b.conn = nil
+	b.outputFilter = nil
 	b.processCtx = nil
 	b.sessionID = ""
 	b.busy = false

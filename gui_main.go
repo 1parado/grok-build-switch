@@ -1,20 +1,24 @@
-//go:build !wailsgui
+//go:build wailsgui
 
 package main
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+
 	"grok_switch/internal/agentbridge"
-	"grok_switch/internal/autostart"
 	"grok_switch/internal/crash"
 	"grok_switch/internal/grokauth"
 	"grok_switch/internal/grokpool"
@@ -25,51 +29,40 @@ import (
 	"grok_switch/internal/settings"
 	"grok_switch/internal/singleinstance"
 	"grok_switch/internal/switcher"
-	"grok_switch/internal/tray"
 )
 
 func main() {
 	defer crash.RecoverMainThread()
 
-	silent := flag.Bool("silent", false, "start without opening browser")
-	noTray := flag.Bool("no-tray", false, "run http server without tray")
-	flag.Parse()
-
 	resolved, err := paths.Resolve()
 	if err != nil {
-		fatal(err)
+		guiFatal(err)
 	}
-	// Initialize diagnostics before any directory setup so permission failures
-	// still produce a native error dialog and use the log whenever possible.
 	crash.Setup(resolved.LogFile)
 	if err := resolved.Ensure(); err != nil {
-		fatal(err)
+		guiFatal(err)
 	}
 
 	settingsStore := settings.NewStore(resolved.SettingsFile)
 	instanceLock, alreadyRunning, err := singleinstance.Acquire(resolved.DataDir)
 	if err != nil {
-		fatal(fmt.Errorf("创建单实例锁失败: %w", err))
+		guiFatal(fmt.Errorf("创建单实例锁失败: %w", err))
 	}
 	if alreadyRunning {
 		url, findErr := waitForExistingInstanceURL(settingsStore, resolved.DataDir, 3*time.Second)
-		if findErr == nil {
-			if openErr := tray.OpenBrowser(url); openErr == nil {
-				return
-			} else {
-				crash.Logf("open existing instance failed: %v", openErr)
-			}
-		} else {
-			crash.Logf("find existing instance failed: %v", findErr)
+		if findErr != nil {
+			guiFatal(fmt.Errorf("连接正在运行的 grok_switch 失败: %w", findErr))
 		}
-		crash.ShowInfo("grok_switch", "grok_switch 已经在运行，但未能自动打开管理页面。请使用系统托盘图标打开。")
+		if err := runWailsWindow(url, resolved.DataDir); err != nil {
+			guiFatal(err)
+		}
 		return
 	}
 	defer instanceLock.Close()
 
 	exePath, err := os.Executable()
 	if err != nil {
-		fatal(err)
+		guiFatal(err)
 	}
 	exePath, _ = filepath.Abs(exePath)
 
@@ -77,10 +70,10 @@ func main() {
 	grokAuthStore := grokauth.NewStore(resolved.GrokAuthFile)
 	grokPool, err := grokpool.NewManager(resolved.GrokPoolDir)
 	if err != nil {
-		fatal(err)
+		guiFatal(err)
 	}
 	if err := grokAuthStore.SetProxyURL(grokPool.Status().Settings.ProxyURL); err != nil {
-		fatal(err)
+		guiFatal(err)
 	}
 	if singleStatus, statusErr := grokAuthStore.Status(); statusErr == nil && singleStatus.Configured {
 		if raw, readErr := os.ReadFile(resolved.GrokAuthFile); readErr == nil {
@@ -91,6 +84,7 @@ func main() {
 	}
 	grokPool.Start()
 	defer grokPool.Close()
+
 	sw := &switcher.Switcher{
 		ConfigPath: resolved.GrokConfig,
 		BackupsDir: resolved.BackupsDir,
@@ -99,13 +93,9 @@ func main() {
 	if err := sw.EnsureDefaultProfile(); err != nil {
 		crash.Logf("default profile import skipped: %v", err)
 	}
-
 	currentSettings, err := settingsStore.Get()
 	if err != nil {
-		fatal(err)
-	}
-	if err := autostart.Sync(currentSettings.Autostart, exePath, currentSettings.SilentAutostart); err != nil {
-		crash.Logf("autostart sync failed: %v", err)
+		guiFatal(err)
 	}
 	agent := agentbridge.New(resolved.GrokHome, filepath.Join(resolved.DataDir, "agent.log"))
 	agent.SetDefaultCwd(currentSettings.AgentDefaultCwd)
@@ -125,57 +115,65 @@ func main() {
 	}
 	httpServer, port, err := appServer.Listen(currentSettings.Port)
 	if err != nil {
-		fatal(err)
+		guiFatal(err)
 	}
-	// Route net/http's internal panic/error reports into the crash log too.
 	if crashFile := resolved.LogFile; crashFile != "" {
 		if f, ferr := os.OpenFile(crashFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); ferr == nil {
 			httpServer.ErrorLog = log.New(f, "http: ", log.LstdFlags)
+			defer f.Close()
 		}
 	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(ctx)
+	}()
+
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
-
-	trayApp := &tray.Tray{
-		Profiles: profileStore,
-		Settings: settingsStore,
-		Switcher: sw,
-		URL:      url,
-		ExePath:  exePath,
-		DataDir:  resolved.DataDir,
-		LogFile:  resolved.LogFile,
-		AuthFile: filepath.Join(resolved.GrokHome, "auth.json"),
-		Assets:   assets,
+	if err := runWailsWindow(url, resolved.DataDir); err != nil {
+		guiFatal(err)
 	}
-	if !*noTray {
-		appServer.SetOnChanged(trayApp.Refresh)
-	}
-
-	if !*silent && currentSettings.AutoOpenBrowser {
-		_ = tray.OpenBrowser(url)
-	}
-
-	if *noTray {
-		waitForSignal()
-		shutdown(httpServer)
-		return
-	}
-	trayApp.Run()
-	shutdown(httpServer)
 }
 
-func waitForSignal() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	<-ch
+func runWailsWindow(url, dataDir string) error {
+	loadingAssets, err := fs.Sub(assets, "gui")
+	if err != nil {
+		return fmt.Errorf("加载 GUI 启动画面失败: %w", err)
+	}
+	targetJSON, _ := json.Marshal(url)
+	redirectScript := fmt.Sprintf(`if (window.location.origin !== new URL(%s).origin) { window.location.replace(%s); }`, targetJSON, targetJSON)
+	icon, _ := assets.ReadFile("assets/icon.ico")
+	trayController := newGUITrayController(url, icon)
+	trayController.register()
+	defer trayController.shutdown()
+
+	return wails.Run(&options.App{
+		Title:             "grok_switch GUI",
+		Width:             1280,
+		Height:            820,
+		MinWidth:          960,
+		MinHeight:         640,
+		BackgroundColour:  &options.RGBA{R: 247, G: 247, B: 245, A: 255},
+		AssetServer:       &assetserver.Options{Assets: loadingAssets},
+		OnStartup:         trayController.startup,
+		OnDomReady:        func(ctx context.Context) { wailsruntime.WindowExecJS(ctx, redirectScript) },
+		OnBeforeClose:     trayController.beforeClose,
+		OnShutdown:        func(context.Context) { trayController.shutdown() },
+		WindowStartState:  options.Normal,
+		HideWindowOnClose: false,
+		Windows: &windows.Options{
+			Theme:               windows.Light,
+			WebviewUserDataPath: filepath.Join(dataDir, "wails-webview2"),
+			ResizeDebounceMS:    12,
+			Messages: &windows.Messages{
+				Webview2NotInstalled: "需要 Microsoft Edge WebView2 Runtime 才能运行 grok_switch GUI。",
+				Error:                "grok_switch GUI 启动失败",
+			},
+		},
+	})
 }
 
-func shutdown(srv interface{ Shutdown(context.Context) error }) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-}
-
-func fatal(err error) {
+func guiFatal(err error) {
 	crash.ReportFatal(err)
 	os.Exit(1)
 }

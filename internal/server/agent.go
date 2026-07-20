@@ -24,12 +24,16 @@ type AgentService interface {
 	Start(context.Context, agentbridge.StartOptions) error
 	Stop() error
 	NewSession(context.Context, string) error
-	Prompt(string) error
+	Prompt(string, []agentbridge.Attachment) error
+	CancelPrompt() error
 	Subscribe() (string, <-chan agentbridge.Event)
 	Unsubscribe(string)
 	RespondPermission(string, bool) error
+	RespondPermissionEx(string, bool, bool) error
+	SetSessionAutoApprove(bool)
 	ListStoredSessions(string, int) ([]agentbridge.SessionSummary, error)
 	StoredSessionHistory(string) (agentbridge.SessionHistory, error)
+	RenameStoredSession(string, string) error
 }
 
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +87,22 @@ func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Agent.Stop(); err != nil {
 		writeError(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, s.Agent.Status())
+}
+
+func (s *Server) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.Agent.CancelPrompt(); err != nil {
+		writeAgentError(w, err)
 		return
 	}
 	writeJSON(w, s.Agent.Status())
@@ -186,11 +206,41 @@ func (s *Server) handleAgentSessionHistory(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, history)
 }
 
+func (s *Server) handleAgentRename(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var request struct {
+		SessionID string `json:"session_id"`
+		Title     string `json:"title"`
+	}
+	if err := decodeAgentJSON(r, &request); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.SessionID) == "" {
+		writeError(w, errors.New("会话 ID 不能为空"), http.StatusBadRequest)
+		return
+	}
+	if err := s.Agent.RenameStoredSession(request.SessionID, request.Title); err != nil {
+		writeError(w, err, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
 type agentSocketMessage struct {
-	Type      string `json:"type"`
-	Text      string `json:"text,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Allow     bool   `json:"allow,omitempty"`
+	Type        string                   `json:"type"`
+	Text        string                   `json:"text,omitempty"`
+	RequestID   string                   `json:"request_id,omitempty"`
+	Allow       bool                     `json:"allow,omitempty"`
+	Remember    bool                     `json:"remember,omitempty"`
+	Attachments []agentbridge.Attachment `json:"attachments,omitempty"`
 }
 
 func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -221,8 +271,10 @@ func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
 	go s.readAgentSocket(ctx, cancel, conn, replies)
 
 	status := s.Agent.Status()
+	auto := status.SessionAutoApprove
 	if err := wsjson.Write(ctx, conn, agentbridge.Event{
-		Type: "agent_status", SessionID: status.SessionID, Status: status.State, Model: status.Model, Error: status.Error,
+		Type: "agent_status", SessionID: status.SessionID, Status: status.State,
+		Model: status.Model, Error: status.Error, SessionAutoApprove: &auto,
 	}); err != nil {
 		return
 	}
@@ -252,9 +304,15 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 		var err error
 		switch message.Type {
 		case "user_message":
-			err = s.Agent.Prompt(message.Text)
+			err = s.Agent.Prompt(message.Text, message.Attachments)
+		case "cancel":
+			err = s.Agent.CancelPrompt()
 		case "permission_response":
-			err = s.Agent.RespondPermission(message.RequestID, message.Allow)
+			err = s.Agent.RespondPermissionEx(message.RequestID, message.Allow, message.Remember)
+		case "set_session_auto_approve":
+			s.Agent.SetSessionAutoApprove(message.Allow || message.Remember)
+			// Status broadcast is emitted by SetSessionAutoApprove.
+			continue
 		case "ping":
 			replies <- agentbridge.Event{Type: "pong"}
 			continue
@@ -298,7 +356,8 @@ func writeAgentError(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	} else if errors.Is(err, agentbridge.ErrNotRunning) {
 		status = http.StatusServiceUnavailable
-	} else if strings.Contains(err.Error(), "工作目录") || strings.Contains(err.Error(), "消息不能为空") {
+	} else if strings.Contains(err.Error(), "工作目录") || strings.Contains(err.Error(), "消息不能为空") ||
+		strings.Contains(err.Error(), "没有正在生成") {
 		status = http.StatusBadRequest
 	}
 	writeError(w, err, status)

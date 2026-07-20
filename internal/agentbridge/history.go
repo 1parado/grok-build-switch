@@ -49,6 +49,10 @@ type storedSummary struct {
 	CurrentModelID string    `json:"current_model_id"`
 	AgentName      string    `json:"agent_name"`
 	NumChatMessage int       `json:"num_chat_messages"`
+
+	// CustomTitle is loaded from a grok_switch sidecar file and overrides the
+	// Grok-generated title when set. It is not part of summary.json.
+	CustomTitle string `json:"-"`
 }
 
 func (b *Bridge) ListStoredSessions(query string, limit int) ([]SessionSummary, error) {
@@ -147,11 +151,51 @@ func readStoredSummary(path string) (storedSummary, error) {
 	if err := json.Unmarshal(data, &summary); err != nil {
 		return storedSummary{}, err
 	}
+	// Prefer a user-defined title stored in a sidecar file next to summary.json,
+	// so renaming survives Grok regenerating its own summary metadata.
+	if side, sideErr := os.ReadFile(filepath.Join(filepath.Dir(path), "grok_switch_title.json")); sideErr == nil {
+		var override struct {
+			Title string `json:"title"`
+		}
+		if json.Unmarshal(side, &override) == nil {
+			summary.CustomTitle = strings.TrimSpace(override.Title)
+		}
+	}
 	return summary, nil
 }
 
+// RenameStoredSession persists a user-chosen title for a stored session in a
+// sidecar file. An empty title clears the override and restores the original.
+func (b *Bridge) RenameStoredSession(id, title string) error {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsAny(id, `/\\`) {
+		return errors.New("会话 ID 无效")
+	}
+	title = strings.TrimSpace(title)
+	dir, _, err := b.findStoredSession(id)
+	if err != nil {
+		return err
+	}
+	sidecar := filepath.Join(dir, "grok_switch_title.json")
+	if title == "" {
+		_ = os.Remove(sidecar)
+		return nil
+	}
+	data, err := json.MarshalIndent(map[string]string{"title": title}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(sidecar, data, 0o600); err != nil {
+		return fmt.Errorf("写入会话标题失败: %w", err)
+	}
+	return nil
+}
+
 func (s storedSummary) toSessionSummary() SessionSummary {
-	title := strings.TrimSpace(s.GeneratedTitle)
+	title := strings.TrimSpace(s.CustomTitle)
+	if title == "" {
+		title = strings.TrimSpace(s.GeneratedTitle)
+	}
 	if title == "" {
 		title = strings.TrimSpace(s.SessionSummary)
 	}

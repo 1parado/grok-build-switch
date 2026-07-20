@@ -30,5 +30,9 @@ func (b *Bridge) broadcast(event Event) {
 
 func (b *Bridge) broadcastStatus() {
 	status := b.Status()
-	b.broadcast(Event{Type: "agent_status", SessionID: status.SessionID, Status: status.State, Model: status.Model, Error: status.Error})
+	auto := status.SessionAutoApprove
+	b.broadcast(Event{
+		Type: "agent_status", SessionID: status.SessionID, Status: status.State,
+		Model: status.Model, Error: status.Error, SessionAutoApprove: &auto,
+	})
 }

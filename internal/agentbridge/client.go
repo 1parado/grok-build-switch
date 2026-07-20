@@ -97,12 +97,6 @@ func contentText(content acp.ContentBlock) string {
 }
 
 func (b *Bridge) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
-	requestID := fmt.Sprintf("permission-%d", b.permCounter.Add(1))
-	pending := &pendingPermission{options: params.Options, result: make(chan acp.PermissionOptionId, 1)}
-	options := make([]PermissionOption, 0, len(params.Options))
-	for _, option := range params.Options {
-		options = append(options, PermissionOption{ID: string(option.OptionId), Name: option.Name, Kind: string(option.Kind)})
-	}
 	title := "工具执行请求"
 	if params.ToolCall.Title != nil && *params.ToolCall.Title != "" {
 		title = *params.ToolCall.Title
@@ -113,6 +107,24 @@ func (b *Bridge) RequestPermission(ctx context.Context, params acp.RequestPermis
 	}
 	if params.ToolCall.Status != nil {
 		tool.Status = string(*params.ToolCall.Status)
+	}
+
+	b.mu.RLock()
+	autoApprove := b.sessionAutoApprove || b.alwaysApprove
+	b.mu.RUnlock()
+	if autoApprove {
+		if optionID, ok := pickPermissionOption(params.Options, true, true); ok {
+			return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
+				Selected: &acp.RequestPermissionOutcomeSelected{OptionId: optionID, Outcome: "selected"},
+			}}, nil
+		}
+	}
+
+	requestID := fmt.Sprintf("permission-%d", b.permCounter.Add(1))
+	pending := &pendingPermission{options: params.Options, result: make(chan acp.PermissionOptionId, 1)}
+	options := make([]PermissionOption, 0, len(params.Options))
+	for _, option := range params.Options {
+		options = append(options, PermissionOption{ID: string(option.OptionId), Name: option.Name, Kind: string(option.Kind)})
 	}
 
 	b.mu.Lock()
@@ -140,37 +152,63 @@ func (b *Bridge) RequestPermission(ctx context.Context, params acp.RequestPermis
 }
 
 func (b *Bridge) RespondPermission(requestID string, allow bool) error {
+	return b.RespondPermissionEx(requestID, allow, false)
+}
+
+// RespondPermissionEx resolves a pending permission prompt. When remember is true and allow is true,
+// subsequent tool permissions in this session are auto-approved until a new session starts.
+func (b *Bridge) RespondPermissionEx(requestID string, allow, remember bool) error {
 	b.mu.RLock()
 	pending := b.permissions[requestID]
 	b.mu.RUnlock()
 	if pending == nil {
 		return ErrPermissionNotFound
 	}
-	var selected *acp.PermissionOption
-	for i := range pending.options {
-		kind := pending.options[i].Kind
-		if allow && (kind == acp.PermissionOptionKindAllowOnce || kind == acp.PermissionOptionKindAllowAlways) {
-			selected = &pending.options[i]
-			if kind == acp.PermissionOptionKindAllowOnce {
-				break
-			}
-		}
-		if !allow && (kind == acp.PermissionOptionKindRejectOnce || kind == acp.PermissionOptionKindRejectAlways) {
-			selected = &pending.options[i]
-			if kind == acp.PermissionOptionKindRejectOnce {
-				break
-			}
-		}
-	}
-	if selected == nil {
+	optionID, ok := pickPermissionOption(pending.options, allow, remember)
+	if !ok {
 		return errors.New("Agent 未提供对应的权限选项")
 	}
+	if allow && remember {
+		b.SetSessionAutoApprove(true)
+	}
 	select {
-	case pending.result <- selected.OptionId:
+	case pending.result <- optionID:
 		return nil
 	default:
 		return ErrPermissionNotFound
 	}
+}
+
+func pickPermissionOption(options []acp.PermissionOption, allow, preferAlways bool) (acp.PermissionOptionId, bool) {
+	var once, always *acp.PermissionOption
+	for i := range options {
+		kind := options[i].Kind
+		if allow {
+			switch kind {
+			case acp.PermissionOptionKindAllowOnce:
+				once = &options[i]
+			case acp.PermissionOptionKindAllowAlways:
+				always = &options[i]
+			}
+			continue
+		}
+		switch kind {
+		case acp.PermissionOptionKindRejectOnce:
+			once = &options[i]
+		case acp.PermissionOptionKindRejectAlways:
+			always = &options[i]
+		}
+	}
+	if preferAlways && always != nil {
+		return always.OptionId, true
+	}
+	if once != nil {
+		return once.OptionId, true
+	}
+	if always != nil {
+		return always.OptionId, true
+	}
+	return "", false
 }
 
 func (b *Bridge) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {

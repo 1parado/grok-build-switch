@@ -140,6 +140,53 @@ func TestPermissionResponseSelectsAllowOnce(t *testing.T) {
 	}
 }
 
+func TestSessionAutoApproveSkipsPrompt(t *testing.T) {
+	bridge := New(t.TempDir(), filepath.Join(t.TempDir(), "agent.log"))
+	bridge.SetSessionAutoApprove(true)
+	if !bridge.Status().SessionAutoApprove {
+		t.Fatal("expected session auto approve enabled")
+	}
+	result, err := bridge.RequestPermission(context.Background(), acp.RequestPermissionRequest{
+		SessionId: "session-1",
+		ToolCall:  acp.ToolCallUpdate{ToolCallId: "tool-1"},
+		Options: []acp.PermissionOption{
+			{OptionId: "allow-always", Name: "Always", Kind: acp.PermissionOptionKindAllowAlways},
+			{OptionId: "allow", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome.Selected == nil || result.Outcome.Selected.OptionId != "allow-always" {
+		t.Fatalf("expected allow-always, got %#v", result)
+	}
+}
+
+func TestCancelPromptWhenIdle(t *testing.T) {
+	bridge := New(t.TempDir(), filepath.Join(t.TempDir(), "agent.log"))
+	if err := bridge.CancelPrompt(); !errors.Is(err, ErrNotRunning) {
+		// Idle bridge is not running; also accept the "no generation" path after a mock busy flag.
+		if err == nil || !strings.Contains(err.Error(), "没有正在生成") && !errors.Is(err, ErrNotRunning) {
+			t.Fatalf("unexpected cancel error: %v", err)
+		}
+	}
+}
+
+func TestPickPermissionOptionPrefersAlwaysWhenRequested(t *testing.T) {
+	options := []acp.PermissionOption{
+		{OptionId: "allow", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
+		{OptionId: "always", Name: "Always", Kind: acp.PermissionOptionKindAllowAlways},
+	}
+	id, ok := pickPermissionOption(options, true, true)
+	if !ok || id != "always" {
+		t.Fatalf("prefer always: got %q ok=%v", id, ok)
+	}
+	id, ok = pickPermissionOption(options, true, false)
+	if !ok || id != "allow" {
+		t.Fatalf("prefer once: got %q ok=%v", id, ok)
+	}
+}
+
 func TestRealGrokAgentInitializeAndNewSession(t *testing.T) {
 	if os.Getenv("GROK_INTEGRATION") != "1" {
 		t.Skip("set GROK_INTEGRATION=1 to test the installed Grok Build agent")

@@ -18,6 +18,11 @@ const state = {
   activeAgentSession: null,
   agentEngineState: "none",
   agentFallbackSessionReady: false,
+  agentPermission: null,
+  lastUserMessage: "",
+  chatStickToBottom: true,
+  agentAutoRestoring: false,
+  pendingAttachments: [],
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -35,7 +40,16 @@ let agentSessionSearchTimer = null;
 let mermaidReady = false;
 let mermaidRenderID = 0;
 let chatLayoutResizeTimer = null;
+let lastAssistantMessageEl = null;
+const chatNodes = []; // ordered list of { id, article, el } for navigation jumps
+
+const HISTORY_PAGE_SIZE = 60; // messages rendered per incremental window
+let pendingHistory = [];     // full message list for the current restored session
+let historyCap = HISTORY_PAGE_SIZE; // how many tail messages are currently rendered
+let findMatches = [];        // articles matching the current find query
+let findIndex = -1;
 const agentTools = new Map();
+const LAST_CHAT_CONTEXT_KEY = "gs_last_chat_context_v1";
 
 const CHAT_PANEL_LAYOUT = {
   left: {
@@ -579,19 +593,60 @@ function showView(name) {
   }
 }
 
+function readLastChatContext() {
+  try {
+    const raw = localStorage.getItem(LAST_CHAT_CONTEXT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
+      cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
+      title: typeof parsed.title === "string" ? parsed.title : "",
+      model: typeof parsed.model === "string" ? parsed.model : "",
+      alwaysApprove: !!parsed.alwaysApprove,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistLastChatContext(partial = {}) {
+  const current = readLastChatContext() || {};
+  const next = {
+    sessionId: partial.sessionId ?? current.sessionId ?? state.activeAgentSession?.id ?? state.agentStatus?.session_id ?? "",
+    cwd: partial.cwd ?? current.cwd ?? state.activeAgentSession?.cwd ?? state.agentStatus?.cwd ?? $("agentCwd")?.value?.trim() ?? "",
+    title: partial.title ?? current.title ?? state.activeAgentSession?.title ?? "",
+    model: partial.model ?? current.model ?? state.activeAgentSession?.model ?? state.agentStatus?.model ?? "",
+    alwaysApprove: partial.alwaysApprove ?? current.alwaysApprove ?? !!$("agentAlwaysApprove")?.checked,
+  };
+  try {
+    localStorage.setItem(LAST_CHAT_CONTEXT_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 async function openAgentView() {
   const [status] = await Promise.all([
     api("/api/agent/status"),
     loadAgentSessions(),
   ]);
   state.agentStatus = status;
+  const last = readLastChatContext();
   const cwdInput = $("agentCwd");
   if (cwdInput && !cwdInput.value.trim()) {
-    cwdInput.value = status.cwd || state.settings?.agent_default_cwd || status.default_cwd || "";
+    cwdInput.value = status.cwd || last?.cwd || state.settings?.agent_default_cwd || status.default_cwd || "";
+  }
+  if ($("agentAlwaysApprove") && last && typeof last.alwaysApprove === "boolean" && !agentIsRunning(status)) {
+    $("agentAlwaysApprove").checked = last.alwaysApprove;
   }
   renderAgentStatus(status);
   updateConversationIdentity();
   applyStoredChatPanelWidths();
+  bindChatScrollTracking();
+  updateChatJumpBottomBtn();
+  bindChatExtras();
   if (window.matchMedia("(min-width: 821px)").matches) {
     const shell = $("viewChat")?.querySelector(".nativeChatShell");
     shell?.classList.toggle("sidebarCollapsed", localStorage.getItem("gs_chat_sidebar_hidden") === "1");
@@ -600,6 +655,74 @@ async function openAgentView() {
     }
   }
   connectAgentSocket();
+  await restoreLastChatContext(status, last);
+}
+
+async function restoreLastChatContext(status, last = readLastChatContext()) {
+  if (state.agentAutoRestoring) return;
+  const running = agentIsRunning(status);
+  if (running && status.session_id) {
+    if (!state.activeAgentSession || state.activeAgentSession.id !== status.session_id) {
+      const match = state.agentSessions.find((item) => item.id === status.session_id);
+      state.activeAgentSession = match || {
+        id: status.session_id,
+        title: last?.title || "当前会话",
+        cwd: status.cwd || last?.cwd || "",
+        model: status.model || last?.model || "",
+      };
+      if ($("agentCwd") && status.cwd) $("agentCwd").value = status.cwd;
+      if (!$("chatMessages")?.querySelector(".chatMessage")) {
+        try {
+          const history = await api(`/api/agent/sessions/${encodeURIComponent(status.session_id)}`);
+          if (history?.session) state.activeAgentSession = { ...state.activeAgentSession, ...history.session };
+          clearAgentTranscript(false);
+          renderStoredHistory(history.messages || []);
+          setAgentEngineState("attached");
+        } catch {
+          setAgentEngineState("attached");
+        }
+      } else {
+        setAgentEngineState("attached");
+      }
+      updateConversationIdentity();
+      persistLastChatContext({
+        sessionId: status.session_id,
+        cwd: status.cwd,
+        model: status.model,
+        title: state.activeAgentSession?.title,
+      });
+    }
+    return;
+  }
+  if (running || !status.available) return;
+  const cwd = $("agentCwd")?.value.trim() || last?.cwd || state.settings?.agent_default_cwd || status.default_cwd || "";
+  if (!cwd) return;
+  if ($("agentCwd") && !$("agentCwd").value.trim()) $("agentCwd").value = cwd;
+  state.agentAutoRestoring = true;
+  try {
+    if (last?.sessionId && (!last.cwd || last.cwd === cwd)) {
+      const session = state.agentSessions.find((item) => item.id === last.sessionId) || {
+        id: last.sessionId,
+        title: last.title || "上次会话",
+        cwd: last.cwd || cwd,
+        model: last.model || "",
+      };
+      try {
+        await resumeAgentSession(session);
+        return;
+      } catch {
+        // Avoid startAgent re-attempting the same broken session load.
+        state.activeAgentSession = null;
+        setAgentEngineState("none");
+      }
+    }
+    await startAgent();
+  } catch (err) {
+    // Keep the page usable; user can start manually.
+    console.warn("auto restore chat context failed", err);
+  } finally {
+    state.agentAutoRestoring = false;
+  }
 }
 
 async function loadAgentSessions(query = $("agentSessionSearch")?.value || "") {
@@ -619,9 +742,10 @@ function renderAgentSessionList() {
     return;
   }
   for (const session of state.agentSessions) {
-    const button = document.createElement("button");
-    button.type = "button";
+    const button = document.createElement("div");
     button.className = `sessionItem${session.id === state.activeAgentSession?.id ? " active" : ""}`;
+    button.role = "button";
+    button.tabIndex = 0;
     button.dataset.sessionId = session.id;
     const title = document.createElement("span");
     title.className = "sessionItemTitle";
@@ -632,17 +756,34 @@ function renderAgentSessionList() {
     const path = document.createElement("span");
     path.className = "sessionItemPath";
     path.textContent = session.cwd || "";
-    button.append(title, meta, path);
-    button.onclick = async () => {
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "sessionRenameBtn";
+    renameBtn.title = "重命名会话";
+    renameBtn.setAttribute("aria-label", `重命名会话 ${session.title || ""}`);
+    renameBtn.textContent = "✎";
+    renameBtn.onclick = (event) => {
+      event.stopPropagation();
+      startRenameSession(session);
+    };
+    button.append(title, meta, path, renameBtn);
+    const activate = async () => {
       try {
-        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
         button.classList.add("busy");
         await resumeAgentSession(session);
       } catch (err) {
         toast(err.message || String(err), "error");
       } finally {
-        button.disabled = false;
+        button.removeAttribute("aria-busy");
         button.classList.remove("busy");
+      }
+    };
+    button.onclick = activate;
+    button.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
       }
     };
     list.append(button);
@@ -658,6 +799,30 @@ function formatSessionTime(value) {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
   return date.toLocaleDateString([], { month: "2-digit", day: "2-digit" });
+}
+
+async function startRenameSession(session) {
+  if (!session?.id) return;
+  const next = window.prompt("重命名会话", session.title || "");
+  if (next === null) return;
+  const title = next.trim();
+  if (title === (session.title || "").trim() && title !== "") return;
+  try {
+    await api("/api/agent/session/rename", {
+      method: "POST",
+      body: JSON.stringify({ session_id: session.id, title }),
+    });
+    session.title = title || "未命名会话";
+    if (state.activeAgentSession?.id === session.id) {
+      state.activeAgentSession.title = session.title;
+      updateConversationIdentity();
+      persistLastChatContext({ title: session.title });
+    }
+    renderAgentSessionList();
+    toast(title ? `已重命名为「${title}」` : "已恢复默认会话名", "success");
+  } catch (err) {
+    toast(err.message || String(err), "error");
+  }
 }
 
 async function resumeAgentSession(session) {
@@ -694,8 +859,15 @@ async function resumeAgentSession(session) {
   setAgentEngineState("attached");
   state.agentStatus = status;
   renderAgentStatus({ ...status, model: status.model || state.activeAgentSession.model });
+  persistLastChatContext({
+    sessionId: state.activeAgentSession.id,
+    cwd: state.activeAgentSession.cwd,
+    title: state.activeAgentSession.title,
+    model: status.model || state.activeAgentSession.model,
+    alwaysApprove: $("agentAlwaysApprove")?.checked,
+  });
   closeNativeChatPanels();
-  scrollChatToBottom();
+  forceScrollChatToBottom();
   return true;
 }
 
@@ -726,31 +898,6 @@ function handleSessionLoadFallback(err) {
   renderAgentStatus(status || state.agentStatus);
   toast(err.message, "error");
   return true;
-}
-
-function renderStoredHistory(messages) {
-  for (const message of messages) {
-    switch (message.role) {
-      case "user":
-        appendChatMessage("user", message.content || "", "", true);
-        break;
-      case "assistant":
-        appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true);
-        break;
-      case "thought":
-        appendThoughtChunk(message.content || "");
-        agentActiveThought = null;
-        break;
-      case "tool":
-        renderAgentTool(message.tool || {}, false);
-        break;
-      case "tool_result":
-        renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", status: "completed" }, true);
-        break;
-    }
-  }
-  agentActiveAssistant = null;
-  agentActiveThought = null;
 }
 
 function updateConversationIdentity() {
@@ -931,9 +1078,34 @@ function renderAgentStatus(status) {
     $("agentAlwaysApprove").disabled = running;
     if (typeof status.always_approve === "boolean") $("agentAlwaysApprove").checked = status.always_approve;
   }
-  const composerReady = stateName === "ready" && state.agentEngineState !== "loading";
-  if ($("chatInput")) $("chatInput").disabled = !composerReady;
-  if ($("chatSendBtn")) $("chatSendBtn").disabled = !composerReady || !$("chatInput")?.value.trim();
+  const loading = state.agentEngineState === "loading";
+  const composerReady = stateName === "ready" && !loading;
+  if ($("chatInput")) {
+    $("chatInput").disabled = !composerReady || busy;
+    $("chatInput").placeholder = busy
+      ? "正在生成…可点击停止"
+      : composerReady
+        ? "询问代码、规划任务或继续这段对话…"
+        : "启动 Agent 后即可发送消息";
+  }
+  if ($("chatSendBtn")) {
+    $("chatSendBtn").hidden = busy;
+    const hasContent = !!$("chatInput")?.value.trim() || state.pendingAttachments.length > 0;
+    $("chatSendBtn").disabled = !composerReady || busy || !hasContent;
+  }
+  if ($("chatAttachBtn")) $("chatAttachBtn").disabled = !composerReady || busy;
+  if ($("chatStopBtn")) {
+    $("chatStopBtn").hidden = !busy;
+    $("chatStopBtn").disabled = !busy;
+  }
+  const hint = $("composerHint");
+  if (hint) {
+    hint.classList.toggle("composerBusyHint", busy);
+    if (busy) hint.textContent = "正在生成回复…点击 ■ 停止 · Esc 也可停止";
+    else if (status.session_auto_approve) hint.textContent = "本会话已自动允许工具 · Enter 发送 · Shift + Enter 换行";
+    else hint.textContent = "Enter 发送 · Shift + Enter 换行";
+  }
+  refreshMessageActionButtons();
   if (!status.available && status.error) {
     const empty = $("chatEmpty");
     if (empty) {
@@ -979,6 +1151,9 @@ function handleAgentEvent(event) {
         busy: stateName === "busy",
         model: event.model || current.model,
         error: event.error || (stateName === "dead" ? current.error : ""),
+        session_auto_approve: typeof event.session_auto_approve === "boolean"
+          ? event.session_auto_approve
+          : current.session_auto_approve,
       });
       break;
     }
@@ -1003,7 +1178,11 @@ function handleAgentEvent(event) {
       agentActiveAssistant = null;
       agentActiveThought = null;
       agentRetryNotice = null;
+      if (event.stop_reason === "cancelled") {
+        appendAgentNotice("已停止生成");
+      }
       renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "" });
+      rebuildChatNodesFromDom();
       loadAgentSessions().catch(() => {});
       break;
     case "error":
@@ -1018,7 +1197,7 @@ function clearAgentTranscript(showEmpty = true) {
   const messages = $("chatMessages");
   if (!messages) return;
   messages.innerHTML = showEmpty
-    ? `<div id="chatEmpty" class="chatEmpty"><span class="chatEmptyMark">G</span><strong>从一个问题开始</strong><span>Markdown、代码、表格与 Mermaid 图表将在这里原生呈现</span></div>`
+    ? `<div id="chatEmpty" class="chatEmpty"><img src="/icon.svg" alt="" class="chatEmptyMark chatEmptyIcon"></div>`
     : "";
   agentTools.clear();
   if ($("toolActivityCount")) $("toolActivityCount").textContent = "0";
@@ -1026,19 +1205,518 @@ function clearAgentTranscript(showEmpty = true) {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
+  lastAssistantMessageEl = null;
   state.agentPermission = null;
+  state.lastUserMessage = "";
+  state.chatStickToBottom = true;
+  resetChatNodes();
+  clearChatAttachments();
   if ($("permissionBar")) $("permissionBar").hidden = true;
+  updateContextUsage();
+  updateChatJumpBottomBtn();
 }
 
 function removeChatEmpty() {
   $("chatEmpty")?.remove();
 }
 
-function appendChatMessage(role, text, model = "", final = false) {
-  removeChatEmpty();
+function bindChatScrollTracking() {
+  const messages = $("chatMessages");
+  if (!messages || messages.dataset.scrollBound === "1") return;
+  messages.dataset.scrollBound = "1";
+  messages.addEventListener("scroll", () => {
+    state.chatStickToBottom = isChatNearBottom(messages);
+    updateActiveChatNode();
+    updateChatJumpBottomBtn();
+  }, { passive: true });
+}
+
+function isChatNearBottom(container = $("chatMessages"), threshold = 80) {
+  if (!container) return true;
+  return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+}
+
+function scrollChatToBottom(force = false) {
+  const messages = $("chatMessages");
+  if (!messages) return;
+  if (!force && !state.chatStickToBottom) return;
+  requestAnimationFrame(() => {
+    messages.scrollTop = messages.scrollHeight;
+    state.chatStickToBottom = true;
+  });
+}
+
+function forceScrollChatToBottom() {
+  state.chatStickToBottom = true;
+  scrollChatToBottom(true);
+}
+
+// --- 对话节点导航：每条用户消息生成一个可点击节点，点击平滑滚动到该消息 ---
+function resetChatNodes() {
+  chatNodes.length = 0;
+  const scroller = $("chatNodeScroller");
+  if (scroller) scroller.innerHTML = "";
+  const rail = $("chatNodeRail");
+  if (rail) rail.hidden = true;
+}
+
+function addChatNodeFor(article) {
+  if (!article) return;
+  const scroller = $("chatNodeScroller");
+  const rail = $("chatNodeRail");
+  if (!scroller || !rail) return;
+  const id = `node-${Date.now()}-${chatNodes.length}`;
+  article.dataset.nodeId = id;
+  const preview = (article._rawText || "").replace(/\s+/g, " ").trim();
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = "chatNode";
+  node.dataset.nodeId = id;
+  node.title = preview.slice(0, 200) || "（空消息）";
+  const idx = document.createElement("span");
+  idx.className = "chatNodeIdx";
+  idx.textContent = String(chatNodes.length + 1);
+  const label = document.createElement("span");
+  label.className = "chatNodeLabel";
+  label.textContent = preview.slice(0, 28) || "（空消息）";
+  node.append(idx, label);
+  node.onclick = () => jumpToChatNode(id);
+  scroller.append(node);
+  rail.hidden = false;
+  chatNodes.push({ id, article, el: node });
+}
+
+function jumpToChatNode(id) {
+  const entry = chatNodes.find((n) => n.id === id);
+  const messages = $("chatMessages");
+  if (!entry?.article?.isConnected || !messages) return;
+  state.chatStickToBottom = false;
+  const containerTop = messages.getBoundingClientRect().top;
+  const delta = entry.article.getBoundingClientRect().top - containerTop;
+  messages.scrollTo({ top: messages.scrollTop + delta - 8, behavior: "smooth" });
+  entry.article.classList.remove("nodeFlash");
+  void entry.article.offsetWidth; // reflow to restart animation
+  entry.article.classList.add("nodeFlash");
+  setTimeout(() => entry.article.classList.remove("nodeFlash"), 1700);
+  setActiveChatNode(id);
+}
+
+function setActiveChatNode(id) {
+  for (const entry of chatNodes) {
+    entry.el.classList.toggle("active", entry.id === id);
+  }
+}
+
+function updateActiveChatNode() {
+  pruneChatNodes();
+  const messages = $("chatMessages");
+  if (!messages || chatNodes.length === 0) return;
+  const containerTop = messages.getBoundingClientRect().top;
+  let activeId = null;
+  for (const entry of chatNodes) {
+    if (!entry.article?.isConnected) continue;
+    if (entry.article.getBoundingClientRect().top - containerTop <= 60) {
+      activeId = entry.id;
+    } else {
+      break;
+    }
+  }
+  setActiveChatNode(activeId);
+}
+
+function pruneChatNodes() {
+  for (let i = chatNodes.length - 1; i >= 0; i--) {
+    if (!chatNodes[i].article?.isConnected) {
+      chatNodes[i].el?.remove();
+      chatNodes.splice(i, 1);
+    }
+  }
+  const rail = $("chatNodeRail");
+  if (rail) rail.hidden = chatNodes.length === 0;
+}
+
+// Rebuild the whole node rail from the current DOM order. Used after
+// truncation / incremental history prepend so indices and previews stay correct.
+function rebuildChatNodesFromDom() {
+  chatNodes.length = 0;
+  const scroller = $("chatNodeScroller");
+  const rail = $("chatNodeRail");
+  if (scroller) scroller.innerHTML = "";
+  const userArticles = [...$("chatMessages")?.querySelectorAll(".chatMessage[data-role='user']") || []];
+  userArticles.forEach((article, index) => {
+    const id = `node-${Date.now()}-${index}`;
+    article.dataset.nodeId = id;
+    const preview = (article._rawText || "").replace(/\s+/g, " ").trim();
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "chatNode";
+    node.dataset.nodeId = id;
+    node.title = preview.slice(0, 200) || "（空消息）";
+    const idx = document.createElement("span");
+    idx.className = "chatNodeIdx";
+    idx.textContent = String(index + 1);
+    const label = document.createElement("span");
+    label.className = "chatNodeLabel";
+    label.textContent = preview.slice(0, 28) || "（空消息）";
+    node.append(idx, label);
+    if (hasToolInTurn(article)) {
+      node.classList.add("hasTool");
+      const mark = document.createElement("span");
+      mark.className = "chatNodeToolMark";
+      mark.textContent = "⚙";
+      mark.title = "本轮包含工具调用";
+      node.append(mark);
+    }
+    node.onclick = () => jumpToChatNode(id);
+    scroller?.append(node);
+    chatNodes.push({ id, article, el: node });
+  });
+  if (rail) rail.hidden = chatNodes.length === 0;
+}
+
+// A "turn" is this user message plus everything until the next user message.
+// Mark it as tool-heavy if any tool element appears in that range.
+function hasToolInTurn(userArticle) {
+  let el = userArticle.nextElementSibling;
+  while (el) {
+    if (el.classList?.contains("chatMessage") && el.dataset.role === "user") break;
+    if (el.classList?.contains("agentTool")) return true;
+    if (el.querySelector?.(".agentTool")) return true;
+    el = el.nextElementSibling;
+  }
+  return false;
+}
+
+function setActiveChatNode(id) {
+  for (const entry of chatNodes) {
+    const active = entry.id === id;
+    entry.el.classList.toggle("active", active);
+    if (active) {
+      const scroller = $("chatNodeScroller");
+      if (scroller) {
+        const nodeRect = entry.el.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        if (nodeRect.left < scrollerRect.left || nodeRect.right > scrollerRect.right) {
+          entry.el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+        }
+      }
+    }
+  }
+}
+
+// --- 长历史增量加载 ---
+function renderStoredHistory(messages) {
+  pendingHistory = Array.isArray(messages) ? messages.slice() : [];
+  historyCap = HISTORY_PAGE_SIZE;
+  renderHistoryWindow();
+}
+
+function renderHistoryWindow() {
+  const messages = $("chatMessages");
+  if (!messages) return;
+  // Keep the user's reading position stable when prepending older messages.
+  const wasLoadingMore = state._loadingMoreHistory;
+  state.chatStickToBottom = !wasLoadingMore;
+  messages.innerHTML = "";
+  agentTools.clear();
+  if ($("toolActivityCount")) $("toolActivityCount").textContent = "0";
+  if ($("toolActivityList")) $("toolActivityList").innerHTML = "<span>暂无工具活动</span>";
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+  agentRetryNotice = null;
+  lastAssistantMessageEl = null;
+  resetChatNodes();
+
+  const total = pendingHistory.length;
+  const start = Math.max(0, total - historyCap);
+  const slice = pendingHistory.slice(start);
+  for (const message of slice) {
+    appendHistoryMessage(message);
+  }
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+  // rebuild nodes from DOM so indices reflect the visible (possibly capped) window
+  rebuildChatNodesFromDom();
+  ensureHistorySentinel(start, total);
+
+  // Track the last user message for regenerate / edit flows.
+  let lastUserText = "";
+  for (let i = pendingHistory.length - 1; i >= 0; i--) {
+    if (pendingHistory[i].role === "user") { lastUserText = pendingHistory[i].content || ""; break; }
+  }
+  state.lastUserMessage = lastUserText;
+  refreshMessageActionButtons();
+
+  if (wasLoadingMore) {
+    messages.scrollTop = 0; // show the newly prepended older messages
+    state._loadingMoreHistory = false;
+  } else {
+    forceScrollChatToBottom();
+  }
+  updateContextUsage();
+}
+
+function appendHistoryMessage(message) {
+  switch (message.role) {
+    case "user":
+      appendChatMessage("user", message.content || "", "", true);
+      break;
+    case "assistant":
+      appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true);
+      break;
+    case "thought":
+      appendThoughtChunk(message.content || "");
+      agentActiveThought = null;
+      break;
+    case "tool":
+      renderAgentTool(message.tool || {}, false);
+      break;
+    case "tool_result":
+      renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", status: "completed" }, true);
+      break;
+  }
+}
+
+function ensureHistorySentinel(start, total) {
+  const messages = $("chatMessages");
+  if (!messages) return;
+  const existing = messages.querySelector("#chatHistorySentinel");
+  if (start <= 0) {
+    existing?.remove();
+    return;
+  }
+  let sentinel = existing;
+  if (!sentinel) {
+    sentinel = document.createElement("button");
+    sentinel.type = "button";
+    sentinel.id = "chatHistorySentinel";
+    sentinel.className = "chatHistorySentinel";
+    messages.prepend(sentinel);
+    sentinel.onclick = () => loadOlderHistory();
+  }
+  sentinel.textContent = `↑ 加载更早 ${start} 条会话`;
+  if (sentinel !== messages.firstChild) messages.prepend(sentinel);
+}
+
+function loadOlderHistory() {
+  if (!pendingHistory.length) return;
+  const renderedStart = Math.max(0, pendingHistory.length - historyCap);
+  if (renderedStart <= 0) return;
+  state._loadingMoreHistory = true;
+  historyCap += HISTORY_PAGE_SIZE;
+  renderHistoryWindow();
+}
+
+// --- 用户消息编辑 + 重新发送（截断该消息之后的 UI 内容） ---
+function enterUserEditMode(article) {
+  if (!article?.isConnected || article.dataset.role !== "user") return;
+  if (article.querySelector(".chatMessageEditArea")) return;
+  if (state.agentStatus?.state === "busy" || state.agentStatus?.busy) {
+    toast("正在生成回复，请先停止或等待完成", "error");
+    return;
+  }
+  const body = article.querySelector(".chatMessageText");
+  if (!body) return;
+  article.dataset.editing = "1";
+  const original = article._rawText || "";
+  const textarea = document.createElement("textarea");
+  textarea.className = "chatMessageEditArea";
+  textarea.value = original;
+  textarea.rows = Math.min(12, Math.max(3, original.split(/\n/).length));
+  const actions = document.createElement("div");
+  actions.className = "chatMessageEditActions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "btn sm";
+  cancelBtn.textContent = "取消";
+  cancelBtn.onclick = () => exitUserEditMode(article, original);
+  const sendBtn = document.createElement("button");
+  sendBtn.type = "button";
+  sendBtn.className = "btn sm primary";
+  sendBtn.textContent = "重新发送";
+  sendBtn.onclick = () => resendEditedUserMessage(article, textarea.value).catch((err) => toast(err.message || String(err), "error"));
+  actions.append(cancelBtn, sendBtn);
+  body.replaceChildren(textarea, actions);
+  textarea.focus();
+  textarea.selectionStart = textarea.value.length;
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); exitUserEditMode(article, original); }
+    else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); sendBtn.click(); }
+  });
+}
+
+function exitUserEditMode(article, originalText) {
+  if (!article?.isConnected) return;
+  delete article.dataset.editing;
+  article._rawText = originalText;
+  const body = article.querySelector(".chatMessageText");
+  if (body) body.replaceChildren();
+  renderMessageMarkdown(article, true);
+  rebuildChatNodesFromDom();
+}
+
+async function resendEditedUserMessage(article, rawText) {
+  const text = (rawText || "").trim();
+  if (!text) throw new Error("消息不能为空");
+  if (state.agentStatus?.state === "busy" || state.agentStatus?.busy) throw new Error("正在生成中，请先停止或等待完成");
+  if (state.agentStatus?.state !== "ready" || state.agentEngineState === "loading" || state.agentEngineState === "readonly") {
+    throw new Error("当前会话不可用，请先启动 Agent");
+  }
+  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    toast("对话连接尚未就绪", "error");
+    connectAgentSocket();
+    return;
+  }
+  // Truncate everything after the edited user message in the UI.
+  let next = article.nextElementSibling;
+  while (next) {
+    const after = next.nextElementSibling;
+    next.remove();
+    next = after;
+  }
+  lastAssistantMessageEl = $("chatMessages").querySelector(".chatMessage.assistant:last-of-type");
+  // Update the bubble with the edited text.
+  article._rawText = text;
+  const body = article.querySelector(".chatMessageText");
+  if (body) body.replaceChildren();
+  renderMessageMarkdown(article, true);
+  delete article.dataset.editing;
+  rebuildChatNodesFromDom();
+  state.lastUserMessage = text;
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+  agentRetryNotice = null;
+  updateContextUsage();
+  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
+  forceScrollChatToBottom();
+}
+
+// --- 上下文用量估算（按字符数 / 4 粗估 token） ---
+function updateContextUsage() {
+  const text = $("contextUsageText");
+  const fill = $("contextUsageFill");
+  const bar = $("contextUsageBar");
+  if (!text || !fill) return;
+  const messages = $("chatMessages");
+  let chars = 0;
+  let count = 0;
+  if (messages) {
+    messages.querySelectorAll(".chatMessage[data-role='user'], .chatMessage[data-role='assistant']").forEach((article) => {
+      chars += (article._rawText || "").length;
+      count += 1;
+    });
+  }
+  const tokens = Math.max(0, Math.round(chars / 4));
+  const CONTEXT_GUESS = 200000; // rough modern context window ceiling for the bar
+  const ratio = Math.min(1, tokens / CONTEXT_GUESS);
+  fill.style.width = `${(ratio * 100).toFixed(1)}%`;
+  fill.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
+  fill.classList.toggle("danger", ratio >= 0.9);
+  if (count === 0) {
+    text.textContent = "尚未发送消息";
+  } else {
+    text.textContent = `≈ ${tokens.toLocaleString()} tokens · ${count} 条消息（估算，非精确）`;
+  }
+  if (bar) bar.title = `字符 ${chars.toLocaleString()} · 估算 token ${tokens.toLocaleString()}`;
+}
+
+// --- 会话内查找条 ---
+function openChatFindBar(prefill = "") {
+  const bar = $("chatFindBar");
+  if (!bar) return;
+  bar.hidden = false;
+  const input = $("chatFindInput");
+  if (input) {
+    input.value = prefill !== "" ? prefill : (input.value || getSelection()?.toString() || "");
+    input.focus();
+    input.select();
+  }
+  runChatFind();
+}
+
+function closeChatFindBar() {
+  const bar = $("chatFindBar");
+  if (!bar) return;
+  bar.hidden = true;
+  const input = $("chatFindInput");
+  if (input) input.value = "";
+  findMatches = [];
+  findIndex = -1;
+  $("chatFindCount").textContent = "0 / 0";
+  $("chatInput")?.focus();
+}
+
+function runChatFind() {
+  const query = ($("chatFindInput")?.value || "").trim().toLowerCase();
+  const countEl = $("chatFindCount");
+  if (!query) {
+    findMatches = [];
+    findIndex = -1;
+    if (countEl) countEl.textContent = "0 / 0";
+    return;
+  }
+  const articles = [...$("chatMessages")?.querySelectorAll(".chatMessage[data-role='user'], .chatMessage[data-role='assistant']") || []];
+  findMatches = articles.filter((a) => (a._rawText || "").toLowerCase().includes(query));
+  findIndex = findMatches.length ? 0 : -1;
+  if (countEl) countEl.textContent = findMatches.length ? `${findIndex + 1} / ${findMatches.length}` : "0 / 0";
+  $("chatFindPrev").disabled = findMatches.length < 2;
+  $("chatFindNext").disabled = findMatches.length < 2;
+  if (findMatches.length) jumpToArticle(findMatches[findIndex]);
+}
+
+function cycleChatFind(direction) {
+  if (!findMatches.length) { runChatFind(); return; }
+  findIndex = (findIndex + direction + findMatches.length) % findMatches.length;
+  $("chatFindCount").textContent = `${findIndex + 1} / ${findMatches.length}`;
+  jumpToArticle(findMatches[findIndex]);
+}
+
+function jumpToArticle(article) {
+  if (!article?.isConnected) return;
+  const messages = $("chatMessages");
+  if (!messages) return;
+  state.chatStickToBottom = false;
+  const delta = article.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+  messages.scrollTo({ top: messages.scrollTop + delta - 8, behavior: "smooth" });
+  article.classList.remove("nodeFlash");
+  void article.offsetWidth;
+  article.classList.add("nodeFlash");
+  setTimeout(() => article.classList.remove("nodeFlash"), 1700);
+}
+
+// --- 回到最新浮动按钮 ---
+function updateChatJumpBottomBtn() {
+  const btn = $("chatJumpBottomBtn");
+  if (!btn) return;
+  const messages = $("chatMessages");
+  const hasMessages = !!messages?.querySelector(".chatMessage");
+  btn.hidden = !hasMessages || state.chatStickToBottom;
+}
+
+let chatExtrasBound = false;
+function bindChatExtras() {
+  if (chatExtrasBound) return;
+  chatExtrasBound = true;
+  $("chatJumpBottomBtn")?.addEventListener("click", () => forceScrollChatToBottom());
+  $("chatFindClose")?.addEventListener("click", closeChatFindBar);
+  $("chatFindNext")?.addEventListener("click", () => cycleChatFind(1));
+  $("chatFindPrev")?.addEventListener("click", () => cycleChatFind(-1));
+  $("chatFindInput")?.addEventListener("input", () => runChatFind());
+  $("chatFindInput")?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); closeChatFindBar(); }
+    else if (event.key === "Enter") {
+      event.preventDefault();
+      cycleChatFind(event.shiftKey ? -1 : 1);
+    }
+  });
+}
+
+function createChatMessage(role, text, model = "", final = false, attachments = null) {
   const article = document.createElement("article");
   article.className = `chatMessage ${role}`;
   article._rawText = text || "";
+  article.dataset.role = role;
   const header = document.createElement("div");
   header.className = "chatMessageHeader";
   const label = document.createElement("span");
@@ -1051,47 +1729,127 @@ function appendChatMessage(role, text, model = "", final = false) {
     modelLabel.textContent = model;
     header.append(modelLabel);
   }
+  if (role === "user" || role === "assistant") {
+    const actions = document.createElement("div");
+    actions.className = "chatMessageActions";
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "messageActionBtn";
+    copyBtn.dataset.action = "copy";
+    copyBtn.textContent = "复制";
+    copyBtn.onclick = () => copyText(article._rawText || "", "已复制消息");
+    actions.append(copyBtn);
+    if (role === "assistant") {
+      const regenBtn = document.createElement("button");
+      regenBtn.type = "button";
+      regenBtn.className = "messageActionBtn";
+      regenBtn.dataset.action = "regenerate";
+      regenBtn.textContent = "重新生成";
+      regenBtn.onclick = () => regenerateLastAssistant(article).catch((err) => toast(err.message || String(err), "error"));
+      actions.append(regenBtn);
+      lastAssistantMessageEl = article;
+    } else {
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "messageActionBtn";
+      editBtn.dataset.action = "edit";
+      editBtn.textContent = "编辑";
+      editBtn.onclick = () => enterUserEditMode(article);
+      actions.append(editBtn);
+    }
+    header.append(actions);
+  }
   const body = document.createElement("div");
   body.className = "chatMessageText markdownBody";
   article.append(header, body);
+  // Markdown / attachments are rendered in appendChatMessage after the article is
+  // attached to the DOM. renderMessageMarkdown and renderMessageAttachments both
+  // bail out when !article.isConnected, which left user (and history) bubbles
+  // showing only the role label "你".
+  refreshMessageActionButtons();
+  return article;
+}
+
+function appendChatMessage(role, text, model = "", final = false, attachments = null) {
+  removeChatEmpty();
+  const article = createChatMessage(role, text, model, final, attachments);
   $("chatMessages").append(article);
   renderMessageMarkdown(article, final);
+  if (role === "user" && Array.isArray(attachments) && attachments.length) {
+    renderMessageAttachments(article, attachments);
+  }
+  if (role === "user") addChatNodeFor(article);
+  updateContextUsage();
   scrollChatToBottom();
   return article;
+}
+
+function refreshMessageActionButtons() {
+  const busy = state.agentStatus?.state === "busy" || !!state.agentStatus?.busy;
+  const ready = state.agentStatus?.state === "ready" && state.agentEngineState !== "loading" && state.agentEngineState !== "readonly";
+  document.querySelectorAll('.chatMessage.assistant .messageActionBtn[data-action="regenerate"]').forEach((button) => {
+    const article = button.closest(".chatMessage");
+    const isLast = article === lastAssistantMessageEl;
+    button.hidden = !isLast;
+    button.disabled = !isLast || busy || !ready || !state.lastUserMessage;
+  });
 }
 
 function appendAssistantChunk(text) {
   if (!text) return;
   markAgentRetryRecovered();
+  document.querySelectorAll(".chatMessage.system").forEach((notice) => {
+    if ((notice._rawText || "").includes("正在重新生成")) notice.remove();
+  });
   if (!agentActiveAssistant || !agentActiveAssistant.isConnected) {
     agentActiveAssistant = appendChatMessage("assistant", "", state.agentStatus?.model || state.activeAgentSession?.model || "");
   }
   agentActiveAssistant._rawText = (agentActiveAssistant._rawText || "") + text;
   scheduleMessageMarkdown(agentActiveAssistant);
+  scheduleContextUsageUpdate();
   scrollChatToBottom();
+}
+
+let contextUsageTimer = null;
+function scheduleContextUsageUpdate() {
+  clearTimeout(contextUsageTimer);
+  contextUsageTimer = setTimeout(updateContextUsage, 300);
 }
 
 function scheduleMessageMarkdown(article) {
   clearTimeout(article._markdownTimer);
-  article._markdownTimer = setTimeout(() => renderMessageMarkdown(article, false), 60);
+  // Throttle streaming re-renders: a single trailing pass per ~220ms avoids
+  // re-parsing the whole assistant body on every token chunk.
+  article._markdownTimer = setTimeout(() => renderMessageMarkdown(article, false), 220);
 }
 
 function finalizeAssistantMessage() {
   if (!agentActiveAssistant?.isConnected) return;
   clearTimeout(agentActiveAssistant._markdownTimer);
   renderMessageMarkdown(agentActiveAssistant, true);
+  lastAssistantMessageEl = agentActiveAssistant;
+  refreshMessageActionButtons();
+  updateContextUsage();
 }
 
-async function renderMessageMarkdown(article, renderDiagrams) {
-  if (!article?.isConnected) return;
+async function renderMessageMarkdown(article, final = false) {
+  if (!article) return;
   const body = article.querySelector(".chatMessageText");
+  if (!body) return;
   const raw = article._rawText || "";
+  // Generation stamp: history load / streaming can schedule overlapping renders;
+  // a stale async pass must not wipe a newer body.
+  const gen = (article._mdGen = (article._mdGen || 0) + 1);
   if (!window.marked?.parse || !window.DOMPurify) {
-    body.textContent = raw;
+    if (article._mdGen === gen) body.textContent = raw;
     return;
   }
   try {
+    // Always write text into the body — do not require isConnected. Gating on
+    // isConnected previously left both user ("你") and assistant ("Grok") bubbles
+    // with an empty .chatMessageText when createChatMessage rendered pre-append.
     const parsed = window.marked.parse(prepareMarkdownCitations(raw), { gfm: true, breaks: true });
+    if (article._mdGen !== gen) return;
     body.innerHTML = window.DOMPurify.sanitize(parsed, { USE_PROFILES: { html: true } });
     body.querySelectorAll("a").forEach((link) => {
       link.target = "_blank";
@@ -1116,13 +1874,33 @@ async function renderMessageMarkdown(article, renderDiagrams) {
       checkbox.closest("li")?.classList.add("task-list-item");
       checkbox.closest("ul, ol")?.classList.add("contains-task-list");
     });
-    decorateCodeBlocks(body);
-    renderMathBlocks(body);
-    if (renderDiagrams) await renderMermaidBlocks(body);
+    if (final) {
+      decorateCodeBlocks(body);
+      renderMathBlocks(body);
+      // Mermaid needs layout metrics; only run once the bubble is in the document.
+      if (article.isConnected) await renderMermaidBlocks(body);
+    } else {
+      decorateCodeBlocksLite(body);
+      renderMathBlocks(body);
+    }
   } catch (err) {
+    if (article._mdGen !== gen) return;
     body.textContent = raw;
     body.title = `Markdown 渲染失败: ${err.message}`;
   }
+}
+
+function decorateCodeBlocksLite(root) {
+  root.querySelectorAll("pre").forEach((pre) => {
+    if (pre.querySelector(".codeLanguageLabel")) return;
+    const code = pre.querySelector("code");
+    if (!code || code.classList.contains("language-mermaid")) return;
+    const declaredLanguage = [...code.classList].find((name) => name.startsWith("language-"))?.slice(9) || "text";
+    const languageLabel = document.createElement("span");
+    languageLabel.className = "codeLanguageLabel";
+    languageLabel.textContent = declaredLanguage;
+    pre.append(languageLabel);
+  });
 }
 
 function prepareMarkdownCitations(markdown) {
@@ -1324,7 +2102,7 @@ function renderAgentTool(tool, isUpdate) {
   if (!details) {
     details = document.createElement("details");
     details.className = "agentTool";
-    details.innerHTML = `<summary><span class="agentToolTitle"></span><span class="agentToolStatus"></span></summary><pre></pre>`;
+    details.innerHTML = `<summary><span class="agentToolSummaryMain"><span class="agentToolTitle"></span><span class="agentToolStatus"></span></span></summary><pre class="agentToolDetail"></pre>`;
     $("chatMessages").append(details);
     agentTools.set(id, details);
   }
@@ -1334,7 +2112,14 @@ function renderAgentTool(tool, isUpdate) {
   details.querySelector(".agentToolTitle").textContent = title;
   details.querySelector(".agentToolStatus").textContent = agentToolStatusLabel(status);
   const payload = tool.raw_output ?? tool.raw_input;
-  if (payload != null) details.querySelector("pre").textContent = formatAgentPayload(payload);
+  const pre = details.querySelector("pre.agentToolDetail");
+  if (payload != null && pre) {
+    pre.textContent = formatAgentPayload(payload);
+    pre.hidden = false;
+  } else if (pre && !pre.textContent) {
+    pre.textContent = "展开查看输入/输出";
+  }
+  // Keep collapsed by default; only auto-open failures lightly via status color.
   renderToolActivity(tool, id, title, status);
   scrollChatToBottom();
 }
@@ -1376,19 +2161,24 @@ function appendAgentNotice(text, isError = false) {
   if (isError) notice.classList.add("error");
 }
 
-function scrollChatToBottom() {
-  const messages = $("chatMessages");
-  if (!messages) return;
-  requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
-}
-
 function showAgentPermission(permission) {
   if (!permission) return;
   state.agentPermission = permission;
   $("permissionSummary").textContent = permission.summary || permission.tool?.title || "工具执行请求";
   $("permissionDetail").textContent = permission.tool?.raw_input == null ? "" : formatAgentPayload(permission.tool.raw_input);
+  if ($("permissionRemember")) $("permissionRemember").checked = false;
+  if ($("permissionAllowBtn")) {
+    $("permissionAllowBtn").textContent = "允许一次";
+  }
   $("permissionBar").hidden = false;
-  scrollChatToBottom();
+  scrollChatToBottom(true);
+}
+
+function syncPermissionAllowLabel() {
+  const remember = !!$("permissionRemember")?.checked;
+  if ($("permissionAllowBtn")) {
+    $("permissionAllowBtn").textContent = remember ? "允许并记住" : "允许一次";
+  }
 }
 
 function respondAgentPermission(allow) {
@@ -1398,17 +2188,28 @@ function respondAgentPermission(allow) {
     toast("对话连接已断开，请稍后重试", "error");
     return;
   }
-  agentSocket.send(JSON.stringify({ type: "permission_response", request_id: permission.request_id, allow }));
+  const remember = allow && !!$("permissionRemember")?.checked;
+  agentSocket.send(JSON.stringify({
+    type: "permission_response",
+    request_id: permission.request_id,
+    allow,
+    remember,
+  }));
   state.agentPermission = null;
   $("permissionBar").hidden = true;
-  appendAgentNotice(allow ? "已允许本次工具执行" : "已拒绝本次工具执行");
+  if (allow && remember) {
+    renderAgentStatus({ ...state.agentStatus, session_auto_approve: true });
+    appendAgentNotice("已允许，并在本会话自动批准后续工具");
+  } else {
+    appendAgentNotice(allow ? "已允许本次工具执行" : "已拒绝本次工具执行");
+  }
 }
 
 async function startAgent() {
   const cwd = $("agentCwd").value.trim();
   if (!cwd) throw new Error("请提供工作目录");
   const alwaysApprove = $("agentAlwaysApprove").checked;
-  if (alwaysApprove && !confirm("自动批准会允许 Grok Build 无需确认即可修改文件和执行命令。确定启动？")) return false;
+  if (alwaysApprove && !state.agentAutoRestoring && !confirm("自动批准会允许 Grok Build 无需确认即可修改文件和执行命令。确定启动？")) return false;
   const wasRunning = agentIsRunning();
   if (wasRunning) {
     await api("/api/agent/stop", { method: "POST", body: "{}" });
@@ -1434,6 +2235,13 @@ async function startAgent() {
   }
   renderAgentStatus(status);
   updateConversationIdentity();
+  persistLastChatContext({
+    sessionId: status.session_id,
+    cwd: status.cwd || cwd,
+    title: state.activeAgentSession?.title,
+    model: status.model,
+    alwaysApprove,
+  });
   connectAgentSocket();
   return true;
 }
@@ -1456,6 +2264,13 @@ async function newAgentSession() {
   state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
   renderAgentStatus(status);
   updateConversationIdentity();
+  persistLastChatContext({
+    sessionId: status.session_id,
+    cwd: status.cwd || cwd,
+    title: "新对话",
+    model: status.model,
+    alwaysApprove: $("agentAlwaysApprove")?.checked,
+  });
   closeNativeChatPanels();
   loadAgentSessions().catch(() => {});
   return true;
@@ -1468,9 +2283,191 @@ async function stopAgent() {
   renderAgentStatus(status);
 }
 
+async function cancelAgentGeneration() {
+  if (!(state.agentStatus?.state === "busy" || state.agentStatus?.busy)) {
+    toast("当前没有正在生成的回复", "info");
+    return;
+  }
+  if ($("chatStopBtn")) $("chatStopBtn").disabled = true;
+  try {
+    if (agentSocket && agentSocket.readyState === WebSocket.OPEN) {
+      agentSocket.send(JSON.stringify({ type: "cancel" }));
+    } else {
+      await api("/api/agent/cancel", { method: "POST", body: "{}" });
+    }
+  } catch (err) {
+    if ($("chatStopBtn")) $("chatStopBtn").disabled = false;
+    throw err;
+  }
+}
+
+async function regenerateLastAssistant(article = lastAssistantMessageEl) {
+  const text = state.lastUserMessage;
+  if (!text) throw new Error("没有可重新生成的用户消息");
+  if (state.agentStatus?.state === "busy" || state.agentStatus?.busy) {
+    throw new Error("正在生成中，请先停止或稍后再试");
+  }
+  if (state.agentStatus?.state !== "ready" || state.agentEngineState === "loading" || state.agentEngineState === "readonly") {
+    throw new Error("当前会话不可用，请先启动 Agent");
+  }
+  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    toast("对话连接尚未就绪", "error");
+    connectAgentSocket();
+    return;
+  }
+  // Drop the last assistant bubble for a clean regen UX (agent still has prior context).
+  if (article?.isConnected && article.dataset.role === "assistant") {
+    article.remove();
+  }
+  if (lastAssistantMessageEl === article) lastAssistantMessageEl = null;
+  agentActiveAssistant = null;
+  agentActiveThought = null;
+  agentRetryNotice = null;
+  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
+  appendAgentNotice("正在重新生成…");
+  forceScrollChatToBottom();
+}
+
+// --- 附件 / 截图上传 ---
+const TEXT_FILE_MAX = 1_000_000;     // 1 MB cap for text attachments
+const IMAGE_FILE_MAX = 16_000_000;   // 16 MB cap for image attachments
+
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (file.size > IMAGE_FILE_MAX) { reject(new Error(`图片过大（${(file.size / 1_000_000).toFixed(1)} MB），上限 16 MB`)); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取图片失败"));
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/s);
+      if (!match) { reject(new Error("图片格式无法解析")); return; }
+      resolve({ kind: "image", data: match[2], dataUrl, mimeType: match[1], name: file.name || "image" });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function readTextFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取文件失败"));
+    reader.onload = () => {
+      let text = String(reader.result || "");
+      const truncated = file.size > TEXT_FILE_MAX;
+      if (truncated) text = text.slice(0, TEXT_FILE_MAX) + "\n…（文件过大，已截断为前 1 MB）";
+      resolve({ kind: "text_file", name: file.name || "file.txt", text, truncated });
+    };
+    reader.readAsText(file.slice(0, TEXT_FILE_MAX + 65536), "utf-8");
+  });
+}
+
+async function handleChatFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  for (const file of files) {
+    try {
+      if (file.type.startsWith("image/")) {
+        state.pendingAttachments.push(await readImageFile(file));
+      } else {
+        state.pendingAttachments.push(await readTextFile(file));
+      }
+    } catch (err) {
+      toast(`${file.name || "附件"}：${err.message || String(err)}`, "error");
+    }
+  }
+  renderChatAttachments();
+  updateChatComposerState();
+}
+
+function renderChatAttachments() {
+  const wrap = $("chatAttachments");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!state.pendingAttachments.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  state.pendingAttachments.forEach((att, index) => {
+    const chip = document.createElement("div");
+    chip.className = "chatAttachment";
+    if (att.kind === "image" && att.dataUrl) {
+      const img = document.createElement("img");
+      img.src = att.dataUrl;
+      img.alt = att.name || "图片";
+      chip.append(img);
+    } else {
+      const icon = document.createElement("span");
+      icon.className = "chatAttachmentIcon";
+      const ext = (att.name || "").split(".").pop() || "txt";
+      icon.textContent = ext.slice(0, 4).toUpperCase();
+      chip.append(icon);
+    }
+    const name = document.createElement("span");
+    name.className = "chatAttachmentName";
+    name.textContent = att.name || (att.kind === "image" ? "图片" : "文件");
+    chip.append(name);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "chatAttachmentRemove";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `移除 ${att.name || "附件"}`);
+    remove.onclick = () => { state.pendingAttachments.splice(index, 1); renderChatAttachments(); updateChatComposerState(); };
+    chip.append(remove);
+    wrap.append(chip);
+  });
+}
+
+function clearChatAttachments() {
+  state.pendingAttachments = [];
+  renderChatAttachments();
+}
+
+function renderMessageAttachments(article, attachments) {
+  if (!article?.isConnected || !Array.isArray(attachments) || !attachments.length) return;
+  const wrap = document.createElement("div");
+  wrap.className = "chatMessageAttachments";
+  for (const att of attachments) {
+    if (att.kind === "image" && att.dataUrl) {
+      const img = document.createElement("img");
+      img.src = att.dataUrl;
+      img.alt = att.name || "图片";
+      img.loading = "lazy";
+      img.onclick = () => window.open(att.dataUrl, "_blank");
+      wrap.append(img);
+    } else {
+      const chip = document.createElement("span");
+      chip.className = "chatMessageFileChip";
+      chip.textContent = `📎 ${att.name || "文件"}${att.truncated ? "（已截断）" : ""}`;
+      wrap.append(chip);
+    }
+  }
+  article.append(wrap);
+}
+
+function buildOutboundAttachments() {
+  return state.pendingAttachments.map((att) => {
+    if (att.kind === "image") {
+      return { kind: "image", data: att.data || "", mime_type: att.mimeType || "", name: att.name || "" };
+    }
+    return { kind: "text_file", name: att.name || "", text: att.text || "" };
+  });
+}
+
+function updateChatComposerState() {
+  // Refresh send button enablement to account for attachments-only messages.
+  if (state.agentStatus?.state !== "ready" || state.agentEngineState === "loading") return;
+  const hasText = !!$("chatInput")?.value.trim();
+  const hasAttachments = !!state.pendingAttachments.length;
+  if ($("chatSendBtn")) $("chatSendBtn").disabled = (!hasText && !hasAttachments) || state.agentStatus?.busy;
+}
+
 async function sendAgentMessage() {
   const text = $("chatInput").value.trim();
-  if (!text) return;
+  const attachments = buildOutboundAttachments();
+  if (!text && !attachments.length) return;
+  if (state.agentStatus?.state === "busy" || state.agentStatus?.busy) {
+    toast("正在生成回复，请先停止或等待完成", "error");
+    return;
+  }
   if (state.agentEngineState === "readonly") {
     if (!confirm("当前仅显示本地历史，原会话上下文没有恢复。发送这条消息将开启新对话，是否继续？")) return;
     const status = state.agentStatus;
@@ -1491,21 +2488,35 @@ async function sendAgentMessage() {
       if (created === false) return;
     }
   }
+  if (state.agentStatus?.state !== "ready") {
+    toast("Agent 尚未就绪，请先启动", "error");
+    return;
+  }
   if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
     toast("对话连接尚未就绪", "error");
     connectAgentSocket();
     return;
   }
-  appendChatMessage("user", text, "", true);
+  state.lastUserMessage = text;
+  appendChatMessage("user", text, "", true, state.pendingAttachments.slice());
   if (state.activeAgentSession && (!state.activeAgentSession.title || state.activeAgentSession.title === "新对话")) {
-    state.activeAgentSession.title = text.replace(/\s+/g, " ").slice(0, 60);
+    state.activeAgentSession.title = (text || "附件消息").replace(/\s+/g, " ").slice(0, 60);
     updateConversationIdentity();
   }
+  persistLastChatContext({
+    sessionId: state.activeAgentSession?.id || state.agentStatus?.session_id,
+    cwd: state.activeAgentSession?.cwd || $("agentCwd")?.value.trim(),
+    title: state.activeAgentSession?.title,
+    model: state.activeAgentSession?.model || state.agentStatus?.model,
+  });
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
   $("chatInput").value = "";
-  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  clearChatAttachments();
+  updateContextUsage();
+  forceScrollChatToBottom();
+  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
 }
 
@@ -2561,10 +3572,28 @@ bindChatPanelResizer("right");
 $("agentCwd").oninput = updateConversationIdentity;
 $("permissionAllowBtn").onclick = () => respondAgentPermission(true);
 $("permissionRejectBtn").onclick = () => respondAgentPermission(false);
+$("permissionRemember")?.addEventListener("change", syncPermissionAllowLabel);
 $("chatComposer").onsubmit = (event) => {
   event.preventDefault();
   sendAgentMessage().catch((err) => toast(err.message || String(err), "error"));
 };
+$("chatStopBtn")?.addEventListener("click", () => {
+  cancelAgentGeneration().catch((err) => toast(err.message || String(err), "error"));
+});
+$("chatAttachBtn")?.addEventListener("click", () => $("chatAttachFile")?.click());
+$("chatAttachFile")?.addEventListener("change", (event) => {
+  const input = event.target;
+  handleChatFiles(input.files).finally(() => { input.value = ""; });
+});
+$("chatInput").addEventListener("paste", (event) => {
+  const items = event.clipboardData?.items;
+  if (!items) return;
+  const imageItems = Array.from(items).filter((item) => item.type.startsWith("image/"));
+  if (!imageItems.length) return;
+  event.preventDefault();
+  const files = imageItems.map((item) => item.getAsFile()).filter(Boolean);
+  handleChatFiles(files);
+});
 $("agentReadonlyNewBtn").onclick = () => run(newAgentSession, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
 $("chatInput").oninput = () => renderAgentStatus(state.agentStatus);
 $("chatInput").onkeydown = (event) => {
@@ -2998,13 +4027,28 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && state.view === "chat") {
+    event.preventDefault();
+    openChatFindBar();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     if (state.view === "edit") {
       event.preventDefault();
       $("saveProfileBtn").click();
     }
   }
+  if (event.key === "Escape" && $("chatFindBar") && !$("chatFindBar").hidden) {
+    event.preventDefault();
+    closeChatFindBar();
+    return;
+  }
   if (event.key === "Escape" && $("chatThemeDialog")?.open) {
+    return;
+  }
+  if (event.key === "Escape" && state.view === "chat" && (state.agentStatus?.state === "busy" || state.agentStatus?.busy)) {
+    event.preventDefault();
+    cancelAgentGeneration().catch((err) => toast(err.message || String(err), "error"));
     return;
   }
   if (event.key === "Escape" && state.view !== "home") {

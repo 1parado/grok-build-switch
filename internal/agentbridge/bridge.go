@@ -79,24 +79,26 @@ type Bridge struct {
 	opMu sync.Mutex
 	mu   sync.RWMutex
 
-	state           string
-	grokPath        string
-	lastError       string
-	defaultCwd      string
-	cwd             string
-	sessionID       string
-	alwaysApprove   bool
-	busy            bool
-	model           string
-	suppressUpdates atomic.Bool
-	generation      uint64
-	cmd             *exec.Cmd
-	cancel          context.CancelFunc
-	processDone     chan struct{}
-	closeJob        func()
-	conn            *acp.ClientSideConnection
-	outputFilter    *sessionLoadNotificationFilter
-	processCtx      context.Context
+	state              string
+	grokPath           string
+	lastError          string
+	defaultCwd         string
+	cwd                string
+	sessionID          string
+	alwaysApprove      bool
+	sessionAutoApprove bool
+	busy               bool
+	model              string
+	suppressUpdates    atomic.Bool
+	generation         uint64
+	cmd                *exec.Cmd
+	cancel             context.CancelFunc
+	promptCancel       context.CancelFunc
+	processDone        chan struct{}
+	closeJob           func()
+	conn               *acp.ClientSideConnection
+	outputFilter       *sessionLoadNotificationFilter
+	processCtx         context.Context
 
 	subscribers map[string]chan Event
 	subCounter  atomic.Uint64
@@ -138,16 +140,17 @@ func (b *Bridge) SetDefaultCwd(path string) {
 func (b *Bridge) Status() Status {
 	b.mu.RLock()
 	status := Status{
-		GrokPath:      b.grokPath,
-		Running:       b.cmd != nil && (b.state == "starting" || b.state == "ready" || b.state == "busy"),
-		State:         b.state,
-		SessionID:     b.sessionID,
-		Cwd:           b.cwd,
-		DefaultCwd:    b.defaultCwd,
-		Busy:          b.busy,
-		AlwaysApprove: b.alwaysApprove,
-		Model:         b.model,
-		Error:         b.lastError,
+		GrokPath:           b.grokPath,
+		Running:            b.cmd != nil && (b.state == "starting" || b.state == "ready" || b.state == "busy"),
+		State:              b.state,
+		SessionID:          b.sessionID,
+		Cwd:                b.cwd,
+		DefaultCwd:         b.defaultCwd,
+		Busy:               b.busy,
+		AlwaysApprove:      b.alwaysApprove,
+		SessionAutoApprove: b.sessionAutoApprove,
+		Model:              b.model,
+		Error:              b.lastError,
 	}
 	override := b.override
 	b.mu.RUnlock()
@@ -348,6 +351,7 @@ func (b *Bridge) newSessionLocked(ctx context.Context, cwd string) error {
 	b.mu.Lock()
 	b.cwd = cwd
 	b.sessionID = string(response.SessionId)
+	b.sessionAutoApprove = false
 	if model := modelFromMeta(response.Meta); model != "" {
 		b.model = model
 	}
@@ -400,6 +404,7 @@ func (b *Bridge) loadSessionLocked(ctx context.Context, sessionID, cwd string) e
 	if err == nil {
 		b.cwd = cwd
 		b.sessionID = sessionID
+		b.sessionAutoApprove = false
 		b.state = "ready"
 		b.lastError = ""
 		b.model = summary.CurrentModelID
@@ -440,13 +445,14 @@ func modelFromMeta(meta map[string]any) string {
 	return ""
 }
 
-func (b *Bridge) Prompt(text string) error {
+func (b *Bridge) Prompt(text string, attachments []Attachment) error {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	blocks := buildPromptBlocks(text, attachments)
+	if len(blocks) == 0 {
 		return errors.New("消息不能为空")
 	}
 	b.mu.Lock()
-	if b.cmd == nil || b.conn == nil || b.sessionID == "" {
+	if b.cmd == nil || b.conn == nil || b.sessionID == "" || b.processCtx == nil {
 		b.mu.Unlock()
 		return ErrNotRunning
 	}
@@ -454,30 +460,104 @@ func (b *Bridge) Prompt(text string) error {
 		b.mu.Unlock()
 		return ErrBusy
 	}
+	turnCtx, turnCancel := context.WithCancel(b.processCtx)
 	b.busy = true
 	b.state = "busy"
+	b.lastError = ""
+	b.promptCancel = turnCancel
 	conn := b.conn
-	ctx := b.processCtx
 	sessionID := b.sessionID
 	generation := b.generation
 	b.mu.Unlock()
 	b.broadcastStatus()
-	go b.runPrompt(ctx, generation, conn, sessionID, text)
+	go b.runPrompt(turnCtx, turnCancel, generation, conn, sessionID, blocks)
 	return nil
 }
 
-func (b *Bridge) runPrompt(ctx context.Context, generation uint64, conn *acp.ClientSideConnection, sessionID, text string) {
+// buildPromptBlocks turns the user's text + attachments into ACP content
+// blocks. Images become inline image blocks (base64); text files are folded
+// into the prompt as labelled snippets.
+func buildPromptBlocks(text string, attachments []Attachment) []acp.ContentBlock {
+	blocks := make([]acp.ContentBlock, 0, 1+len(attachments))
+	if text != "" {
+		blocks = append(blocks, acp.TextBlock(text))
+	}
+	const textFileMax = 20000
+	for _, a := range attachments {
+		switch strings.ToLower(strings.TrimSpace(a.Kind)) {
+		case "image":
+			if a.Data != "" && a.MimeType != "" {
+				blocks = append(blocks, acp.ImageBlock(a.Data, a.MimeType))
+			}
+		case "text_file":
+			snippet := strings.TrimSpace(a.Text)
+			if snippet == "" {
+				continue
+			}
+			if len(snippet) > textFileMax {
+				snippet = snippet[:textFileMax] + "\n…（已截断，仅发送前 20000 字符）"
+			}
+			name := strings.TrimSpace(a.Name)
+			if name != "" {
+				blocks = append(blocks, acp.TextBlock(fmt.Sprintf("【附件：%s】\n%s", name, snippet)))
+			} else {
+				blocks = append(blocks, acp.TextBlock(snippet))
+			}
+		}
+	}
+	return blocks
+}
+
+// CancelPrompt stops the in-flight turn via ACP session/cancel (context cancel).
+func (b *Bridge) CancelPrompt() error {
+	b.mu.Lock()
+	if b.cmd == nil || b.conn == nil || b.sessionID == "" {
+		b.mu.Unlock()
+		return ErrNotRunning
+	}
+	if !b.busy || b.promptCancel == nil {
+		b.mu.Unlock()
+		return errors.New("当前没有正在生成的回复")
+	}
+	cancel := b.promptCancel
+	sessionID := b.sessionID
+	conn := b.conn
+	b.mu.Unlock()
+	cancel()
+	// Best-effort explicit cancel in case the prompt request has not registered yet.
+	_ = conn.Cancel(context.Background(), acp.CancelNotification{SessionId: acp.SessionId(sessionID)})
+	return nil
+}
+
+func (b *Bridge) SetSessionAutoApprove(enabled bool) {
+	b.mu.Lock()
+	b.sessionAutoApprove = enabled
+	b.mu.Unlock()
+	b.broadcastStatus()
+}
+
+func (b *Bridge) runPrompt(ctx context.Context, turnCancel context.CancelFunc, generation uint64, conn *acp.ClientSideConnection, sessionID string, blocks []acp.ContentBlock) {
+	defer turnCancel()
 	response, err := conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: acp.SessionId(sessionID),
-		Prompt:    []acp.ContentBlock{acp.TextBlock(text)},
+		Prompt:    blocks,
 	})
+	cancelled := errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) ||
+		(err != nil && strings.Contains(strings.ToLower(err.Error()), "cancel"))
+	if err == nil && string(response.StopReason) == string(acp.StopReasonCancelled) {
+		cancelled = true
+	}
 	b.mu.Lock()
 	if generation != b.generation {
 		b.mu.Unlock()
 		return
 	}
 	b.busy = false
-	if err != nil {
+	b.promptCancel = nil
+	if cancelled {
+		b.state = "ready"
+		b.lastError = ""
+	} else if err != nil {
 		b.state = "ready"
 		b.lastError = err.Error()
 	} else {
@@ -485,7 +565,9 @@ func (b *Bridge) runPrompt(ctx context.Context, generation uint64, conn *acp.Cli
 		b.lastError = ""
 	}
 	b.mu.Unlock()
-	if err != nil {
+	if cancelled {
+		b.broadcast(Event{Type: "turn_done", SessionID: sessionID, StopReason: string(acp.StopReasonCancelled)})
+	} else if err != nil {
 		b.broadcast(Event{Type: "error", SessionID: sessionID, Error: fmt.Sprintf("Grok 对话失败: %v", err)})
 	} else {
 		b.broadcast(Event{Type: "turn_done", SessionID: sessionID, StopReason: string(response.StopReason)})
@@ -513,14 +595,20 @@ func (b *Bridge) stopLocked() {
 	}
 	b.state = "stopping"
 	b.busy = false
+	b.sessionAutoApprove = false
 	cancel := b.cancel
+	promptCancel := b.promptCancel
 	closeJob := b.closeJob
 	process := b.cmd.Process
 	done := b.processDone
 	b.closeJob = nil
 	b.cancel = nil
+	b.promptCancel = nil
 	b.mu.Unlock()
 	b.broadcastStatus()
+	if promptCancel != nil {
+		promptCancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -540,6 +628,7 @@ func (b *Bridge) stopLocked() {
 	b.state = "idle"
 	b.cmd = nil
 	b.cancel = nil
+	b.promptCancel = nil
 	b.processDone = nil
 	b.closeJob = nil
 	b.conn = nil
@@ -547,6 +636,7 @@ func (b *Bridge) stopLocked() {
 	b.processCtx = nil
 	b.sessionID = ""
 	b.busy = false
+	b.sessionAutoApprove = false
 	b.lastError = ""
 	b.permissions = map[string]*pendingPermission{}
 	b.mu.Unlock()
@@ -564,8 +654,10 @@ func (b *Bridge) waitProcess(generation uint64, cmd *exec.Cmd, logFile *os.File,
 	}
 	stopping := b.state == "stopping"
 	closeJob := b.closeJob
+	promptCancel := b.promptCancel
 	b.cmd = nil
 	b.cancel = nil
+	b.promptCancel = nil
 	b.processDone = nil
 	b.closeJob = nil
 	b.conn = nil
@@ -573,8 +665,12 @@ func (b *Bridge) waitProcess(generation uint64, cmd *exec.Cmd, logFile *os.File,
 	b.processCtx = nil
 	b.sessionID = ""
 	b.busy = false
+	b.sessionAutoApprove = false
 	if stopping {
 		b.mu.Unlock()
+		if promptCancel != nil {
+			promptCancel()
+		}
 		if closeJob != nil {
 			closeJob()
 		}
@@ -588,6 +684,9 @@ func (b *Bridge) waitProcess(generation uint64, cmd *exec.Cmd, logFile *os.File,
 	}
 	errorText := b.lastError
 	b.mu.Unlock()
+	if promptCancel != nil {
+		promptCancel()
+	}
 	if closeJob != nil {
 		closeJob()
 	}

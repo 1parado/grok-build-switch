@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=29">
+  <link rel="stylesheet" href="/style.css?v=37">
 </head>
 <body>
   <div class="shell">
@@ -243,11 +243,23 @@
             </div>
           </header>
 
+          <div id="chatNodeRail" class="chatNodeRail" role="navigation" aria-label="对话节点" hidden>
+            <div id="chatNodeScroller" class="chatNodeScroller"></div>
+          </div>
+
+          <div id="chatFindBar" class="chatFindBar" hidden role="search" aria-label="在当前会话中查找">
+            <input id="chatFindInput" type="search" placeholder="在当前会话中查找…" autocomplete="off" spellcheck="false">
+            <span id="chatFindCount" class="chatFindCount" aria-live="polite">0 / 0</span>
+            <button type="button" id="chatFindPrev" class="chatFindBtn" aria-label="上一个匹配" title="上一个 (Shift+Enter)">↑</button>
+            <button type="button" id="chatFindNext" class="chatFindBtn" aria-label="下一个匹配" title="下一个 (Enter)">↓</button>
+            <button type="button" id="chatFindClose" class="chatFindBtn" aria-label="关闭查找" title="关闭 (Esc)">×</button>
+          </div>
+
+          <button type="button" id="chatJumpBottomBtn" class="chatJumpBottomBtn" hidden title="回到最新 · Esc 之外" aria-label="回到最新">↓ 最新</button>
+
           <div id="chatMessages" class="chatMessages" role="log" aria-live="polite">
             <div id="chatEmpty" class="chatEmpty">
-              <span class="chatEmptyMark">G</span>
-              <strong>从一个问题开始</strong>
-              <span>Markdown、代码、表格与 Mermaid 图表将在这里原生呈现</span>
+              <img src="/icon.svg" alt="" class="chatEmptyMark chatEmptyIcon">
             </div>
           </div>
 
@@ -261,6 +273,9 @@
               <span class="permissionLabel">工具权限</span>
               <strong id="permissionSummary">等待确认</strong>
               <code id="permissionDetail"></code>
+              <label class="permissionRememberCheck">
+                <input type="checkbox" id="permissionRemember"> 本会话记住（后续工具自动允许）
+              </label>
             </div>
             <div class="permissionActions">
               <button type="button" id="permissionRejectBtn" class="btn danger">拒绝</button>
@@ -269,11 +284,17 @@
           </div>
 
           <form id="chatComposer" class="chatComposer">
+            <div id="chatAttachments" class="chatAttachments" hidden></div>
             <div class="composerInputWrap">
               <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…" aria-label="消息" disabled></textarea>
-              <span class="composerHint">Enter 发送 · Shift + Enter 换行</span>
+              <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行</span>
             </div>
-            <button type="submit" id="chatSendBtn" class="sendChatBtn" aria-label="发送" disabled>↑</button>
+            <div class="composerActions">
+              <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
+              <button type="button" id="chatAttachBtn" class="chatAttachBtn" aria-label="添加附件 / 截图" title="添加图片或文本附件 · 也可直接粘贴图片">＋</button>
+              <button type="button" id="chatStopBtn" class="stopChatBtn" aria-label="停止生成" hidden title="停止生成">■</button>
+              <button type="submit" id="chatSendBtn" class="sendChatBtn" aria-label="发送" disabled>↑</button>
+            </div>
           </form>
         </section>
 
@@ -303,6 +324,11 @@
           <div class="contextSection">
             <span class="contextLabel">会话 ID</span>
             <code id="contextSessionId">—</code>
+          </div>
+          <div class="contextSection contextUsageSection">
+            <div class="contextSectionHead"><span class="contextLabel">上下文用量</span><span id="contextUsageNote" class="muted tiny">估算</span></div>
+            <div id="contextUsageBar" class="contextUsageBar"><span id="contextUsageFill" class="contextUsageFill"></span></div>
+            <span id="contextUsageText" class="muted tiny">尚未发送消息</span>
           </div>
           <label class="check autoApproveCheck" title="自动允许 Grok Build 执行工具">
             <input type="checkbox" id="agentAlwaysApprove"> 自动批准工具
@@ -591,6 +617,6 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=29"></script>
+  <script src="/app.js?v=37"></script>
 </body>
 </html>

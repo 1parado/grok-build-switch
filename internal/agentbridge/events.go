@@ -1,16 +1,17 @@
 package agentbridge
 
 type Event struct {
-	Type       string           `json:"type"`
-	SessionID  string           `json:"session_id,omitempty"`
-	Text       string           `json:"text,omitempty"`
-	Tool       *ToolEvent       `json:"tool,omitempty"`
-	Permission *PermissionEvent `json:"permission,omitempty"`
-	Retry      *RetryEvent      `json:"retry,omitempty"`
-	Status     string           `json:"status,omitempty"`
-	Model      string           `json:"model,omitempty"`
-	StopReason string           `json:"stop_reason,omitempty"`
-	Error      string           `json:"error,omitempty"`
+	Type               string           `json:"type"`
+	SessionID          string           `json:"session_id,omitempty"`
+	Text               string           `json:"text,omitempty"`
+	Tool               *ToolEvent       `json:"tool,omitempty"`
+	Permission         *PermissionEvent `json:"permission,omitempty"`
+	Retry              *RetryEvent      `json:"retry,omitempty"`
+	Status             string           `json:"status,omitempty"`
+	Model              string           `json:"model,omitempty"`
+	StopReason         string           `json:"stop_reason,omitempty"`
+	Error              string           `json:"error,omitempty"`
+	SessionAutoApprove *bool            `json:"session_auto_approve,omitempty"`
 }
 
 type RetryEvent struct {
@@ -46,18 +47,29 @@ type PermissionOption struct {
 	Kind string `json:"kind"`
 }
 
+// Attachment is a user-supplied file sent alongside a prompt. Images become
+// inline ACP image blocks; text files are folded into the prompt as snippets.
+type Attachment struct {
+	Kind     string `json:"kind"`               // "image" | "text_file"
+	Data     string `json:"data,omitempty"`     // base64 (no data: prefix) for images
+	MimeType string `json:"mime_type,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Text     string `json:"text,omitempty"`     // file contents for text_file
+}
+
 type Status struct {
-	Available     bool   `json:"available"`
-	GrokPath      string `json:"grok_path,omitempty"`
-	Running       bool   `json:"running"`
-	State         string `json:"state"`
-	SessionID     string `json:"session_id,omitempty"`
-	Cwd           string `json:"cwd,omitempty"`
-	DefaultCwd    string `json:"default_cwd,omitempty"`
-	Busy          bool   `json:"busy"`
-	AlwaysApprove bool   `json:"always_approve"`
-	Model         string `json:"model,omitempty"`
-	Error         string `json:"error,omitempty"`
+	Available          bool   `json:"available"`
+	GrokPath           string `json:"grok_path,omitempty"`
+	Running            bool   `json:"running"`
+	State              string `json:"state"`
+	SessionID          string `json:"session_id,omitempty"`
+	Cwd                string `json:"cwd,omitempty"`
+	DefaultCwd         string `json:"default_cwd,omitempty"`
+	Busy               bool   `json:"busy"`
+	AlwaysApprove      bool   `json:"always_approve"`
+	SessionAutoApprove bool   `json:"session_auto_approve"`
+	Model              string `json:"model,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 type StartOptions struct {

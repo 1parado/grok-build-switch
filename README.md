@@ -1,4 +1,6 @@
-# grok_switch
+# Grok_switch
+
+<img width="188" height="66" alt="image" src="https://github.com/user-attachments/assets/f2ee6b24-6a15-4912-a6ed-67f3ffb6c1a4" />
 
 本地托盘工具：用供应商（Profile）管理 Grok CLI 的 `~/.grok/config.toml`。
 
@@ -7,16 +9,25 @@
 ## 功能
 
 - 供应商增删改查：名称、Base URL、API Key、上游格式、默认 / 联网 / explore·plan 子代理模型、已启用模型列表
+
+  <img width="1524" height="1012" alt="image" src="https://github.com/user-attachments/assets/cdcfddd0-55d4-4ae5-a830-4f99c1525b9b" />
+
 - 供应商默认使用 `high` 推理强度；每个模型自动写入 `supports_reasoning_effort = true` 和 `low/medium/high` 支持列表
 - 一键启用：写入 `[endpoints]`、`[models]`、`[subagents.models]`（explore / plan）与 `[model.*]`，其它段尽量保留
 - 切换 / 保存 config 前自动备份；设置页可还原备份、直接编辑 `config.toml`
 - 首次运行可从当前 `config.toml` 导入 Default 供应商
 - 导入 CPA `xai-*.json` 或 Grok CLI `auth.json`，由内嵌代理提供稳定的本地 URL/key 并自动刷新 token
+
+  <img width="1240" height="544" alt="image" src="https://github.com/user-attachments/assets/87625b01-f77f-464b-8335-61a7401ba9be" />
+
 - Grok 多账号池：批量导入、定时自动巡检、健康分类、坏号自动隔离、健康号轮换与单账号回退
 - 内置 Grok Build AI 对话工作台：流式回复、工具权限、历史会话续接与工作目录选择
 - AI Native 富文本回复：GFM、代码高亮与复制、Mermaid、KaTeX、图片和引用
 - Web UI 默认仅监听 `127.0.0.1`；开启局域网访问后监听 `0.0.0.0`（默认端口 `17878`）
 - 可选开启局域网手机访问：同一网络内扫码配对后管理供应商或继续 AI 对话
+
+  <img width="1375" height="962" alt="image" src="https://github.com/user-attachments/assets/9d0dd11a-c92a-4da5-ae92-606a191a996c" />
+
 - 可设置Windows 开机自启
 - Windows 单实例运行；再次双击 EXE 会打开已运行实例的管理页面
 - 启动失败时显示原生错误对话框，并尽可能写入诊断日志
@@ -77,11 +88,15 @@ SmartScreen 提示。下方签名配置仅供项目发布维护者使用。
 `grok_switch` 通过“专用网络”，不要将端口转发到公网。跨网络访问请使用 Tailscale、
 ZeroTier 或 WireGuard 等 VPN。
 
+<img width="1067" height="1944" alt="image" src="https://github.com/user-attachments/assets/5d106a9e-f5bc-4f0b-a0fa-8b1473c544c8" />
+
 ### 聊天主题背景
 
 聊天工作台右上角的 `◐` 按钮可以切换纯净、霜蓝、深空、余晖背景，或导入本地 PNG、JPEG、WebP 图片。背景支持遮罩强度、模糊与水平/垂直焦点调节。
 
 主题属于当前设备的外观偏好，保存在浏览器/WebView2 本地存储中，不会写入 Grok 会话、API 配置或同步到已配对手机。自定义图片会在本机压缩后保存，原文件不会被移动或修改。
+
+<img width="1900" height="975" alt="image" src="https://github.com/user-attachments/assets/b75afab5-681a-4316-804c-44ad1fe81103" />
 
 ### Grok Auth 与号池
 

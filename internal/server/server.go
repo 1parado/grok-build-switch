@@ -25,10 +25,12 @@ import (
 
 	"grok_switch/internal/autostart"
 	grokconfig "grok_switch/internal/config"
+	"grok_switch/internal/cpamint"
 	"grok_switch/internal/grokauth"
 	"grok_switch/internal/grokpool"
 	"grok_switch/internal/paths"
 	"grok_switch/internal/profiles"
+	"grok_switch/internal/registrar"
 	"grok_switch/internal/remoteaccess"
 	"grok_switch/internal/settings"
 	"grok_switch/internal/switcher"
@@ -41,6 +43,8 @@ type Server struct {
 	RemoteAccess *remoteaccess.Store
 	GrokAuth     *grokauth.Store
 	GrokPool     *grokpool.Manager
+	CpaMint      *cpamint.Service
+	Registrar    *registrar.Service
 	Switcher     *switcher.Switcher
 	Agent        AgentService
 	Assets       embed.FS
@@ -62,6 +66,30 @@ func (s *Server) SetOnChanged(fn func()) {
 func (s *Server) Listen(preferred int) (*http.Server, int, error) {
 	if err := settings.ValidatePort(preferred); err != nil {
 		return nil, 0, err
+	}
+	if s.GrokPool != nil {
+		s.GrokPool.SetOnAuthDirImport(func(grokpool.ImportResult) {
+			if _, err := s.upsertGrokAuthProfile(); err != nil {
+				fmt.Fprintf(os.Stderr, "grok auth profile after hot-load: %v\n", err)
+				return
+			}
+			s.changed()
+		})
+	}
+	if s.Registrar != nil && s.GrokPool != nil {
+		s.Registrar.SetAuthDirResolver(s.GrokPool.ResolvedAuthDir)
+		s.Registrar.SetOnFinished(func(job registrar.Job) {
+			if s.GrokPool == nil {
+				return
+			}
+			result, err := s.GrokPool.ImportAuthDir()
+			s.Registrar.SetImportResult(job.ID, result.Imported, result.Updated, err)
+			if err == nil && result.Imported+result.Updated > 0 {
+				if _, profileErr := s.upsertGrokAuthProfile(); profileErr == nil {
+					s.changed()
+				}
+			}
+		})
 	}
 	mux := http.NewServeMux()
 	s.routes(mux)
@@ -180,7 +208,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grok-pool", s.handleGrokPool)
 	mux.HandleFunc("/api/grok-pool/inspect", s.handleGrokPoolInspect)
 	mux.HandleFunc("/api/grok-pool/bulk", s.handleGrokPoolBulk)
+	mux.HandleFunc("/api/grok-pool/import-dir", s.handleGrokPoolImportDir)
+	mux.HandleFunc("/api/grok-pool/open-auth-dir", s.handleGrokPoolOpenAuthDir)
 	mux.HandleFunc("/api/grok-pool/accounts/", s.handleGrokPoolAccount)
+	mux.HandleFunc("/api/cpa-mint", s.handleCpaMint)
+	mux.HandleFunc("/api/registrar", s.handleRegistrar)
+	mux.HandleFunc("/api/registrar/probe", s.handleRegistrarProbe)
+	mux.HandleFunc("/api/registrar/start", s.handleRegistrarStart)
+	mux.HandleFunc("/api/registrar/stop", s.handleRegistrarStop)
+	mux.HandleFunc("/api/registrar/job", s.handleRegistrarJob)
+	mux.HandleFunc("/api/registrar/job/log", s.handleRegistrarLog)
 	mux.HandleFunc("/api/agent/status", s.handleAgentStatus)
 	mux.HandleFunc("/api/agent/start", s.handleAgentStart)
 	mux.HandleFunc("/api/agent/stop", s.handleAgentStop)

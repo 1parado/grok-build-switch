@@ -4,6 +4,7 @@ const state = {
   status: null,
   grokAuth: null,
   grokPool: null,
+  registrar: null,
   lanAccess: null,
   availableModels: [],
   backups: [],
@@ -31,6 +32,12 @@ const $ = (id) => document.getElementById(id);
 let toastTimer = null;
 let refreshTimer = null;
 let grokPoolPollTimer = null;
+let registrarPollTimer = null;
+let registrarTerminalNotice = "";
+let registrarFormDirty = false;
+let cpaMintPollTimer = null;
+let cpaMintSession = null;
+let cpaMintTerminalNotice = "";
 let agentSocket = null;
 let agentReconnectTimer = null;
 let agentActiveAssistant = null;
@@ -438,13 +445,14 @@ async function run(fn, { button, busyLabel, success } = {}) {
 }
 
 async function refreshAll() {
-  const [status, profiles, backups, settings, grokAuth, grokPool, lanAccess] = await Promise.all([
+  const [status, profiles, backups, settings, grokAuth, grokPool, registrar, lanAccess] = await Promise.all([
     api("/api/status"),
     api("/api/profiles"),
     api("/api/backups"),
     api("/api/settings"),
     api("/api/grok-auth"),
     api("/api/grok-pool"),
+    api("/api/registrar"),
     api("/api/lan-access"),
   ]);
   state.status = status;
@@ -453,6 +461,7 @@ async function refreshAll() {
   state.settings = settings;
   state.grokAuth = grokAuth;
   state.grokPool = grokPool;
+  state.registrar = registrar;
   state.lanAccess = lanAccess;
   // Coerce to strict boolean for UI.
   if (state.status && typeof state.status.config_matches_active !== "boolean") {
@@ -466,6 +475,7 @@ async function refreshAll() {
   renderLANAccess(lanAccess);
   renderGrokAuth(grokAuth);
   renderGrokPool(grokPool);
+  renderRegistrar(registrar);
   syncAdvancedUI();
   const detail = [];
   if (state.status?.config_path) detail.push(state.status.config_path);
@@ -2820,6 +2830,146 @@ function renderGrokAuth(auth) {
   status.textContent = detail.join(" · ") || "凭据已配置";
 }
 
+const REGISTRAR_STATUS_LABELS = {
+  starting: "启动中",
+  running: "注册中",
+  succeeded: "已完成",
+  failed: "失败",
+  cancelled: "已停止",
+};
+
+function registrarConfigFromForm() {
+  const previous = state.registrar?.config || {};
+  const provider = $("registrarEmailProvider").value;
+  return {
+    version: 1,
+    browser_path: $("registrarBrowserPath").value.trim(),
+    browser_mode: $("registrarBrowserMode").value,
+    proxy_url: $("registrarProxyUrl").value.trim(),
+    email_provider: provider,
+    default_domains: (provider === "cloudflare" ? $("registrarCloudflareDomains").value : $("registrarDefaultDomains").value).trim(),
+    cloudmail_url: $("registrarCloudmailUrl").value.trim(),
+    cloudmail_admin_email: $("registrarCloudmailAdminEmail").value.trim(),
+    cloudmail_password: $("registrarCloudmailPassword").value,
+    cloudflare_api_base: $("registrarCloudflareApiBase").value.trim(),
+    cloudflare_api_key: $("registrarCloudflareApiKey").value.trim(),
+    cloudflare_auth_mode: $("registrarCloudflareAuthMode").value,
+    cloudflare_path_domains: $("registrarCloudflareDomainsPath").value.trim(),
+    cloudflare_path_accounts: $("registrarCloudflareAccountsPath").value.trim(),
+    cloudflare_path_token: $("registrarCloudflareTokenPath").value.trim(),
+    cloudflare_path_messages: $("registrarCloudflareMessagesPath").value.trim(),
+    hotmail_accounts_text: $("registrarHotmailAccounts").value,
+    hotmail_max_aliases: Number($("registrarHotmailAliases").value || 5),
+    count: Number($("registrarCount").value || 1),
+    workers: Number($("registrarWorkers").value || 1),
+    mail_timeout_seconds: Number($("registrarMailTimeout").value || 180),
+    page_timeout_seconds: previous.page_timeout_seconds || 300,
+    prefer_protocol_mint: $("registrarPreferProtocol").checked,
+    protocol_only: $("registrarProtocolOnly").checked,
+  };
+}
+
+function renderRegistrar(stateData) {
+  const config = stateData?.config || {};
+  if (!registrarFormDirty) {
+    if ($("registrarBrowserPath")) $("registrarBrowserPath").value = config.browser_path || "";
+    if ($("registrarBrowserMode")) $("registrarBrowserMode").value = config.browser_mode || "visible";
+    if ($("registrarProxyUrl")) $("registrarProxyUrl").value = config.proxy_url || "";
+    if ($("registrarEmailProvider")) $("registrarEmailProvider").value = config.email_provider || "cloudflare";
+    if ($("registrarDefaultDomains")) $("registrarDefaultDomains").value = config.default_domains || "";
+    if ($("registrarCloudmailUrl")) $("registrarCloudmailUrl").value = config.cloudmail_url || "";
+    if ($("registrarCloudmailAdminEmail")) $("registrarCloudmailAdminEmail").value = config.cloudmail_admin_email || "";
+    if ($("registrarCloudmailPassword")) $("registrarCloudmailPassword").value = config.cloudmail_password || "";
+    if ($("registrarCloudflareApiBase")) $("registrarCloudflareApiBase").value = config.cloudflare_api_base || "";
+    if ($("registrarCloudflareApiKey")) $("registrarCloudflareApiKey").value = config.cloudflare_api_key || "";
+    if ($("registrarCloudflareAuthMode")) $("registrarCloudflareAuthMode").value = config.cloudflare_auth_mode || "none";
+    if ($("registrarCloudflareDomains")) $("registrarCloudflareDomains").value = config.default_domains || "";
+    if ($("registrarCloudflareDomainsPath")) $("registrarCloudflareDomainsPath").value = config.cloudflare_path_domains || "/api/domains";
+    if ($("registrarCloudflareAccountsPath")) $("registrarCloudflareAccountsPath").value = config.cloudflare_path_accounts || "/api/new_address";
+    if ($("registrarCloudflareTokenPath")) $("registrarCloudflareTokenPath").value = config.cloudflare_path_token || "/api/token";
+    if ($("registrarCloudflareMessagesPath")) $("registrarCloudflareMessagesPath").value = config.cloudflare_path_messages || "/api/mails";
+    if ($("registrarHotmailAccounts")) $("registrarHotmailAccounts").value = config.hotmail_accounts_text || "";
+    if ($("registrarHotmailAliases")) $("registrarHotmailAliases").value = config.hotmail_max_aliases || 5;
+    if ($("registrarCount")) $("registrarCount").value = config.count || 1;
+    if ($("registrarWorkers")) $("registrarWorkers").value = config.workers || 1;
+    if ($("registrarMailTimeout")) $("registrarMailTimeout").value = config.mail_timeout_seconds || 180;
+    if ($("registrarPreferProtocol")) $("registrarPreferProtocol").checked = config.prefer_protocol_mint !== false;
+    if ($("registrarProtocolOnly")) $("registrarProtocolOnly").checked = !!config.protocol_only;
+  }
+  updateRegistrarProviderFields();
+  renderRegistrarJob(stateData?.job || null);
+  if ($("registrarPaths")) {
+    const paths = [];
+    if (stateData?.auth_dir) paths.push(`CPA 目录：${stateData.auth_dir}`);
+    if (stateData?.accounts_path) paths.push(`账本：${stateData.accounts_path}`);
+    $("registrarPaths").textContent = paths.join(" · ");
+  }
+}
+
+function updateRegistrarProviderFields() {
+  const provider = $("registrarEmailProvider")?.value || "cloudflare";
+  const isCloudflare = provider === "cloudflare";
+  if ($("registrarCloudflareEssentials")) $("registrarCloudflareEssentials").hidden = !isCloudflare;
+  if ($("registrarAltProviderHint")) $("registrarAltProviderHint").hidden = isCloudflare;
+  if ($("registrarHotmailFields")) $("registrarHotmailFields").hidden = provider !== "hotmail";
+  if ($("registrarCloudmailFields")) $("registrarCloudmailFields").hidden = provider !== "cloudmail";
+  if ($("registrarCloudflareFields")) $("registrarCloudflareFields").hidden = !isCloudflare;
+  // Non-default email modes need advanced fields; expand so users notice.
+  const advanced = $("registrarAdvanced");
+  if (advanced && !isCloudflare && !advanced.open) {
+    advanced.open = true;
+  }
+}
+
+function renderRegistrarJob(job) {
+  clearTimeout(registrarPollTimer);
+  const active = job && (job.status === "starting" || job.status === "running");
+  const badge = $("registrarBadge");
+  if (badge) {
+    badge.textContent = job ? (REGISTRAR_STATUS_LABELS[job.status] || job.status) : "空闲";
+    badge.classList.toggle("active", !!active);
+  }
+  if ($("startRegistrarBtn")) $("startRegistrarBtn").disabled = !!active;
+  if ($("stopRegistrarBtn")) $("stopRegistrarBtn").hidden = !active;
+  const progress = $("registrarProgress");
+  if (progress) progress.hidden = !job;
+  if (job) {
+    const total = job.requested || 0;
+    const completed = job.completed || 0;
+    if ($("registrarProgressCount")) $("registrarProgressCount").textContent = `${completed} / ${total}`;
+    if ($("registrarProgressDetail")) {
+      const detail = [`成功 ${job.succeeded || 0}`, `失败 ${job.failed || 0}`];
+      if (job.imported || job.updated) detail.push(`导入 ${job.imported || 0}，更新 ${job.updated || 0}`);
+      if (job.error) detail.push(job.error);
+      $("registrarProgressDetail").textContent = detail.join(" · ");
+    }
+    if ($("registrarProgressBar")) {
+      $("registrarProgressBar").max = Math.max(total, 1);
+      $("registrarProgressBar").value = Math.min(completed, total);
+    }
+    if ($("registrarLog")) {
+      const lines = job.log_tail || [];
+      $("registrarLog").textContent = lines.length ? lines.join("\n") : "等待日志…";
+      $("registrarLog").scrollTop = $("registrarLog").scrollHeight;
+    }
+    if (!active && job.id && registrarTerminalNotice !== job.id) {
+      registrarTerminalNotice = job.id;
+      if (job.status === "succeeded") toast("注册任务已完成，账号已进入号池", "success");
+      if (job.status === "failed") toast(job.error || "注册任务失败", "error");
+    }
+  }
+  if (active && job.id) {
+    registrarPollTimer = setTimeout(() => loadRegistrarJob().catch(() => {}), 1000);
+  }
+}
+
+async function loadRegistrarJob() {
+  const response = await api("/api/registrar/job");
+  if (state.registrar) state.registrar.job = response.job;
+  renderRegistrarJob(response.job);
+  return response.job;
+}
+
 const GROK_POOL_CLASS_LABELS = {
   healthy: "健康",
   permission_denied: "权限被拒",
@@ -2851,6 +3001,9 @@ function renderGrokPool(pool) {
   if ($("grokPoolInterval")) $("grokPoolInterval").value = settings.interval_minutes || 360;
   if ($("grokPoolWorkers")) $("grokPoolWorkers").value = settings.workers || 4;
   if ($("grokPoolProxyUrl")) $("grokPoolProxyUrl").value = settings.proxy_url || "";
+  if ($("grokPoolAuthDir")) $("grokPoolAuthDir").value = settings.auth_dir || "";
+  if ($("grokPoolWatchEnabled")) $("grokPoolWatchEnabled").checked = !!settings.watch_enabled;
+  if ($("grokPoolWatchRecursive")) $("grokPoolWatchRecursive").checked = settings.watch_recursive !== false;
   if ($("grokPoolConnection")) $("grokPoolConnection").hidden = !configured;
   if ($("grokPoolBaseUrl")) $("grokPoolBaseUrl").value = configured && state.status?.port
     ? `http://127.0.0.1:${state.status.port}/grok/v1`
@@ -2880,10 +3033,81 @@ function renderGrokPool(pool) {
     if (pool?.last_error) parts.push(pool.last_error);
     $("grokPoolProgress").textContent = parts.join(" · ");
   }
+  if ($("grokPoolAuthDirStatus")) {
+    const watchParts = [];
+    if (pool?.resolved_auth_dir) watchParts.push(pool.resolved_auth_dir);
+    if (settings.watch_enabled) watchParts.push(`热加载 ${pool.watch_file_count || 0} 个文件`);
+    if (pool?.watch_last_import) watchParts.push(`最近导入 ${new Date(pool.watch_last_import).toLocaleString()}`);
+    if (pool?.watch_last_error) watchParts.push(pool.watch_last_error);
+    $("grokPoolAuthDirStatus").textContent = watchParts.join(" · ") || "认证目录尚未扫描";
+  }
   renderGrokPoolAccounts(pool?.accounts || []);
   if (pool?.running) {
     grokPoolPollTimer = setTimeout(() => loadGrokPool().catch((err) => toast(err.message, "error")), 1500);
   }
+}
+
+function renderCpaMint(session, { notify = false } = {}) {
+  clearTimeout(cpaMintPollTimer);
+  cpaMintSession = session || null;
+  const active = session && (session.status === "pending" || session.status === "polling");
+  const start = $("startCpaMintBtn");
+  const cancel = $("cancelCpaMintBtn");
+  const open = $("openCpaMintUrlBtn");
+  if (start) start.disabled = !!active;
+  if (cancel) cancel.hidden = !active;
+  if (open) open.hidden = !session?.verification_uri_complete;
+  const codes = $("cpaMintCodes");
+  if (codes) codes.hidden = !session?.verification_uri_complete;
+  if ($("cpaMintUserCode")) $("cpaMintUserCode").textContent = session?.user_code || "";
+  const verify = $("cpaMintVerifyLink");
+  if (verify) {
+    verify.textContent = session?.verification_uri_complete || "";
+    verify.href = session?.verification_uri_complete || "#";
+  }
+  const status = $("cpaMintStatus");
+  if (status) {
+    if (!session) status.textContent = "尚未开始铸造。";
+    else {
+      const labels = {
+        pending: "正在准备设备授权…",
+        polling: "等待浏览器完成登录与授权…",
+        success: `铸造成功：${session.path || "认证文件已写入"}`,
+        failed: `铸造失败：${session.error || "未知错误"}`,
+        cancelled: "铸造已取消。",
+      };
+      status.textContent = labels[session.status] || session.status || "状态未知";
+      if (session.error && active) status.textContent += `（${session.error}）`;
+    }
+  }
+  if (notify && session?.status === "success" && cpaMintTerminalNotice !== session.id) {
+    cpaMintTerminalNotice = session.id;
+    toast("CPA 凭据已写入并导入号池", "success");
+    refreshAll().catch((err) => toast(err.message, "error"));
+  }
+  if (notify && session && (session.status === "failed" || session.status === "cancelled") && cpaMintTerminalNotice !== session.id) {
+    cpaMintTerminalNotice = session.id;
+    if (session.status === "failed") toast(session.error || "CPA 铸造失败", "error");
+  }
+  if (active) {
+    cpaMintPollTimer = setTimeout(() => pollCpaMint(session.id), 1500);
+  }
+}
+
+async function pollCpaMint(id) {
+  try {
+    const response = await api(`/api/cpa-mint?id=${encodeURIComponent(id)}`);
+    renderCpaMint(response.session, { notify: true });
+  } catch (err) {
+    if (cpaMintSession?.id === id) {
+      cpaMintPollTimer = setTimeout(() => pollCpaMint(id), 2500);
+    }
+  }
+}
+
+async function loadLatestCpaMint() {
+  const response = await api("/api/cpa-mint");
+  renderCpaMint(response.session);
 }
 
 function renderGrokPoolAccounts(accounts) {
@@ -3888,6 +4112,64 @@ $("deleteGrokAuthBtn").onclick = () => run(async () => {
   success: "Grok auth 已删除",
 });
 
+$("registrarEmailProvider").onchange = updateRegistrarProviderFields;
+
+["registrarBrowserPath", "registrarBrowserMode", "registrarProxyUrl", "registrarEmailProvider",
+  "registrarDefaultDomains", "registrarCloudmailUrl", "registrarCloudmailAdminEmail",
+  "registrarCloudmailPassword", "registrarCloudflareApiBase", "registrarCloudflareApiKey",
+  "registrarCloudflareAuthMode", "registrarCloudflareDomains", "registrarCloudflareDomainsPath",
+  "registrarCloudflareAccountsPath", "registrarCloudflareTokenPath", "registrarCloudflareMessagesPath",
+  "registrarHotmailAccounts", "registrarHotmailAliases",
+  "registrarCount", "registrarWorkers", "registrarMailTimeout", "registrarPreferProtocol",
+  "registrarProtocolOnly"].forEach((id) => {
+  const el = $(id);
+  if (!el) return;
+  el.addEventListener("input", () => { registrarFormDirty = true; });
+  el.addEventListener("change", () => { registrarFormDirty = true; });
+});
+
+$("registrarForm").onsubmit = (event) => {
+  event.preventDefault();
+  run(async () => {
+    state.registrar = await api("/api/registrar", {
+      method: "PUT",
+      body: JSON.stringify(registrarConfigFromForm()),
+    });
+    registrarFormDirty = false;
+    renderRegistrar(state.registrar);
+  }, { button: $("saveRegistrarBtn"), busyLabel: "保存中…", success: "注册机配置已保存" });
+};
+
+$("probeRegistrarBtn").onclick = () => run(async () => {
+  const result = await api("/api/registrar/probe", {
+    method: "POST",
+    body: JSON.stringify(registrarConfigFromForm()),
+  });
+  const lines = (result.checks || []).map((check) => `${check.ok ? "OK" : "失败"} · ${check.name} · ${check.detail || ""}`);
+  $("registrarLog").textContent = lines.join("\n") || "没有检测结果";
+  if (!result.ok) {
+    toast("注册环境检测未通过", "error");
+    return false;
+  }
+}, { button: $("probeRegistrarBtn"), busyLabel: "检测中…", success: "注册环境可用" });
+
+$("startRegistrarBtn").onclick = () => run(async () => {
+  state.registrar = await api("/api/registrar", {
+    method: "PUT",
+    body: JSON.stringify(registrarConfigFromForm()),
+  });
+  registrarFormDirty = false;
+  registrarTerminalNotice = "";
+  const response = await api("/api/registrar/start", { method: "POST", body: "{}" });
+  state.registrar.job = response.job;
+  renderRegistrarJob(response.job);
+}, { button: $("startRegistrarBtn"), busyLabel: "启动中…" });
+
+$("stopRegistrarBtn").onclick = () => run(async () => {
+  await api("/api/registrar/stop", { method: "POST", body: "{}" });
+  await loadRegistrarJob();
+}, { button: $("stopRegistrarBtn"), busyLabel: "停止中…", success: "已请求停止注册" });
+
 $("grokPoolSettingsForm").onsubmit = (event) => {
   event.preventDefault();
   run(async () => {
@@ -3898,10 +4180,86 @@ $("grokPoolSettingsForm").onsubmit = (event) => {
         interval_minutes: Number($("grokPoolInterval").value || 360),
         workers: Number($("grokPoolWorkers").value || 4),
         proxy_url: $("grokPoolProxyUrl").value.trim(),
+        auth_dir: $("grokPoolAuthDir").value.trim(),
+        watch_enabled: $("grokPoolWatchEnabled").checked,
+        watch_recursive: $("grokPoolWatchRecursive").checked,
       }),
     });
     renderGrokPool(state.grokPool);
   }, { button: $("saveGrokPoolSettingsBtn"), busyLabel: "保存中…", success: "号池巡检设置已保存" });
+};
+
+$("importGrokPoolAuthDirBtn").onclick = () => run(async () => {
+  const response = await api("/api/grok-pool/import-dir", {
+    method: "POST",
+    body: JSON.stringify({ use_auth_dir: true }),
+  });
+  await refreshAll();
+  if (response.result?.failed?.length) {
+    toast(`部分文件失败：${response.result.failed.join("；")}`, "error");
+    return false;
+  }
+}, {
+  button: $("importGrokPoolAuthDirBtn"),
+  busyLabel: "导入中…",
+  success: "认证目录已导入号池",
+});
+
+$("openGrokPoolAuthDirBtn").onclick = () => run(
+  () => api("/api/grok-pool/open-auth-dir", { method: "POST" }),
+  { button: $("openGrokPoolAuthDirBtn"), busyLabel: "打开中…" },
+);
+
+$("importGrokPoolPathBtn").onclick = () => {
+  const path = prompt("输入服务器本机上的认证目录绝对路径：", $("grokPoolAuthDir").value.trim());
+  if (!path?.trim()) return;
+  run(async () => {
+    const response = await api("/api/grok-pool/import-dir", {
+      method: "POST",
+      body: JSON.stringify({ path: path.trim(), recursive: true }),
+    });
+    await refreshAll();
+    if (response.result?.failed?.length) {
+      toast(`部分文件失败：${response.result.failed.join("；")}`, "error");
+      return false;
+    }
+  }, {
+    button: $("importGrokPoolPathBtn"),
+    busyLabel: "导入中…",
+    success: "指定目录已导入号池",
+  });
+};
+
+$("startCpaMintBtn").onclick = () => run(async () => {
+  cpaMintTerminalNotice = "";
+  const response = await api("/api/cpa-mint", {
+    method: "POST",
+    body: JSON.stringify({
+      email: $("cpaMintEmail").value.trim(),
+      open_browser: true,
+    }),
+  });
+  renderCpaMint(response.session);
+}, {
+  button: $("startCpaMintBtn"),
+  busyLabel: "启动中…",
+});
+
+$("cancelCpaMintBtn").onclick = () => run(async () => {
+  if (!cpaMintSession?.id) return false;
+  const response = await api(`/api/cpa-mint?id=${encodeURIComponent(cpaMintSession.id)}`, {
+    method: "DELETE",
+  });
+  renderCpaMint(response.session, { notify: true });
+}, {
+  button: $("cancelCpaMintBtn"),
+  busyLabel: "取消中…",
+});
+
+$("openCpaMintUrlBtn").onclick = () => {
+  const url = cpaMintSession?.verification_uri_complete;
+  if (!url) return;
+  window.open(url, "_blank", "noopener");
 };
 
 $("importGrokPoolBtn").onclick = () => $("grokPoolFiles").click();
@@ -4060,6 +4418,6 @@ initialiseChatThemes();
 showView("home");
 refreshAll()
   .then(() => {
-    if (!state.profiles.length) return;
+    loadLatestCpaMint().catch((err) => toast(err.message, "error"));
   })
   .catch((err) => toast(err.message, "error"));

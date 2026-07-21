@@ -19,11 +19,13 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"grok_switch/internal/agentbridge"
+	"grok_switch/internal/cpamint"
 	"grok_switch/internal/crash"
 	"grok_switch/internal/grokauth"
 	"grok_switch/internal/grokpool"
 	"grok_switch/internal/paths"
 	"grok_switch/internal/profiles"
+	"grok_switch/internal/registrar"
 	"grok_switch/internal/remoteaccess"
 	"grok_switch/internal/server"
 	"grok_switch/internal/settings"
@@ -84,6 +86,11 @@ func main() {
 	}
 	grokPool.Start()
 	defer grokPool.Close()
+	registrarService, err := registrar.NewService(resolved.DataDir)
+	if err != nil {
+		guiFatal(err)
+	}
+	defer registrarService.Close()
 
 	sw := &switcher.Switcher{
 		ConfigPath: resolved.GrokConfig,
@@ -108,6 +115,8 @@ func main() {
 		RemoteAccess: remoteaccess.NewStore(resolved.RemoteAccessFile),
 		GrokAuth:     grokAuthStore,
 		GrokPool:     grokPool,
+		CpaMint:      cpamint.NewService(),
+		Registrar:    registrarService,
 		Switcher:     sw,
 		Agent:        agent,
 		Assets:       assets,

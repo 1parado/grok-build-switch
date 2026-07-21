@@ -1513,6 +1513,187 @@ textarea:focus,
 
 .poolSettings .check { min-height: 38px; }
 .poolProxyField { grid-column: 1 / -2; }
+.poolAuthDirField { grid-column: 1 / -1; }
+
+.cpaMintBox {
+  margin: 14px 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.registrarSteps {
+  margin: 0 0 14px;
+  padding: 12px 12px 12px 32px;
+  border: 1px solid var(--primary-border);
+  border-radius: var(--radius-sm);
+  background: var(--primary-soft);
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.registrarSteps li {
+  margin: 0 0 6px;
+}
+
+.registrarSteps li:last-child {
+  margin-bottom: 0;
+}
+
+.registrarForm {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.registrarWide,
+.registrarActions,
+.registrarEssentials,
+.registrarAdvanced {
+  grid-column: 1 / -1;
+}
+
+.registrarEssentials {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.registrarEssentialsGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.registrarHint {
+  margin: 0;
+  grid-column: 1 / -1;
+}
+
+.registrarAdvanced {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 0 12px;
+}
+
+.registrarAdvanced > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 12px 0;
+  font-weight: 600;
+  color: var(--muted);
+  user-select: none;
+}
+
+.registrarAdvanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.registrarAdvanced > summary::before {
+  content: "▸ ";
+  color: var(--primary);
+}
+
+.registrarAdvanced[open] > summary::before {
+  content: "▾ ";
+}
+
+.registrarAdvancedBody {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+  padding: 0 0 12px;
+  border-top: 1px solid var(--line);
+}
+
+.registrarProviderFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 0.28fr);
+  gap: 10px;
+  align-items: end;
+}
+
+.registrarProviderWide {
+  grid-column: 1 / -1;
+}
+
+.registrarProviderFields[hidden],
+.registrarEssentialsGrid[hidden],
+#registrarAltProviderHint[hidden] {
+  display: none !important;
+}
+
+.registrarActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.registrarProgress {
+  display: grid;
+  grid-template-columns: minmax(190px, 0.32fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  margin: 12px 0;
+}
+
+.registrarProgress > div,
+.registrarProgress strong,
+.registrarProgress span {
+  display: block;
+}
+
+.registrarProgress progress {
+  width: 100%;
+  height: 10px;
+}
+
+.registrarLog {
+  box-sizing: border-box;
+  width: 100%;
+  height: 190px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.cpaMintCodes {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.cpaMintCodes > div {
+  min-width: 0;
+  padding: 9px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.cpaMintCodes code,
+.cpaMintCodes a {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 
 .poolAccounts {
   display: grid;
@@ -1555,11 +1736,24 @@ textarea:focus,
 .poolAccount.reauth { border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); }
 
 @media (max-width: 680px) {
+  .registrarForm,
+  .registrarEssentials,
+  .registrarAdvancedBody { grid-template-columns: 1fr; }
+  .registrarWide,
+  .registrarActions,
+  .registrarEssentials,
+  .registrarAdvanced { grid-column: 1; }
+  .registrarProviderFields,
+  .registrarProgress { grid-template-columns: 1fr; }
+  .registrarProviderWide,
+  .registrarEssentialsGrid { grid-column: 1; }
   .poolSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .poolSettings { grid-template-columns: 1fr 1fr; }
   .poolSettings .check,
   .poolSettings button { grid-column: 1 / -1; }
   .poolProxyField { grid-column: 1 / -1; }
+  .poolAuthDirField { grid-column: 1 / -1; }
+  .cpaMintCodes { grid-template-columns: 1fr; }
   .authKeyRow { grid-template-columns: 1fr auto; }
   .authKeyRow input { grid-column: 1 / -1; }
 }

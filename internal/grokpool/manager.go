@@ -29,6 +29,7 @@ func NewManager(dir string) (*Manager, error) {
 		stop:        make(chan struct{}),
 		done:        make(chan struct{}),
 		stores:      make(map[string]*grokauth.Store),
+		watchHashes: make(map[string]string),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -55,7 +56,15 @@ func (m *Manager) Start() {
 	m.started = true
 	m.mu.Unlock()
 	go m.scheduler()
+	go m.watchLoop()
 	m.signalWake()
+}
+
+// SetOnAuthDirImport registers a callback invoked after a successful hot-load import.
+func (m *Manager) SetOnAuthDirImport(fn func(ImportResult)) {
+	m.mu.Lock()
+	m.onAuthDirImport = fn
+	m.mu.Unlock()
 }
 
 func (m *Manager) Close() {
@@ -82,19 +91,44 @@ func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	accounts := append([]Account(nil), m.state.Accounts...)
+	settings := m.state.Settings
+	settings.AuthDir = m.resolvedAuthDirLocked()
 	return Status{
-		Configured:  len(accounts) > 0,
-		LocalAPIKey: m.state.LocalAPIKey,
-		Settings:    m.state.Settings,
-		Accounts:    accounts,
-		Summary:     summarize(accounts),
-		Running:     m.running,
-		Done:        m.doneCount,
-		Total:       m.totalCount,
-		LastRun:     m.state.LastRun,
-		NextRun:     m.nextRun,
-		LastError:   m.state.LastError,
+		Configured:      len(accounts) > 0,
+		LocalAPIKey:     m.state.LocalAPIKey,
+		Settings:        settings,
+		Accounts:        accounts,
+		Summary:         summarize(accounts),
+		Running:         m.running,
+		Done:            m.doneCount,
+		Total:           m.totalCount,
+		LastRun:         m.state.LastRun,
+		NextRun:         m.nextRun,
+		LastError:       m.state.LastError,
+		ResolvedAuthDir: settings.AuthDir,
+		WatchLastScan:   m.watchLastScan,
+		WatchLastImport: m.watchLastImport,
+		WatchLastError:  m.watchLastError,
+		WatchFileCount:  m.watchFileCount,
 	}
+}
+
+// ResolvedAuthDir returns the absolute CPA auth directory path.
+func (m *Manager) ResolvedAuthDir() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.resolvedAuthDirLocked()
+}
+
+func (m *Manager) resolvedAuthDirLocked() string {
+	raw := strings.TrimSpace(m.state.Settings.AuthDir)
+	if raw == "" {
+		return filepath.Clean(filepath.Join(m.dir, "..", "cpa_auths"))
+	}
+	if filepath.IsAbs(raw) {
+		return filepath.Clean(raw)
+	}
+	return filepath.Clean(filepath.Join(m.dir, raw))
 }
 
 func (m *Manager) Import(files []ImportFile) (ImportResult, error) {
@@ -218,6 +252,7 @@ func (m *Manager) UpdateSettings(settings Settings) (Status, error) {
 		return Status{}, err
 	}
 	settings.ProxyURL = normalizedProxy
+	settings.AuthDir = strings.TrimSpace(settings.AuthDir)
 	if err := validateSettings(settings); err != nil {
 		return Status{}, err
 	}
@@ -240,6 +275,9 @@ func (m *Manager) UpdateSettings(settings Settings) (Status, error) {
 	} else {
 		m.nextRun = time.Time{}
 	}
+	// Ensure auth dir exists when configured for hot-load / mint output.
+	authDir := m.resolvedAuthDirLocked()
+	_ = os.MkdirAll(authDir, 0o700)
 	err = m.saveLocked()
 	m.mu.Unlock()
 	if err != nil {

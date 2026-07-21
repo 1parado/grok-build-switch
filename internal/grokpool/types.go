@@ -25,6 +25,11 @@ type Settings struct {
 	IntervalMinutes int    `json:"interval_minutes"`
 	Workers         int    `json:"workers"`
 	ProxyURL        string `json:"proxy_url,omitempty"`
+	// AuthDir is the CPA xai-*.json directory used for path import and hot-load.
+	// Empty means default: <dataDir>/cpa_auths next to the pool directory.
+	AuthDir        string `json:"auth_dir,omitempty"`
+	WatchEnabled   bool   `json:"watch_enabled"`
+	WatchRecursive bool   `json:"watch_recursive"`
 }
 
 type Account struct {
@@ -57,6 +62,12 @@ type Status struct {
 	LastRun     time.Time `json:"last_run,omitempty,omitzero"`
 	NextRun     time.Time `json:"next_run,omitempty,omitzero"`
 	LastError   string    `json:"last_error,omitempty"`
+	// ResolvedAuthDir is the absolute CPA auth directory currently in use.
+	ResolvedAuthDir string    `json:"resolved_auth_dir,omitempty"`
+	WatchLastScan   time.Time `json:"watch_last_scan,omitempty,omitzero"`
+	WatchLastImport time.Time `json:"watch_last_import,omitempty,omitzero"`
+	WatchLastError  string    `json:"watch_last_error,omitempty"`
+	WatchFileCount  int       `json:"watch_file_count,omitempty"`
 }
 
 type Summary struct {
@@ -122,8 +133,21 @@ type Manager struct {
 	runWG          sync.WaitGroup
 	roundRobin     atomic.Uint64
 	stores         map[string]*grokauth.Store
+
+	// Auth-dir hot-load state (in-memory fingerprints; re-scanned after restart).
+	watchHashes     map[string]string
+	watchLastScan   time.Time
+	watchLastImport time.Time
+	watchLastError  string
+	watchFileCount  int
+	onAuthDirImport func(ImportResult)
 }
 
 func defaultSettings() Settings {
-	return Settings{Enabled: true, IntervalMinutes: defaultIntervalMinutes, Workers: defaultWorkers}
+	return Settings{
+		Enabled:         true,
+		IntervalMinutes: defaultIntervalMinutes,
+		Workers:         defaultWorkers,
+		WatchRecursive:  true,
+	}
 }

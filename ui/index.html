@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=37">
+  <link rel="stylesheet" href="/style.css?v=38">
 </head>
 <body>
   <div class="shell">
@@ -455,6 +455,139 @@
         <p class="muted tiny">支持 CPA 的 <span class="mono">xai-*.json</span> 和 Grok CLI 的 <span class="mono">~/.grok/auth.json</span>。单文件和目录导入都进入同一个自动巡检号池；页面不会把 xAI access token 当作 API Key 暴露。</p>
       </section>
 
+      <section class="formCard" id="registrarCard">
+        <div class="rowBetween">
+          <div>
+            <h2 class="sectionTitle">Grok 注册机</h2>
+            <p class="muted tiny">默认使用 Cloudflare 临时邮箱。一般只需填写「网络代理」和「API Base」，成功后账号会自动铸造并进入号池。</p>
+          </div>
+          <span id="registrarBadge" class="badge">空闲</span>
+        </div>
+
+        <ol class="registrarSteps" id="registrarSteps">
+          <li><strong>准备环境</strong>：本机安装 Chrome 或 Edge；开启可访问外网的代理（如 Clash / 系统代理）。</li>
+          <li><strong>填写两项</strong>：下方填写<strong>网络代理</strong>与<strong>临时邮箱 API Base</strong>（自备 cloudflare_temp_email 一类服务地址）。</li>
+          <li><strong>开始注册</strong>：点「开始注册」；弹出浏览器若出现人机验证请手动勾选。完成后自动进入号池。</li>
+        </ol>
+
+        <form id="registrarForm" class="registrarForm">
+          <div class="registrarEssentials registrarWide">
+            <label class="field registrarProviderWide">网络代理
+              <input id="registrarProxyUrl" class="mono" placeholder="例如 http://127.0.0.1:7897" autocomplete="off">
+            </label>
+            <div id="registrarCloudflareEssentials" class="registrarEssentialsGrid">
+              <label class="field registrarProviderWide">临时邮箱 API Base
+                <input id="registrarCloudflareApiBase" class="mono" placeholder="https://你的-临时邮箱-API 地址" autocomplete="off">
+              </label>
+              <p class="muted tiny registrarHint">认证默认「无」；若你的服务需要 Key，请在下方高级选项中填写。</p>
+            </div>
+            <p id="registrarAltProviderHint" class="muted tiny registrarHint" hidden>当前不是 Cloudflare 模式，请在「高级选项」中配置对应邮箱服务。</p>
+            <label class="field">注册数量
+              <input id="registrarCount" type="number" min="1" max="100" value="1">
+            </label>
+          </div>
+
+          <details class="registrarAdvanced registrarWide" id="registrarAdvanced">
+            <summary>高级选项（浏览器、邮箱类型、认证与接口路径等）</summary>
+            <div class="registrarAdvancedBody">
+              <label class="field">浏览器模式
+                <select id="registrarBrowserMode">
+                  <option value="visible">可见浏览器（推荐）</option>
+                  <option value="auto">自动（可见优先）</option>
+                  <option value="headless">仅无窗口（易被 403）</option>
+                </select>
+              </label>
+              <label class="field registrarProviderWide">浏览器路径（可选）
+                <input id="registrarBrowserPath" class="mono" placeholder="留空自动查找 Chrome / Edge">
+              </label>
+              <label class="field">邮箱服务
+                <select id="registrarEmailProvider">
+                  <option value="cloudflare">Cloudflare 临时邮箱（推荐）</option>
+                  <option value="hotmail">Hotmail / Outlook</option>
+                  <option value="cloudmail">CloudMail</option>
+                </select>
+              </label>
+
+              <div id="registrarHotmailFields" class="registrarProviderFields registrarProviderWide" hidden>
+                <label class="field registrarProviderWide">Hotmail 凭证
+                  <textarea id="registrarHotmailAccounts" class="mono" rows="4" spellcheck="false" placeholder="邮箱----密码----ClientID----refresh_token"></textarea>
+                </label>
+                <label class="field">单邮箱最大地址数
+                  <input id="registrarHotmailAliases" type="number" min="1" max="100" value="5">
+                </label>
+              </div>
+
+              <div id="registrarCloudmailFields" class="registrarProviderFields registrarProviderWide" hidden>
+                <label class="field registrarProviderWide">CloudMail URL
+                  <input id="registrarCloudmailUrl" class="mono" placeholder="https://mail.example.com">
+                </label>
+                <label class="field">管理员邮箱
+                  <input id="registrarCloudmailAdminEmail" type="email">
+                </label>
+                <label class="field">管理员密码
+                  <input id="registrarCloudmailPassword" type="password" autocomplete="off">
+                </label>
+                <label class="field registrarProviderWide">Catch-all 域名
+                  <input id="registrarDefaultDomains" class="mono" placeholder="example.com, example.net">
+                </label>
+              </div>
+
+              <div id="registrarCloudflareFields" class="registrarProviderFields registrarProviderWide">
+                <label class="field">API Key（可选）
+                  <input id="registrarCloudflareApiKey" type="password" autocomplete="off">
+                </label>
+                <label class="field">认证方式
+                  <select id="registrarCloudflareAuthMode">
+                    <option value="none">无认证</option>
+                    <option value="bearer">Bearer</option>
+                    <option value="x-api-key">X-API-Key</option>
+                    <option value="query-key">URL key 参数</option>
+                  </select>
+                </label>
+                <label class="field registrarProviderWide">指定域名（可选，逗号分隔）
+                  <input id="registrarCloudflareDomains" class="mono" placeholder="example.com, example.net">
+                </label>
+                <label class="field">域名接口
+                  <input id="registrarCloudflareDomainsPath" class="mono" value="/api/domains">
+                </label>
+                <label class="field">创建邮箱接口
+                  <input id="registrarCloudflareAccountsPath" class="mono" value="/api/new_address">
+                </label>
+                <label class="field">Token 接口
+                  <input id="registrarCloudflareTokenPath" class="mono" value="/api/token">
+                </label>
+                <label class="field">邮件列表接口
+                  <input id="registrarCloudflareMessagesPath" class="mono" value="/api/mails">
+                </label>
+              </div>
+
+              <label class="field">并发数
+                <input id="registrarWorkers" type="number" min="1" max="3" value="1">
+              </label>
+              <label class="field">邮件超时（秒）
+                <input id="registrarMailTimeout" type="number" min="30" max="900" value="180">
+              </label>
+              <label class="check"><input type="checkbox" id="registrarPreferProtocol" checked> SSO 协议铸造优先</label>
+              <label class="check"><input type="checkbox" id="registrarProtocolOnly"> 协议失败不回退授权页</label>
+            </div>
+          </details>
+
+          <div class="registrarActions registrarWide">
+            <button type="submit" id="saveRegistrarBtn" class="btn">保存</button>
+            <button type="button" id="probeRegistrarBtn" class="btn">检测环境</button>
+            <button type="button" id="startRegistrarBtn" class="btn primary">开始注册</button>
+            <button type="button" id="stopRegistrarBtn" class="btn danger" hidden>停止</button>
+          </div>
+        </form>
+
+        <p id="registrarPaths" class="muted tiny"></p>
+        <div id="registrarProgress" class="registrarProgress" hidden>
+          <div><strong id="registrarProgressCount">0 / 0</strong><span id="registrarProgressDetail" class="muted tiny">等待任务</span></div>
+          <progress id="registrarProgressBar" max="1" value="0"></progress>
+        </div>
+        <pre id="registrarLog" class="registrarLog mono">尚未运行注册任务。</pre>
+      </section>
+
       <section class="formCard" id="grokPoolCard">
         <div class="rowBetween">
           <div>
@@ -475,11 +608,47 @@
           <label class="field">并发数
             <input id="grokPoolWorkers" type="number" min="1" max="16" value="4">
           </label>
-          <label class="field poolProxyField">网络代理（巡检、token 刷新和号池转发共用）
+          <label class="field poolProxyField">网络代理（巡检、token 刷新、铸造和号池转发共用）
             <input id="grokPoolProxyUrl" class="mono" placeholder="例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080">
           </label>
-          <button type="submit" id="saveGrokPoolSettingsBtn" class="btn">保存巡检设置</button>
+          <label class="field poolAuthDirField">CPA 认证目录（号池导入 / 铸造输出 / 热加载）
+            <input id="grokPoolAuthDir" class="mono" placeholder="默认 %USERPROFILE%\.grok_switch\cpa_auths">
+          </label>
+          <label class="check"><input type="checkbox" id="grokPoolWatchEnabled"> 目录热加载（监视 CPA 目录新文件）</label>
+          <label class="check"><input type="checkbox" id="grokPoolWatchRecursive" checked> 递归子目录</label>
+          <button type="submit" id="saveGrokPoolSettingsBtn" class="btn">保存号池设置</button>
         </form>
+        <p id="grokPoolAuthDirStatus" class="muted tiny">认证目录加载中…</p>
+
+        <div class="inlineActions" style="margin-bottom:12px">
+          <button type="button" id="importGrokPoolAuthDirBtn" class="btn primary">从认证目录导入</button>
+          <button type="button" id="openGrokPoolAuthDirBtn" class="btn">打开认证目录</button>
+          <button type="button" id="importGrokPoolPathBtn" class="btn">从路径导入…</button>
+        </div>
+
+        <div id="cpaMintBox" class="cpaMintBox">
+          <div class="rowBetween">
+            <div>
+              <h3 class="sectionTitle" style="font-size:15px;margin:0">CPA 设备授权</h3>
+              <p class="muted tiny" style="margin:4px 0 0">Go 服务负责 device-auth、token 轮询和 CPA 文件写入；系统浏览器只用于登录、Turnstile 与「允许」。此流程不会创建新的 xAI 账号。</p>
+            </div>
+          </div>
+          <div class="poolSettings" style="margin-top:10px">
+            <label class="field">备注邮箱（可选，写入文件名）
+              <input id="cpaMintEmail" type="email" placeholder="例如 user@example.com">
+            </label>
+          </div>
+          <div class="inlineActions">
+            <button type="button" id="startCpaMintBtn" class="btn primary">开始铸造</button>
+            <button type="button" id="cancelCpaMintBtn" class="btn" hidden>取消</button>
+            <button type="button" id="openCpaMintUrlBtn" class="btn" hidden>打开验证页</button>
+          </div>
+          <p id="cpaMintStatus" class="muted tiny" style="margin-top:10px">尚未开始铸造。</p>
+          <div id="cpaMintCodes" class="cpaMintCodes" hidden>
+            <div><span class="muted tiny">用户码</span><code id="cpaMintUserCode" class="mono"></code></div>
+            <div><span class="muted tiny">验证链接</span><a id="cpaMintVerifyLink" class="mono" href="#" target="_blank" rel="noopener"></a></div>
+          </div>
+        </div>
 
         <div id="grokPoolConnection" hidden>
           <label class="field">号池 Base URL
@@ -508,7 +677,7 @@
         </div>
         <input type="file" id="grokPoolFiles" accept="application/json,.json" multiple hidden>
         <input type="file" id="grokPoolDirectory" accept="application/json,.json" webkitdirectory directory multiple hidden>
-        <p class="muted tiny">“选择目录导入”会递归读取所选目录及子目录中的全部 .json；原文件保持不变。</p>
+        <p class="muted tiny">「从认证目录导入」使用上方配置的本机路径；「选择目录导入」通过浏览器选取（不写回路径）。铸造产出与热加载共用 CPA 认证目录。原文件不会被移动。</p>
         <div id="grokPoolAccounts" class="poolAccounts"></div>
       </section>
 
@@ -617,6 +786,6 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=37"></script>
+  <script src="/app.js?v=40"></script>
 </body>
 </html>

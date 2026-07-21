@@ -87,6 +87,7 @@ func normalizeSettings(settings Settings) Settings {
 	if settings.Workers < minWorkers || settings.Workers > maxWorkers {
 		settings.Workers = defaultWorkers
 	}
+	settings.AuthDir = strings.TrimSpace(settings.AuthDir)
 	return settings
 }
 

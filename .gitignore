@@ -32,6 +32,13 @@ problems.md
 notes_*.md
 task_plan_*.md
 *-implementation.md
+/docs/design/register-module-integration.md
+
+# Local registration credentials and runtime data
+/.grok_switch/
+/registrar.json
+/registrar/
+/cpa_auths/
 
 # OS
 Thumbs.db

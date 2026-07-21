@@ -25,6 +25,69 @@ func TestNativeChatScrimSharesShellStackingContext(t *testing.T) {
 	}
 }
 
+func TestCpaMintControlsHaveClientHandlers(t *testing.T) {
+	htmlData, err := assets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"startCpaMintBtn", "cancelCpaMintBtn", "openCpaMintUrlBtn", "grokPoolAuthDir"} {
+		if !bytes.Contains(htmlData, []byte(`id="`+id+`"`)) {
+			t.Fatalf("%s control not found", id)
+		}
+		if !bytes.Contains(appData, []byte(`$("`+id+`")`)) {
+			t.Fatalf("%s client handler not found", id)
+		}
+	}
+	for _, endpoint := range []string{"/api/cpa-mint", "/api/grok-pool/import-dir", "/api/grok-pool/open-auth-dir"} {
+		if !bytes.Contains(appData, []byte(endpoint)) {
+			t.Fatalf("client endpoint %s not found", endpoint)
+		}
+	}
+}
+
+func TestRegistrarControlsHaveClientHandlers(t *testing.T) {
+	htmlData, err := assets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{
+		"registrarForm", "registrarSteps", "registrarAdvanced", "registrarCloudflareEssentials",
+		"registrarProxyUrl", "registrarCloudflareApiBase",
+		"probeRegistrarBtn", "startRegistrarBtn", "stopRegistrarBtn", "registrarLog",
+	} {
+		if !bytes.Contains(htmlData, []byte(`id="`+id+`"`)) {
+			t.Fatalf("%s control not found", id)
+		}
+	}
+	for _, id := range []string{"registrarForm", "probeRegistrarBtn", "startRegistrarBtn", "stopRegistrarBtn", "registrarLog"} {
+		if !bytes.Contains(appData, []byte(`$("`+id+`")`)) {
+			t.Fatalf("%s client handler not found", id)
+		}
+	}
+	if !bytes.Contains(appData, []byte(`config.email_provider || "cloudflare"`)) {
+		t.Fatal("registrar UI default email provider is not cloudflare")
+	}
+	if !bytes.Contains(htmlData, []byte("填写两项")) {
+		t.Fatal("registrar 3-step guide not found")
+	}
+	for _, endpoint := range []string{"/api/registrar", "/api/registrar/probe", "/api/registrar/start", "/api/registrar/stop", "/api/registrar/job"} {
+		if !bytes.Contains(appData, []byte(endpoint)) {
+			t.Fatalf("client endpoint %s not found", endpoint)
+		}
+	}
+	if !bytes.Contains(appData, []byte("registrarFormDirty")) {
+		t.Fatal("registrar form dirty-state guard not found")
+	}
+}
+
 func htmlElementByID(node *html.Node, id string) *html.Node {
 	if node.Type == html.ElementNode {
 		for _, attribute := range node.Attr {

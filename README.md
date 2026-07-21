@@ -37,9 +37,9 @@
 
 | 项目 | 说明 |
 |------|------|
-| 系统 | **Windows 10 / 11 x64**（当前主要支持） |
-| 运行 | 双击 `grok_switch.exe` 即可，**无需**安装 Go / Node |
-| 可选 | 本机已安装 [Grok CLI](https://x.ai)，配置目录默认为 `%USERPROFILE%\.grok` |
+| 系统 | **Windows 10 / 11 x64**、**macOS (Intel / Apple Silicon M 系列)**、**Linux (amd64 / arm64)** |
+| 运行 | 下载对应平台的二进制/压缩包解压即可运行，**无需**安装 Go / Node |
+| 可选 | 本机已安装 [Grok CLI](https://x.ai)，配置目录默认为 `~/.grok` (Windows 下为 `%USERPROFILE%\.grok`) |
 
 ## 安装与使用
 
@@ -52,9 +52,18 @@
 ### 方式一：从 Release 下载（推荐）
 
 1. 打开本仓库的 [Releases](../../releases) 页面
-2. 下载 `grok_switch.exe`（或压缩包内的 exe）
-3. 放到任意目录，双击运行
-4. 托盘出现图标；浏览器会打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
+2. 根据你的操作系统与架构下载对应的统一命名发布包：
+
+| 操作系统 (OS) | 架构 (Arch) | 发布的统一文件包 (Artifact Name) | 说明 |
+|---|---|---|---|
+| **Windows** | `amd64` (x64) | `grok_switch_windows_amd64.exe` / `grok_switch_gui_windows_amd64.exe` | 包含 CLI 与 GUI EXE |
+| **macOS** | `amd64` (Intel) | `grok_switch_darwin_amd64.tar.gz` | 解压包含 CLI 与 GUI |
+| **macOS** | `arm64` (M 系列) | `grok_switch_darwin_arm64.tar.gz` | 解压包含 CLI 与 GUI |
+| **Linux** | `amd64` (x86_64) | `grok_switch_linux_amd64.tar.gz` | 解压包含 CLI 与 GUI |
+| **Linux** | `arm64` (aarch64) | `grok_switch_linux_arm64.tar.gz` | 解压包含 CLI 与 GUI |
+
+3. 解压并运行二进制文件（Windows 双击 `.exe`，macOS / Linux 在终端解压并运行 `./grok_switch`）
+4. 启动后浏览器会自动打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
 5. 再次双击 EXE 不会启动第二个后台实例，而是打开已经运行的管理页面
 
 普通用户只需下载并运行，**不需要**配置证书、签名密码、Go 或 Node。发布流程会在

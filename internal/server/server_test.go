@@ -108,7 +108,9 @@ func TestAgentMediaServesFilesFromSessionOnly(t *testing.T) {
 	}
 	fileURI := "file:///" + strings.TrimLeft(filepath.ToSlash(mediaPath), "/")
 	resolved, err := server.resolveAgentMediaPath("session-1", fileURI)
-	if err != nil || filepath.Clean(resolved) != filepath.Clean(mediaPath) {
+	resolvedInfo, resolvedStatErr := os.Stat(resolved)
+	mediaInfo, mediaStatErr := os.Stat(mediaPath)
+	if err != nil || resolvedStatErr != nil || mediaStatErr != nil || !os.SameFile(resolvedInfo, mediaInfo) {
 		t.Fatalf("file URI resolved to %q, err=%v; want %q", resolved, err, mediaPath)
 	}
 

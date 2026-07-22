@@ -4,6 +4,7 @@ type Event struct {
 	Type               string           `json:"type"`
 	SessionID          string           `json:"session_id,omitempty"`
 	Text               string           `json:"text,omitempty"`
+	Media              []MediaContent   `json:"media,omitempty"`
 	Tool               *ToolEvent       `json:"tool,omitempty"`
 	Permission         *PermissionEvent `json:"permission,omitempty"`
 	Retry              *RetryEvent      `json:"retry,omitempty"`
@@ -12,6 +13,18 @@ type Event struct {
 	StopReason         string           `json:"stop_reason,omitempty"`
 	Error              string           `json:"error,omitempty"`
 	SessionAutoApprove *bool            `json:"session_auto_approve,omitempty"`
+}
+
+// MediaContent is a structured image/video payload forwarded from ACP to the
+// browser. Data is base64 without a data: prefix; URI is used for remote or
+// file-backed resources.
+type MediaContent struct {
+	Kind     string `json:"kind"` // image | video | audio | resource
+	MimeType string `json:"mime_type,omitempty"`
+	Data     string `json:"data,omitempty"`
+	URI      string `json:"uri,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Title    string `json:"title,omitempty"`
 }
 
 type RetryEvent struct {
@@ -26,12 +39,13 @@ type RetryEvent struct {
 }
 
 type ToolEvent struct {
-	ID        string `json:"id,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	Status    string `json:"status,omitempty"`
-	RawInput  any    `json:"raw_input,omitempty"`
-	RawOutput any    `json:"raw_output,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Title     string         `json:"title,omitempty"`
+	Kind      string         `json:"kind,omitempty"`
+	Status    string         `json:"status,omitempty"`
+	RawInput  any            `json:"raw_input,omitempty"`
+	RawOutput any            `json:"raw_output,omitempty"`
+	Media     []MediaContent `json:"media,omitempty"`
 }
 
 type PermissionEvent struct {
@@ -50,11 +64,11 @@ type PermissionOption struct {
 // Attachment is a user-supplied file sent alongside a prompt. Images become
 // inline ACP image blocks; text files are folded into the prompt as snippets.
 type Attachment struct {
-	Kind     string `json:"kind"`               // "image" | "text_file"
-	Data     string `json:"data,omitempty"`     // base64 (no data: prefix) for images
+	Kind     string `json:"kind"`           // "image" | "text_file"
+	Data     string `json:"data,omitempty"` // base64 (no data: prefix) for images
 	MimeType string `json:"mime_type,omitempty"`
 	Name     string `json:"name,omitempty"`
-	Text     string `json:"text,omitempty"`     // file contents for text_file
+	Text     string `json:"text,omitempty"` // file contents for text_file
 }
 
 type Status struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	acp "github.com/coder/acp-go-sdk"
 )
@@ -59,8 +60,12 @@ func (b *Bridge) SessionUpdate(_ context.Context, params acp.SessionNotification
 	update := params.Update
 	switch {
 	case update.AgentMessageChunk != nil:
-		if text := contentText(update.AgentMessageChunk.Content); text != "" {
+		content := update.AgentMessageChunk.Content
+		if text := contentText(content); text != "" {
 			b.broadcast(Event{Type: "assistant_chunk", SessionID: sessionID, Text: text})
+		}
+		if media := contentMedia(content); len(media) > 0 {
+			b.broadcast(Event{Type: "assistant_media", SessionID: sessionID, Media: media})
 		}
 	case update.AgentThoughtChunk != nil:
 		if text := contentText(update.AgentThoughtChunk.Content); text != "" {
@@ -71,10 +76,14 @@ func (b *Bridge) SessionUpdate(_ context.Context, params acp.SessionNotification
 		b.broadcast(Event{Type: "tool_call", SessionID: sessionID, Tool: &ToolEvent{
 			ID: string(call.ToolCallId), Title: call.Title, Kind: string(call.Kind),
 			Status: string(call.Status), RawInput: call.RawInput, RawOutput: call.RawOutput,
+			Media: toolContentMedia(call.Content),
 		}})
 	case update.ToolCallUpdate != nil:
 		call := update.ToolCallUpdate
-		tool := &ToolEvent{ID: string(call.ToolCallId), RawInput: call.RawInput, RawOutput: call.RawOutput}
+		tool := &ToolEvent{
+			ID: string(call.ToolCallId), RawInput: call.RawInput, RawOutput: call.RawOutput,
+			Media: toolContentMedia(call.Content),
+		}
 		if call.Title != nil {
 			tool.Title = *call.Title
 		}
@@ -94,6 +103,92 @@ func contentText(content acp.ContentBlock) string {
 		return ""
 	}
 	return content.Text.Text
+}
+
+func contentMedia(content acp.ContentBlock) []MediaContent {
+	if content.Image != nil {
+		image := content.Image
+		uri := ""
+		if image.Uri != nil {
+			uri = *image.Uri
+		}
+		return []MediaContent{{
+			Kind: "image", MimeType: image.MimeType, Data: image.Data, URI: uri,
+		}}
+	}
+	if content.Audio != nil {
+		return []MediaContent{{
+			Kind: "audio", MimeType: content.Audio.MimeType, Data: content.Audio.Data,
+		}}
+	}
+	if content.ResourceLink != nil {
+		resource := content.ResourceLink
+		mimeType, title := "", ""
+		if resource.MimeType != nil {
+			mimeType = *resource.MimeType
+		}
+		if resource.Title != nil {
+			title = *resource.Title
+		}
+		return []MediaContent{{
+			Kind: mediaKind(mimeType, resource.Uri), MimeType: mimeType,
+			URI: resource.Uri, Name: resource.Name, Title: title,
+		}}
+	}
+	if content.Resource != nil && content.Resource.Resource.BlobResourceContents != nil {
+		resource := content.Resource.Resource.BlobResourceContents
+		mimeType := ""
+		if resource.MimeType != nil {
+			mimeType = *resource.MimeType
+		}
+		return []MediaContent{{
+			Kind: mediaKind(mimeType, resource.Uri), MimeType: mimeType,
+			Data: resource.Blob, URI: resource.Uri,
+		}}
+	}
+	return nil
+}
+
+func toolContentMedia(contents []acp.ToolCallContent) []MediaContent {
+	media := make([]MediaContent, 0, len(contents))
+	for _, item := range contents {
+		if item.Content != nil {
+			media = append(media, contentMedia(item.Content.Content)...)
+		}
+	}
+	return media
+}
+
+func mediaKind(mimeType, uri string) string {
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		return "image"
+	case strings.HasPrefix(mimeType, "video/"):
+		return "video"
+	case strings.HasPrefix(mimeType, "audio/"):
+		return "audio"
+	}
+	path := strings.ToLower(uri)
+	if index := strings.IndexAny(path, "?#"); index >= 0 {
+		path = path[:index]
+	}
+	for _, extension := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp"} {
+		if strings.HasSuffix(path, extension) {
+			return "image"
+		}
+	}
+	for _, extension := range []string{".mp4", ".webm", ".mov", ".m4v", ".ogv"} {
+		if strings.HasSuffix(path, extension) {
+			return "video"
+		}
+	}
+	for _, extension := range []string{".mp3", ".wav", ".m4a", ".ogg", ".flac"} {
+		if strings.HasSuffix(path, extension) {
+			return "audio"
+		}
+	}
+	return "resource"
 }
 
 func (b *Bridge) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {

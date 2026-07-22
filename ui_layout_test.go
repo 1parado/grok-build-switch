@@ -49,6 +49,74 @@ func TestCpaMintControlsHaveClientHandlers(t *testing.T) {
 	}
 }
 
+func TestIndependentImageGenerationControlsHaveClientHandlers(t *testing.T) {
+	htmlData, err := assets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{
+		"imageGenEnabled", "imageGenFields", "imageGenBaseUrl", "imageGenApiKey",
+		"imageGenApiBackend", "imageGenModel", "fetchImageModelsBtn", "testImageModelBtn",
+	} {
+		if !bytes.Contains(htmlData, []byte(`id="`+id+`"`)) {
+			t.Fatalf("%s control not found", id)
+		}
+		if !bytes.Contains(appData, []byte(id)) {
+			t.Fatalf("%s client handler not found", id)
+		}
+	}
+	for _, removed := range []string{
+		"featureImageGen", "featureImageEdit", "featureVideoGen",
+		"featureImageGenModel", "featureImageEditModel", "featureVideoGenModel",
+		"addImagineImageBtn", "addImagineImageQualityBtn", "addImagineVideoBtn",
+	} {
+		if bytes.Contains(htmlData, []byte(removed)) {
+			t.Fatalf("removed media preset control %s is still present", removed)
+		}
+	}
+	if !bytes.Contains(htmlData, []byte(`id="imageGenFields" class="imageGenFields" disabled`)) {
+		t.Fatal("independent image fields should be disabled by default")
+	}
+	if !bytes.Contains(appData, []byte(`purpose: "image_generation"`)) {
+		t.Fatal("image generation test must use the dedicated probe")
+	}
+}
+
+func TestChatRendersStructuredMediaEvents(t *testing.T) {
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styleData, err := assets.ReadFile("ui/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`case "assistant_media":`,
+		"/api/agent/media?session_id=",
+		"localSessionMediaURL(",
+		"function renderMessageMedia(",
+		"function normalizeStructuredMedia(",
+		"function extractMediaFromPayload(",
+		"structuredMedia.length ? structuredMedia",
+		"function isPlausibleMediaReference(",
+		`document.createElement("video")`,
+	} {
+		if !bytes.Contains(appData, []byte(marker)) {
+			t.Fatalf("structured chat media marker %q not found", marker)
+		}
+	}
+	for _, marker := range []string{".chatMessageMedia", ".chatMediaItem video", ".chatMediaUnavailable"} {
+		if !bytes.Contains(styleData, []byte(marker)) {
+			t.Fatalf("structured chat media style %q not found", marker)
+		}
+	}
+}
+
 func TestRegistrarControlsHaveClientHandlers(t *testing.T) {
 	htmlData, err := assets.ReadFile("ui/index.html")
 	if err != nil {

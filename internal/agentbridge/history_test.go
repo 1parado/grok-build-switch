@@ -30,8 +30,7 @@ func TestStoredSessionsAndHistory(t *testing.T) {
 	history := "" +
 		`{"type":"user","content":[{"type":"text","text":"<system-reminder>ignore</system-reminder>"}]}` + "\n" +
 		`{"type":"user","content":[{"type":"text","text":"<user_query>draw a diagram</user_query>"}]}` + "\n" +
-		`{"type":"assistant","content":[{"type":"text","text":"diagram ready"},{"type":"image","data":"aGVsbG8=","mimeType":"image/png"},{"type":"resource_link","name":"clip.mp4","uri":"https://cdn.example/clip.mp4","mimeType":"video/mp4"}],"model_id":"grok-4.5"}` + "\n" +
-		`{"type":"tool_result","tool_call_id":"tool-image","content":"{\"path\":\"C:\\\\Users\\\\tester\\\\.grok\\\\sessions\\\\cwd\\\\session-1\\\\images\\\\2.jpg\",\"filename\":\"2.jpg\",\"session_folder\":\"images\"}"}` + "\n"
+		"{\"type\":\"assistant\",\"content\":\"```mermaid\\\\ngraph TD; A-->B\\\\n```\",\"model_id\":\"grok-4.5\"}\n"
 	if err := os.WriteFile(filepath.Join(sessionDir, "summary.json"), summaryData, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -50,17 +49,8 @@ func TestStoredSessionsAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Messages) != 3 || loaded.Messages[0].Content != "draw a diagram" || loaded.Messages[1].Role != "assistant" {
+	if len(loaded.Messages) != 2 || loaded.Messages[0].Content != "draw a diagram" || loaded.Messages[1].Role != "assistant" {
 		t.Fatalf("unexpected history: %#v", loaded.Messages)
-	}
-	if loaded.Messages[1].Content != "diagram ready" || len(loaded.Messages[1].Media) != 2 {
-		t.Fatalf("structured history media was not restored: %#v", loaded.Messages[1])
-	}
-	if loaded.Messages[1].Media[0].Kind != "image" || loaded.Messages[1].Media[1].Kind != "video" {
-		t.Fatalf("unexpected history media kinds: %#v", loaded.Messages[1].Media)
-	}
-	if len(loaded.Messages[2].Media) != 1 || loaded.Messages[2].Media[0].URI != `C:\Users\tester\.grok\sessions\cwd\session-1\images\2.jpg` {
-		t.Fatalf("stored tool media was not restored once: %#v", loaded.Messages[2])
 	}
 }
 

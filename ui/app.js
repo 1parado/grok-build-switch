@@ -7,7 +7,6 @@ const state = {
   registrar: null,
   lanAccess: null,
   availableModels: [],
-  imageAvailableModels: [],
   backups: [],
   showAdvanced: false,
   view: "home",
@@ -25,8 +24,6 @@ const state = {
   chatStickToBottom: true,
   agentAutoRestoring: false,
   pendingAttachments: [],
-  update: null,
-  updateHidden: false,
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -387,31 +384,6 @@ function newProfileDraft() {
     upstream_format: "openai_responses",
     models: [],
     available_models: [],
-    image_generation: { enabled: false, api_backend: "chat_completions", available_models: [] },
-  };
-}
-
-function imageGenerationOf(profile) {
-  if (profile?.image_generation && typeof profile.image_generation === "object") {
-    return {
-      enabled: !!profile.image_generation.enabled,
-      base_url: profile.image_generation.base_url || "",
-      api_key: profile.image_generation.api_key || "",
-      api_backend: profile.image_generation.api_backend || "chat_completions",
-      model: profile.image_generation.model || "",
-      available_models: [...(profile.image_generation.available_models || [])],
-    };
-  }
-  const legacy = profile?.feature_models || {};
-  const selected = profile?.media_models?.["grok-imagine-image"] || legacy.image_gen || "";
-  const model = (profile?.models || []).find((item) => item.name === selected || item.model === selected || item.name === "grok-imagine-image");
-  return {
-    enabled: !!profile?.features?.image_gen,
-    base_url: model?.base_url || profile?.base_url || "",
-    api_key: model?.api_key || profile?.api_key || "",
-    api_backend: model?.api_backend || "chat_completions",
-    model: model?.model || selected,
-    available_models: [],
   };
 }
 
@@ -498,6 +470,7 @@ async function refreshAll() {
   renderDrift();
   renderEmptyState();
   renderProfiles();
+  populateComposerModelSelect();
   renderBackups(backups);
   renderSettings(settings);
   renderLANAccess(lanAccess);
@@ -508,38 +481,7 @@ async function refreshAll() {
   const detail = [];
   if (state.status?.config_path) detail.push(state.status.config_path);
   if (state.status?.port) detail.push(`端口 ${state.status.port}`);
-  if (state.status?.version) detail.push(`版本 ${state.status.version}`);
   if ($("statusDetail")) $("statusDetail").textContent = detail.join(" · ");
-}
-
-function renderUpdate(info) {
-  const banner = $("updateBanner");
-  if (!banner) return;
-  const available = !!info?.update_available && !info?.skipped && !!info?.latest_version;
-  if (!available || state.updateHidden) {
-    banner.hidden = true;
-    banner.style.display = "none";
-    return;
-  }
-  $("updateVersion").textContent = info.latest_version;
-  $("updateDetail").textContent = info.release_name || "最新版已发布，可直接下载更新。";
-  const download = $("updateDownloadBtn");
-  const release = $("updateReleaseBtn");
-  download.href = info.download_url || info.release_url || "https://github.com/1parado/grok-build-switch/releases/latest";
-  release.href = info.release_url || "https://github.com/1parado/grok-build-switch/releases/latest";
-  banner.hidden = false;
-  banner.style.display = "flex";
-}
-
-async function checkForUpdates() {
-  try {
-    const info = await api("/api/update");
-    state.update = info;
-    state.updateHidden = false;
-    renderUpdate(info);
-  } catch {
-    // Update checks are best-effort and must not block the management UI.
-  }
 }
 
 function activeProfile() {
@@ -567,6 +509,93 @@ async function loadConfigEditor() {
   }
   if ($("configEditorStatus")) {
     $("configEditorStatus").textContent = data.exists === false ? "文件尚不存在，保存后将创建。" : "已加载";
+  }
+}
+
+async function loadSkills() {
+  const loading = $("skillsLoading");
+  const list = $("skillsList");
+  const empty = $("skillsEmpty");
+  if (!list) return;
+  try {
+    if (loading) loading.hidden = false;
+    if (list) list.innerHTML = "";
+    if (empty) empty.hidden = true;
+    const skills = await api("/api/skills");
+    if (loading) loading.hidden = true;
+    if (!skills || skills.length === 0) {
+      if (empty) empty.hidden = false;
+      return;
+    }
+    const groups = {};
+    for (const sk of skills) {
+      const src = sk.source || "other";
+      if (!groups[src]) groups[src] = [];
+      groups[src].push(sk);
+    }
+    const sourceLabels = {
+      "agents": "~/.agents",
+      "grok/skills": "~/.grok/skills",
+      "grok/.skills": "~/.grok/.skills",
+      "grok/agents": "~/.grok/agents",
+    };
+    let html = "";
+    for (const [source, items] of Object.entries(groups)) {
+      const label = sourceLabels[source] || source;
+      html += `<section class="skillsGroup"><h3 class="skillsGroupTitle">${escapeHtml(label)}</h3>`;
+      html += `<div class="skillsItems">`;
+      for (const sk of items) {
+        const icon = sk.is_dir ? "📁" : "📄";
+        html += `<div class="skillItem">
+          <span class="skillIcon">${icon}</span>
+          <div class="skillInfo">
+            <strong class="skillName">${escapeHtml(sk.name)}</strong>
+            <span class="skillPath">${escapeHtml(sk.path)}</span>
+          </div>
+          <div class="skillActions">
+            <button type="button" class="btn sm ghost copySkillPathBtn" data-path="${escapeHtml(sk.path)}" title="复制路径">复制</button>
+            ${sk.source !== "grok/bundled" ? `<button type="button" class="btn sm danger deleteSkillBtn" data-path="${escapeHtml(sk.path)}" data-name="${escapeHtml(sk.name)}" title="删除">删除</button>` : ""}
+          </div>
+        </div>`;
+      }
+      html += `</div></section>`;
+    }
+    list.innerHTML = html;
+    list.querySelectorAll(".copySkillPathBtn").forEach((btn) => {
+      btn.onclick = () => {
+        navigator.clipboard.writeText(btn.dataset.path).then(() => {
+          toast("路径已复制", "success");
+        }).catch(() => {
+          toast("复制失败", "error");
+        });
+      };
+    });
+    list.querySelectorAll(".deleteSkillBtn").forEach((btn) => {
+      btn.onclick = async () => {
+        const name = btn.dataset.name;
+        const path = btn.dataset.path;
+        if (!confirm(`确定要删除 "${name}" 吗？\n\n路径: ${path}\n\n此操作不可恢复。`)) {
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "删除中…";
+        try {
+          await api("/api/skills/delete", {
+            method: "POST",
+            body: JSON.stringify({ path }),
+          });
+          toast(`已删除: ${name}`, "success");
+          await loadSkills();
+        } catch (err) {
+          toast(err.message || "删除失败", "error");
+          btn.disabled = false;
+          btn.textContent = "删除";
+        }
+      };
+    });
+  } catch (err) {
+    if (loading) loading.hidden = true;
+    if (list) list.innerHTML = `<div class="alert warn"><strong>加载失败</strong><span>${escapeHtml(err.message || String(err))}</span></div>`;
   }
 }
 
@@ -627,6 +656,7 @@ function showView(name) {
   const edit = $("viewEdit");
   const settings = $("viewSettings");
   const chat = $("viewChat");
+  const skills = $("viewSkills");
   if (home) {
     home.hidden = name !== "home";
     home.style.display = name === "home" ? "" : "none";
@@ -643,6 +673,10 @@ function showView(name) {
     chat.hidden = name !== "chat";
     chat.style.display = name === "chat" ? "" : "none";
   }
+  if (skills) {
+    skills.hidden = name !== "skills";
+    skills.style.display = name === "skills" ? "" : "none";
+  }
   if ($("navHomeBtn")) $("navHomeBtn").hidden = name === "home";
   document.querySelectorAll("[data-home-only]").forEach((el) => {
     el.hidden = name !== "home";
@@ -650,13 +684,17 @@ function showView(name) {
   // Keep header add/import only on home list.
   if ($("headerSubtitle")) {
     $("headerSubtitle").textContent =
-      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : "供应商";
+      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : name === "skills" ? "Skills" : "供应商";
   }
   if (name === "settings") {
     loadConfigEditor().catch((err) => toast(err.message, "error"));
   }
+  if (name === "skills") {
+    loadSkills().catch((err) => toast(err.message, "error"));
+  }
   if (name === "chat") {
     openAgentView().catch((err) => toast(err.message, "error"));
+    loadSkillsForPopup().catch(() => {});
   } else {
     closeNativeChatPanels();
   }
@@ -1133,9 +1171,13 @@ function renderAgentStatus(status) {
   }
   if ($("agentModelBadge")) $("agentModelBadge").textContent = model ? `MODEL ${model}` : "MODEL —";
   if ($("contextModel")) $("contextModel").textContent = model || "—";
+  populateComposerModelSelect();
+  populateComposerStrengthSelect();
   if ($("contextSessionId")) $("contextSessionId").textContent = status.session_id || state.activeAgentSession?.id || "—";
   if ($("activeChatPath")) $("activeChatPath").textContent = status.cwd || state.activeAgentSession?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
   const running = agentIsRunning(status);
+  if ($("composerModelSelect")) $("composerModelSelect").disabled = !running;
+  if ($("composerStrengthSelect")) $("composerStrengthSelect").disabled = !running;
   const busy = stateName === "busy" || !!status.busy;
   if ($("agentStartBtn")) {
     $("agentStartBtn").disabled = stateName === "starting" || stateName === "stopping" || busy;
@@ -1227,17 +1269,14 @@ function handleAgentEvent(event) {
       break;
     }
     case "assistant_chunk":
-      appendAssistantChunk(event.text || "", event.session_id || "");
-      break;
-    case "assistant_media":
-      appendAssistantMedia(event.media || [], event.session_id || "");
+      appendAssistantChunk(event.text || "");
       break;
     case "thought_chunk":
       appendThoughtChunk(event.text || "");
       break;
     case "tool_call":
     case "tool_update":
-      renderAgentTool(event.tool || {}, event.type === "tool_update", event.session_id || "");
+      renderAgentTool(event.tool || {}, event.type === "tool_update");
       break;
     case "permission_request":
       showAgentPermission(event.permission);
@@ -1531,20 +1570,20 @@ function renderHistoryWindow() {
 function appendHistoryMessage(message) {
   switch (message.role) {
     case "user":
-      appendChatMessage("user", message.content || "", "", true, null, message.media || [], state.activeAgentSession?.id || "");
+      appendChatMessage("user", message.content || "", "", true);
       break;
     case "assistant":
-      appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true, null, message.media || [], state.activeAgentSession?.id || "");
+      appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true);
       break;
     case "thought":
       appendThoughtChunk(message.content || "");
       agentActiveThought = null;
       break;
     case "tool":
-      renderAgentTool(message.tool || {}, false, state.activeAgentSession?.id || "");
+      renderAgentTool(message.tool || {}, false);
       break;
     case "tool_result":
-      renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", media: message.media || [], status: "completed" }, true, state.activeAgentSession?.id || "");
+      renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", status: "completed" }, true);
       break;
   }
 }
@@ -1659,7 +1698,10 @@ async function resendEditedUserMessage(article, rawText) {
   agentActiveThought = null;
   agentRetryNotice = null;
   updateContextUsage();
-  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  const _m = $("composerModelSelect")?.value || "";
+  const _rawS = $("composerStrengthSelect")?.value || "";
+  const _s = _rawS === "auto" ? "" : _rawS;
+  agentSocket.send(JSON.stringify({ type: "user_message", text, model: _m, strength: _s }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
   forceScrollChatToBottom();
 }
@@ -1784,12 +1826,11 @@ function bindChatExtras() {
   });
 }
 
-function createChatMessage(role, text, model = "", final = false, attachments = null, media = null, sessionID = "") {
+function createChatMessage(role, text, model = "", final = false, attachments = null) {
   const article = document.createElement("article");
   article.className = `chatMessage ${role}`;
   article._rawText = text || "";
   article.dataset.role = role;
-  if (sessionID) article.dataset.sessionId = sessionID;
   const header = document.createElement("div");
   header.className = "chatMessageHeader";
   const label = document.createElement("span");
@@ -1843,15 +1884,14 @@ function createChatMessage(role, text, model = "", final = false, attachments = 
   return article;
 }
 
-function appendChatMessage(role, text, model = "", final = false, attachments = null, media = null, sessionID = "") {
+function appendChatMessage(role, text, model = "", final = false, attachments = null) {
   removeChatEmpty();
-  const article = createChatMessage(role, text, model, final, attachments, media, sessionID);
+  const article = createChatMessage(role, text, model, final, attachments);
   $("chatMessages").append(article);
   renderMessageMarkdown(article, final);
   if (role === "user" && Array.isArray(attachments) && attachments.length) {
     renderMessageAttachments(article, attachments);
   }
-  if (Array.isArray(media) && media.length) renderMessageMedia(article, media, sessionID);
   if (role === "user") addChatNodeFor(article);
   updateContextUsage();
   scrollChatToBottom();
@@ -1869,16 +1909,15 @@ function refreshMessageActionButtons() {
   });
 }
 
-function appendAssistantChunk(text, sessionID = "") {
+function appendAssistantChunk(text) {
   if (!text) return;
   markAgentRetryRecovered();
   document.querySelectorAll(".chatMessage.system").forEach((notice) => {
     if ((notice._rawText || "").includes("正在重新生成")) notice.remove();
   });
   if (!agentActiveAssistant || !agentActiveAssistant.isConnected) {
-    agentActiveAssistant = appendChatMessage("assistant", "", state.agentStatus?.model || state.activeAgentSession?.model || "", false, null, null, sessionID);
+    agentActiveAssistant = appendChatMessage("assistant", "", state.agentStatus?.model || state.activeAgentSession?.model || "");
   }
-  if (sessionID) agentActiveAssistant.dataset.sessionId = sessionID;
   agentActiveAssistant._rawText = (agentActiveAssistant._rawText || "") + text;
   scheduleMessageMarkdown(agentActiveAssistant);
   scheduleContextUsageUpdate();
@@ -2170,7 +2209,7 @@ function appendThoughtChunk(text) {
   scrollChatToBottom();
 }
 
-function renderAgentTool(tool, isUpdate, sessionID = "") {
+function renderAgentTool(tool, isUpdate) {
   removeChatEmpty();
   const id = tool.id || `tool-${agentTools.size + 1}`;
   let details = agentTools.get(id);
@@ -2196,25 +2235,6 @@ function renderAgentTool(tool, isUpdate, sessionID = "") {
   }
   // Keep collapsed by default; only auto-open failures lightly via status color.
   renderToolActivity(tool, id, title, status);
-  const toolHint = `${tool.kind || ""} ${title}`;
-  const structuredMedia = Array.isArray(tool.media) ? tool.media.map((item) => ({
-    ...item,
-    kind: inferMediaKind(item.kind === "resource" ? toolHint : item.kind, item.mime_type || item.mimeType || "", item.uri || item.url || ""),
-  })) : [];
-  const media = structuredMedia.length ? structuredMedia : extractMediaFromPayload(tool.raw_output, toolHint);
-  if (media.length) appendAssistantMedia(media, sessionID);
-  scrollChatToBottom();
-}
-
-function appendAssistantMedia(media, sessionID = "") {
-  if (!Array.isArray(media) || !media.length) return;
-  markAgentRetryRecovered();
-  if (!agentActiveAssistant || !agentActiveAssistant.isConnected) {
-    agentActiveAssistant = appendChatMessage("assistant", "", state.agentStatus?.model || state.activeAgentSession?.model || "", false, null, null, sessionID);
-  }
-  if (sessionID) agentActiveAssistant.dataset.sessionId = sessionID;
-  renderMessageMedia(agentActiveAssistant, media, sessionID);
-  updateContextUsage();
   scrollChatToBottom();
 }
 
@@ -2417,7 +2437,10 @@ async function regenerateLastAssistant(article = lastAssistantMessageEl) {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
-  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  const _m = $("composerModelSelect")?.value || "";
+  const _rawS = $("composerStrengthSelect")?.value || "";
+  const _s = _rawS === "auto" ? "" : _rawS;
+  agentSocket.send(JSON.stringify({ type: "user_message", text, model: _m, strength: _s }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
   appendAgentNotice("正在重新生成…");
   forceScrollChatToBottom();
@@ -2537,223 +2560,6 @@ function renderMessageAttachments(article, attachments) {
   article.append(wrap);
 }
 
-function renderMessageMedia(article, mediaItems, sessionID = "") {
-  if (!article?.isConnected || !Array.isArray(mediaItems) || !mediaItems.length) return;
-  sessionID = sessionID || article.dataset.sessionId || state.activeAgentSession?.id || state.agentStatus?.session_id || "";
-  let wrap = [...article.children].find((child) => child.classList?.contains("chatMessageMedia"));
-  if (!wrap) {
-    wrap = document.createElement("div");
-    wrap.className = "chatMessageMedia";
-    wrap._mediaKeys = new Set();
-    article.append(wrap);
-  }
-  if (!(wrap._mediaKeys instanceof Set)) wrap._mediaKeys = new Set();
-
-  for (const media of mediaItems) {
-    const normalized = normalizeStructuredMedia(media, sessionID);
-    if (!normalized || wrap._mediaKeys.has(normalized.key)) continue;
-    wrap._mediaKeys.add(normalized.key);
-    const item = document.createElement("figure");
-    item.className = `chatMediaItem ${normalized.kind}`;
-
-    if (normalized.kind === "image") {
-      const link = document.createElement("a");
-      link.href = normalized.src;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.title = "打开原图";
-      const image = document.createElement("img");
-      image.src = normalized.src;
-      image.alt = normalized.label || "Grok 生成的图片";
-      image.loading = "lazy";
-      image.decoding = "async";
-      image.referrerPolicy = "no-referrer";
-      image.onerror = () => markMediaUnavailable(item, normalized.fallback);
-      link.append(image);
-      item.append(link);
-    } else if (normalized.kind === "video") {
-      const video = document.createElement("video");
-      video.controls = true;
-      video.preload = "metadata";
-      video.playsInline = true;
-      video.src = normalized.src;
-      if (normalized.mimeType) video.type = normalized.mimeType;
-      video.onerror = () => markMediaUnavailable(item, normalized.fallback);
-      item.append(video);
-    } else if (normalized.kind === "audio") {
-      const audio = document.createElement("audio");
-      audio.controls = true;
-      audio.preload = "metadata";
-      audio.src = normalized.src;
-      audio.onerror = () => markMediaUnavailable(item, normalized.fallback);
-      item.append(audio);
-    } else {
-      const link = document.createElement("a");
-      link.className = "chatMediaResource";
-      link.href = normalized.src;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = normalized.label || "打开媒体文件";
-      item.append(link);
-    }
-
-    if (normalized.label && normalized.kind !== "resource") {
-      const caption = document.createElement("figcaption");
-      caption.textContent = normalized.label;
-      item.append(caption);
-    }
-    wrap.append(item);
-  }
-  if (!wrap.children.length) wrap.remove();
-}
-
-function normalizeStructuredMedia(media, sessionID = "") {
-  if (!media || typeof media !== "object") return null;
-  const mimeType = safeMediaMime(media.mime_type || media.mimeType || "");
-  const uri = String(media.uri || media.url || "").trim();
-  const kind = inferMediaKind(media.kind || media.type || "", mimeType, uri);
-  const rawData = typeof media.data === "string" ? media.data.replace(/\s+/g, "") : "";
-  const localSrc = localSessionMediaURL(uri, sessionID);
-  const referenceSrc = localSrc || safeMediaURL(uri);
-  let src = "";
-  if (rawData && /^[A-Za-z0-9+/_-]+={0,2}$/.test(rawData)) {
-    const dataMime = mimeType || ({ image: "image/png", video: "video/mp4", audio: "audio/mpeg" })[kind];
-    if (dataMime) src = `data:${dataMime};base64,${rawData}`;
-  }
-  if (!src) src = referenceSrc;
-  if (!src) return null;
-  const label = String(media.title || media.name || "").trim().slice(0, 160);
-  const dataKey = rawData ? `${rawData.length}:${rawData.slice(0, 24)}:${rawData.slice(-24)}` : "";
-  const referenceKey = localSrc ? `session:${sessionID}:${mediaReferenceIdentity(uri, kind)}` : uri;
-  return { kind, mimeType, uri, src, fallback: referenceSrc || src, label, key: [kind, mimeType, referenceKey, dataKey].join("|") };
-}
-
-function localSessionMediaURL(value, sessionID) {
-  value = String(value || "").trim();
-  sessionID = String(sessionID || "").trim();
-  if (!value || !sessionID || value.startsWith("/api/agent/media?")) return "";
-  const windowsPath = /^[a-z]:[\\/]/i.test(value);
-  let local = windowsPath || /^file:/i.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value);
-  if (!local) {
-    try {
-      const parsed = new URL(value);
-      const host = parsed.hostname.toLowerCase();
-      local = (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-        (host === "localhost" || host === "::1" || host.startsWith("127."));
-    } catch {
-      return "";
-    }
-  }
-  if (!local) return "";
-  return `/api/agent/media?session_id=${encodeURIComponent(sessionID)}&path=${encodeURIComponent(value)}`;
-}
-
-function safeMediaMime(value) {
-  const mimeType = String(value || "").trim().toLowerCase();
-  return /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(mimeType) ? mimeType : "";
-}
-
-function safeMediaURL(value) {
-  if (!value) return "";
-  try {
-    const parsed = new URL(value, location.href);
-    if (parsed.protocol === "data:") {
-      return /^data:(?:image|video|audio)\/[a-z0-9.+-]+(?:;base64)?,/i.test(value) ? parsed.href : "";
-    }
-    return ["http:", "https:", "blob:", "file:"].includes(parsed.protocol) ? parsed.href : "";
-  } catch {
-    return "";
-  }
-}
-
-function inferMediaKind(hint, mimeType, uri) {
-  const value = `${hint} ${mimeType}`.toLowerCase();
-  if (value.includes("image") || /生图|图片|图像/.test(value)) return "image";
-  if (value.includes("video") || /视频/.test(value)) return "video";
-  if (value.includes("audio") || /音频|语音/.test(value)) return "audio";
-  const path = String(uri || "").split(/[?#]/, 1)[0].toLowerCase();
-  if (/\.(?:png|jpe?g|gif|webp|avif|bmp)$/.test(path)) return "image";
-  if (/\.(?:mp4|webm|mov|m4v|ogv)$/.test(path)) return "video";
-  if (/\.(?:mp3|wav|m4a|ogg|flac)$/.test(path)) return "audio";
-  return "resource";
-}
-
-function markMediaUnavailable(item, fallbackURI) {
-  if (!item || item.dataset.failed === "true") return;
-  item.dataset.failed = "true";
-  const source = safeMediaURL(fallbackURI);
-  item.replaceChildren();
-  const label = document.createElement(source ? "a" : "span");
-  label.className = "chatMediaUnavailable";
-  label.textContent = source ? "媒体无法预览，点击打开" : "媒体无法预览";
-  if (source) {
-    label.href = source;
-    label.target = "_blank";
-    label.rel = "noopener noreferrer";
-  }
-  item.append(label);
-}
-
-function extractMediaFromPayload(payload, hint = "", depth = 0, seen = new Set()) {
-  if (payload == null || depth > 5) return [];
-  if (typeof payload === "string") {
-    const value = payload.trim();
-    if ((value.startsWith("{") && value.endsWith("}")) || (value.startsWith("[") && value.endsWith("]"))) {
-      try {
-        return extractMediaFromPayload(JSON.parse(value), hint, depth + 1, seen);
-      } catch {
-        // Treat malformed JSON as ordinary text below.
-      }
-    }
-    const kind = inferMediaKind(hint, "", payload);
-    return kind !== "resource" && isPlausibleMediaReference(value) ? [{ kind, uri: value }] : [];
-  }
-  if (typeof payload !== "object" || seen.has(payload)) return [];
-  seen.add(payload);
-  if (Array.isArray(payload)) return payload.flatMap((value) => extractMediaFromPayload(value, hint, depth + 1, seen));
-
-  const mimeType = payload.mime_type || payload.mimeType || payload.content_type || payload.contentType || "";
-  const kindHint = payload.kind || payload.type || payload.media_type || hint;
-  const media = [];
-  const encoded = payload.b64_json || payload.base64;
-  if (typeof encoded === "string" && inferMediaKind(kindHint, mimeType, "") === "image") {
-    media.push({ kind: "image", data: encoded, mime_type: mimeType || "image/png", name: payload.name || "" });
-  }
-  const references = [];
-  for (const [key, value] of Object.entries(payload)) {
-    if (["b64_json", "base64", "mime_type", "mimeType", "content_type", "contentType"].includes(key)) continue;
-    const nextHint = /image/i.test(key) ? "image" : /video/i.test(key) ? "video" : /audio/i.test(key) ? "audio" : kindHint;
-    if (typeof value === "string" && /(?:url|uri|src|href|path|filename|file)$/i.test(key) && isPlausibleMediaReference(value)) {
-      const kind = inferMediaKind(nextHint, mimeType, value);
-      if (kind !== "resource") references.push({ kind, uri: value, mime_type: mimeType, name: payload.name || payload.filename || "" });
-      continue;
-    }
-    if (value && typeof value === "object") media.push(...extractMediaFromPayload(value, nextHint, depth + 1, seen));
-  }
-  const referenceKeys = new Set();
-  for (const item of references) {
-    const identity = mediaReferenceIdentity(item.uri, item.kind);
-    if (referenceKeys.has(identity)) continue;
-    referenceKeys.add(identity);
-    media.push(item);
-  }
-  return media;
-}
-
-function isPlausibleMediaReference(value) {
-  value = String(value || "").trim();
-  if (!value || /[\r\n]/.test(value)) return false;
-  const withoutQuery = value.split(/[?#]/, 1)[0];
-  if (/\.(?:png|jpe?g|gif|webp|avif|bmp|mp4|webm|mov|m4v|ogv|mp3|wav|m4a|ogg|flac)$/i.test(withoutQuery)) return true;
-  return /^(?:https?|file):\/\//i.test(value) && value.length < 4096;
-}
-
-function mediaReferenceIdentity(value, kind) {
-  const clean = String(value || "").split(/[?#]/, 1)[0].replace(/\\/g, "/");
-  const name = clean.slice(clean.lastIndexOf("/") + 1).toLowerCase();
-  return `${kind}|${name || clean.toLowerCase()}`;
-}
-
 function buildOutboundAttachments() {
   return state.pendingAttachments.map((att) => {
     if (att.kind === "image") {
@@ -2809,6 +2615,7 @@ async function sendAgentMessage() {
     return;
   }
   state.lastUserMessage = text;
+  hideSkillsPopup();
   appendChatMessage("user", text, "", true, state.pendingAttachments.slice());
   if (state.activeAgentSession && (!state.activeAgentSession.title || state.activeAgentSession.title === "新对话")) {
     state.activeAgentSession.title = (text || "附件消息").replace(/\s+/g, " ").slice(0, 60);
@@ -2827,7 +2634,10 @@ async function sendAgentMessage() {
   clearChatAttachments();
   updateContextUsage();
   forceScrollChatToBottom();
-  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments }));
+  const _model = $("composerModelSelect")?.value || "";
+  const _rawStrength = $("composerStrengthSelect")?.value || "";
+  const _strength = _rawStrength === "auto" ? "" : _rawStrength;
+  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments, model: _model, strength: _strength }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
 }
 
@@ -3506,15 +3316,6 @@ function fillForm(profile) {
   $("profileApiKey").value = profile.api_key || firstModelKey(profile) || "";
   $("upstreamFormat").value = upstreamFormatValue(profile.upstream_format);
   $("templateSelect").value = templateValue(profile);
-  const image = imageGenerationOf(profile);
-  $("imageGenEnabled").checked = image.enabled;
-  $("imageGenBaseUrl").value = image.base_url;
-  $("imageGenApiKey").value = image.api_key;
-  $("imageGenApiBackend").value = image.api_backend;
-  $("imageGenModel").value = image.model;
-  state.imageAvailableModels = unique([...(image.available_models || []), image.model]);
-  renderImageModelOptions();
-  syncImageGenUI();
   state.availableModels = unique([
     ...(profile.available_models || []),
     ...(profile.models || []).map((model) => model.name || model.model),
@@ -3530,7 +3331,6 @@ function fillForm(profile) {
     subagents_models: sa,
   });
   hideConnectionStatus();
-  hideImageGenStatus();
   if ($("connectBlock")) $("connectBlock").open = false;
 }
 
@@ -3552,7 +3352,6 @@ function applyTemplate(key) {
     subagents_models: { explore: "", plan: "" },
     models: [],
     available_models: [],
-    image_generation: { enabled: false, api_backend: "chat_completions", available_models: [] },
   });
   $("templateSelect").value = key;
   toast(`已套用「${tpl.name}」地址与协议，请自行启用模型`, "info");
@@ -3575,7 +3374,6 @@ function copyProfile(profile) {
     id: "",
     name: `${source.name || "供应商"} 副本`,
     is_active: false,
-    image_generation: { ...imageGenerationOf(source), available_models: [...imageGenerationOf(source).available_models] },
     models: (source.models || []).map((m) => ({ ...m, extra_headers: { ...(m.extra_headers || {}) } })),
   };
   fillForm(clone);
@@ -3583,7 +3381,6 @@ function copyProfile(profile) {
 }
 
 function stripSecrets(profile, includeKey) {
-  const image = imageGenerationOf(profile);
   const out = {
     name: profile.name,
     template: profile.template || templateValue(profile),
@@ -3593,19 +3390,10 @@ function stripSecrets(profile, includeKey) {
     default_reasoning_effort: profile.default_reasoning_effort || "high",
     web_search_model: profile.web_search_model,
     subagents_models: subagentsModelsOf(profile),
-    image_generation: {
-      enabled: image.enabled,
-      base_url: image.base_url,
-      api_backend: image.api_backend,
-      model: image.model,
-      available_models: image.available_models,
-      ...(includeKey ? { api_key: image.api_key } : {}),
-    },
     available_models: profile.available_models || [],
     models: (profile.models || []).map((m) => {
       const item = {
         name: m.name,
-        display_name: m.display_name || "",
         model: m.model,
         base_url: m.base_url || "",
         api_backend: m.api_backend,
@@ -3660,7 +3448,6 @@ function importProfileJSON(text) {
     default_model: profile.default_model || "",
     web_search_model: profile.web_search_model || "",
     subagents_models: subagentsModelsOf(profile),
-    image_generation: imageGenerationOf(profile),
     available_models: profile.available_models || [],
     models: profile.models || [],
   });
@@ -3700,44 +3487,6 @@ function parseHeaders(text) {
 
 function firstModelKey(profile) {
   return (profile.models || []).find((model) => model.api_key)?.api_key || "";
-}
-
-function isMediaModelID(value) {
-  const id = String(value || "").trim().toLowerCase();
-  return id === "grok-imagine-image" || id === "grok-imagine-image-quality" || id === "grok-imagine-video";
-}
-
-function syncImageGenUI() {
-  const enabled = !!$("imageGenEnabled")?.checked;
-  if ($("imageGenFields")) $("imageGenFields").disabled = !enabled;
-}
-
-function renderImageModelOptions() {
-  const list = $("imageGenModelOptions");
-  if (!list) return;
-  list.innerHTML = "";
-  unique(state.imageAvailableModels || []).forEach((model) => {
-    const option = document.createElement("option");
-    option.value = model;
-    list.appendChild(option);
-  });
-}
-
-function showImageGenStatus(ok, text) {
-  const status = $("imageGenStatus");
-  if (!status) return;
-  status.hidden = false;
-  status.textContent = text;
-  status.classList.toggle("ok", ok);
-  status.classList.toggle("fail", !ok);
-}
-
-function hideImageGenStatus() {
-  const status = $("imageGenStatus");
-  if (!status) return;
-  status.hidden = true;
-  status.textContent = "";
-  status.classList.remove("ok", "fail");
 }
 
 function removeModelByName(modelName) {
@@ -3790,8 +3539,7 @@ function renderModelSelect() {
 }
 
 function syncEnabledModelList(preferred) {
-  const isReservedForMedia = (name) => isMediaModelID(name);
-  const names = unique(readEnabledModelNames().filter((name) => !isMediaModelID(name)));
+  const names = unique(readEnabledModelNames());
   const fields = [
     { id: "defaultModel", emptyLabel: "（请先启用模型）", required: false },
     { id: "webSearchModel", emptyLabel: "（可选）", required: false },
@@ -3831,9 +3579,7 @@ function syncEnabledModelList(preferred) {
       sel.appendChild(opt);
     });
     // Keep saved value even if not currently in enabled list (e.g. mid-edit).
-    if (current && isReservedForMedia(current)) {
-      sel.value = "";
-    } else if (current && !names.includes(current)) {
+    if (current && !names.includes(current)) {
       const orphan = document.createElement("option");
       orphan.value = current;
       orphan.textContent = `${current}（未启用）`;
@@ -3918,7 +3664,7 @@ function addModelCard(model = {}) {
   card.className = "modelCard";
   card.innerHTML = `
     <div class="modelCardTop">
-      <strong><span data-role="model-title">${escapeHtml(model.display_name || model.name || model.model || "新模型")}</span></strong>
+      <strong>${escapeHtml(model.name || model.model || "新模型")}</strong>
       <div class="inlineActions">
         <button type="button" class="btn sm" data-action="test-model">测试连通</button>
         <button type="button" class="btn sm danger" data-action="remove-model">删除</button>
@@ -3926,14 +3672,11 @@ function addModelCard(model = {}) {
     </div>
     <p class="muted tiny modelProbeStatus" data-field="probe_status" hidden></p>
     <div class="modelCardGrid">
-      <label class="field">配置键
-        <input data-field="name" class="mono" value="${escapeAttr(model.name || "")}" placeholder="例如 grok-chat">
+      <label class="field">名称
+        <input data-field="name" class="mono" value="${escapeAttr(model.name || "")}" placeholder="配置中的模型名">
       </label>
       <label class="field">Model
         <input data-field="model" class="mono" value="${escapeAttr(model.model || "")}" placeholder="上游模型 ID">
-      </label>
-      <label class="field full">显示名称
-        <input data-field="display_name" value="${escapeAttr(model.display_name || "")}" placeholder="可选，例如 Grok Imagine Image">
       </label>
       <label class="field advancedOnly">Base URL
         <input data-field="base_url" class="mono" value="${escapeAttr(modelBaseURL)}" placeholder="与供应商服务地址保持一致">
@@ -3966,15 +3709,13 @@ function addModelCard(model = {}) {
   card.querySelector('[data-field="extra_headers"]').value = serializeHeaders(model.extra_headers);
   const nameInput = card.querySelector('[data-field="name"]');
   const modelInput = card.querySelector('[data-field="model"]');
-  const displayNameInput = card.querySelector('[data-field="display_name"]');
   const onFieldChange = () => {
-    card.querySelector('[data-role="model-title"]').textContent = displayNameInput.value.trim() || nameInput.value.trim() || modelInput.value.trim() || "新模型";
+    card.querySelector("strong").textContent = nameInput.value.trim() || modelInput.value.trim() || "新模型";
     renderModelSelect();
     syncEnabledModelList();
   };
   nameInput.addEventListener("input", onFieldChange);
   modelInput.addEventListener("input", onFieldChange);
-  displayNameInput.addEventListener("input", onFieldChange);
   card.querySelector('[data-action="remove-model"]').onclick = () => {
     card.remove();
     renderModelSelect();
@@ -4062,20 +3803,11 @@ function readForm() {
       explore: $("subagentsExploreModel")?.value?.trim() || "",
       plan: $("subagentsPlanModel")?.value?.trim() || "",
     },
-    image_generation: {
-      enabled: !!$("imageGenEnabled")?.checked,
-      base_url: $("imageGenBaseUrl")?.value.trim() || "",
-      api_key: $("imageGenApiKey")?.value.trim() || "",
-      api_backend: $("imageGenApiBackend")?.value || "chat_completions",
-      model: $("imageGenModel")?.value.trim() || "",
-      available_models: unique(state.imageAvailableModels || []),
-    },
     models: rows.map((row) => {
       const get = (field) => row.querySelector(`[data-field="${field}"]`)?.value.trim() || "";
       const num = (field) => Number(get(field) || 0);
       return {
         name: get("name"),
-        display_name: get("display_name"),
         model: get("model"),
         base_url: get("base_url"),
         api_key: apiKey,
@@ -4135,20 +3867,6 @@ async function saveCurrentProfile() {
   const profile = readForm();
   if (!profile.name) throw new Error("请填写名称");
   if (!profile.base_url) throw new Error("请填写服务地址");
-  if (profile.image_generation?.enabled) {
-    if (!profile.image_generation.base_url) throw new Error("请填写生图服务地址");
-    if (!profile.image_generation.api_key) throw new Error("请填写生图 API Key");
-    if (!profile.image_generation.model) throw new Error("请选择或填写生图模型");
-  }
-  const chatRoles = [
-    profile.default_model,
-    profile.web_search_model,
-    profile.subagents_models?.explore,
-    profile.subagents_models?.plan,
-  ];
-  if (chatRoles.some((model) => isMediaModelID(model))) {
-    throw new Error("内置生图别名不能作为默认、搜索或子代理模型");
-  }
   if (profile.id) {
     return await api(`/api/profiles/${profile.id}`, { method: "PUT", body: JSON.stringify(profile) });
   }
@@ -4158,8 +3876,10 @@ async function saveCurrentProfile() {
 // Navigation
 $("navHomeBtn").onclick = () => showView("home");
 $("navSettingsBtn").onclick = () => showView("settings");
+$("navSkillsBtn").onclick = () => showView("skills");
 $("backFromEditBtn").onclick = () => showView("home");
 $("backFromSettingsBtn").onclick = () => showView("home");
+$("backFromSkillsBtn").onclick = () => showView("home");
 $("chatBtn").onclick = () => showView("chat");
 $("addBtn").onclick = () => openEdit(newProfileDraft());
 $("emptyNewBtn").onclick = () => openEdit(newProfileDraft());
@@ -4212,13 +3932,197 @@ $("chatInput").addEventListener("paste", (event) => {
   handleChatFiles(files);
 });
 $("agentReadonlyNewBtn").onclick = () => run(newAgentSession, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
-$("chatInput").oninput = () => renderAgentStatus(state.agentStatus);
+/* Skills popup state */
+let skillsPopupSkills = [];
+let skillsPopupIdx = -1;
+
+function showSkillsPopup() {
+  const popup = $("skillsPopup");
+  if (!popup) return;
+  const input = $("chatInput");
+  if (!input || input.disabled) return;
+  const text = input.value;
+  // Only show if cursor is at the start of a line with /skills
+  const cursorPos = input.selectionStart;
+  const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
+  const currentLine = text.slice(lineStart, cursorPos);
+  if (!currentLine.match(/^\/skills\b/)) {
+    popup.hidden = true;
+    return;
+  }
+  if (skillsPopupSkills.length === 0) {
+    popup.hidden = true;
+    return;
+  }
+  const list = $("skillsPopupList");
+  if (!list) return;
+  skillsPopupIdx = 0;
+  list.innerHTML = skillsPopupSkills.map((sk, i) =>
+    `<button type="button" class="skillsPopupItem" data-index="${i}" ${i === 0 ? 'data-selected' : ''}>
+      <span class="skillsPopupItemIcon">${sk.is_dir ? "📁" : "📄"}</span>
+      <span class="skillsPopupItemInfo">
+        <span class="skillsPopupItemName">${escapeHtml(sk.name)}</span>
+        <span class="skillsPopupItemPath">${escapeHtml(sk.path)}</span>
+      </span>
+    </button>`
+  ).join("");
+  if ($("skillsPopupCount")) $("skillsPopupCount").textContent = String(skillsPopupSkills.length);
+  popup.hidden = false;
+}
+
+function hideSkillsPopup() {
+  const popup = $("skillsPopup");
+  if (popup) popup.hidden = true;
+  skillsPopupIdx = -1;
+}
+
+function selectSkillsPopupItem(index) {
+  const items = skillsPopupSkills;
+  if (index < 0 || index >= items.length) return;
+  const input = $("chatInput");
+  if (!input) return;
+  const sk = items[index];
+  const text = input.value;
+  const cursorPos = input.selectionStart;
+  const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
+  const lineEnd = text.indexOf("\n", cursorPos);
+  const before = text.slice(0, lineStart);
+  const after = text.slice(lineEnd >= 0 ? lineEnd : text.length);
+  // Replace "/skills" line with skill path reference and add newline
+  input.value = before + `@${sk.name} ` + (after ? after : "");
+  input.selectionStart = input.selectionEnd = (before + `@${sk.name} `).length;
+  hideSkillsPopup();
+  input.focus();
+  renderAgentStatus(state.agentStatus);
+}
+
+async function loadSkillsForPopup() {
+  try {
+    const data = await api("/api/skills");
+    skillsPopupSkills = Array.isArray(data) ? data : [];
+    if ($("skillsPopupCount") && !$("skillsPopup").hidden) {
+      $("skillsPopupCount").textContent = String(skillsPopupSkills.length);
+    }
+  } catch {
+    skillsPopupSkills = [];
+  }
+}
+
+async function populateComposerModelSelect() {
+  const sel = $("composerModelSelect");
+  if (!sel) return;
+  // Collect models from profiles and status
+  const models = new Set();
+  if (state.agentStatus?.model) models.add(state.agentStatus.model);
+  if (state.activeAgentSession?.model) models.add(state.activeAgentSession.model);
+  for (const p of state.profiles || []) {
+    if (p.default_model) models.add(p.default_model);
+    for (const m of p.models || []) if (m.id) models.add(m.id);
+    for (const m of p.available_models || []) if (m) models.add(typeof m === "string" ? m : m.id);
+  }
+  // Also fetch custom models from ~/.grok/config.toml [model.*] sections
+  try {
+    const data = await api("/api/grok-config-models");
+    if (data && Array.isArray(data.models)) {
+      for (const m of data.models) if (m) models.add(m);
+    }
+  } catch {}
+  const sorted = Array.from(models).sort();
+  const stored = localStorage.getItem("gs_composer_model") || "";
+  const current = sel.value || stored;
+  sel.innerHTML = '<option value="">继承配置</option>' + sorted.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join("");
+  sel.disabled = sorted.length === 0;
+  if (stored && sorted.includes(stored)) sel.value = stored;
+}
+
+function populateComposerStrengthSelect() {
+  const sel = $("composerStrengthSelect");
+  if (!sel) return;
+  const stored = localStorage.getItem("gs_composer_strength") || "auto";
+  sel.value = stored;
+}
+
+$("chatInput").oninput = () => {
+  renderAgentStatus(state.agentStatus);
+  showSkillsPopup();
+};
 $("chatInput").onkeydown = (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    if (!$("skillsPopup").hidden) {
+      selectSkillsPopupItem(skillsPopupIdx >= 0 ? skillsPopupIdx : 0);
+      return;
+    }
     $("chatComposer").requestSubmit();
   }
+  if (event.key === "Escape") {
+    hideSkillsPopup();
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "Tab") {
+    const popup = $("skillsPopup");
+    if (!popup.hidden) {
+      event.preventDefault();
+      const items = popup.querySelectorAll(".skillsPopupItem");
+      if (items.length === 0) return;
+      const next = skillsPopupIdx < 0 ? 0 : (skillsPopupIdx + 1) % items.length;
+      items.forEach((el, i) => {
+        el.toggleAttribute("data-selected", i === next);
+        el.style.background = i === next ? "var(--primary-soft)" : "";
+      });
+      skillsPopupIdx = next;
+    }
+  }
+  if (event.key === "ArrowUp") {
+    const popup = $("skillsPopup");
+    if (!popup.hidden) {
+      event.preventDefault();
+      const items = popup.querySelectorAll(".skillsPopupItem");
+      if (items.length === 0) return;
+      const prev = skillsPopupIdx <= 0 ? items.length - 1 : skillsPopupIdx - 1;
+      items.forEach((el, i) => {
+        el.toggleAttribute("data-selected", i === prev);
+        el.style.background = i === prev ? "var(--primary-soft)" : "";
+      });
+      skillsPopupIdx = prev;
+    }
+  }
 };
+
+// Close skills popup on click outside
+document.addEventListener("click", (event) => {
+  const popup = $("skillsPopup");
+  if (popup && !popup.hidden && !event.target.closest("#skillsPopup") && event.target.id !== "chatInput") {
+    hideSkillsPopup();
+  }
+});
+
+// Skills popup item selection via delegation
+document.addEventListener("click", (event) => {
+  const item = event.target.closest(".skillsPopupItem");
+  if (item) {
+    const idx = parseInt(item.dataset.index, 10);
+    selectSkillsPopupItem(idx);
+  }
+});
+
+// Model/strength selector handlers
+if ($("composerModelSelect")) {
+  $("composerModelSelect").onchange = function() {
+    if (this.value) {
+      localStorage.setItem("gs_composer_model", this.value);
+      if ($("contextModel")) $("contextModel").textContent = this.value;
+      if ($("agentModelBadge")) $("agentModelBadge").textContent = `MODEL ${this.value}`;
+    } else {
+      localStorage.removeItem("gs_composer_model");
+    }
+  };
+}
+if ($("composerStrengthSelect")) {
+  $("composerStrengthSelect").onchange = function() {
+    localStorage.setItem("gs_composer_strength", this.value);
+  };
+}
 $("reloadConfigBtn").onclick = () => run(async () => {
   await loadConfigEditor();
 }, { button: $("reloadConfigBtn"), busyLabel: "加载中…", success: "已重新加载" });
@@ -4326,62 +4230,6 @@ $("addModelBtn").onclick = () => {
   addModelCard();
   syncEnabledModelList();
 };
-$("imageGenEnabled")?.addEventListener("change", () => {
-  syncImageGenUI();
-  scheduleProviderPreview();
-});
-["imageGenBaseUrl", "imageGenApiKey", "imageGenModel"].forEach((id) => {
-  $(id)?.addEventListener("input", () => {
-    scheduleProviderPreview();
-  });
-});
-$("imageGenApiBackend")?.addEventListener("change", scheduleProviderPreview);
-$("toggleImageGenKey")?.addEventListener("click", () => {
-  const input = $("imageGenApiKey");
-  input.type = input.type === "password" ? "text" : "password";
-  $("toggleImageGenKey").textContent = input.type === "password" ? "显示" : "隐藏";
-});
-$("fetchImageModelsBtn")?.addEventListener("click", () => run(async () => {
-  const image = readForm().image_generation;
-  if (!image.enabled) throw new Error("请先启用 /imagine");
-  if (!image.base_url) throw new Error("先填写生图服务地址");
-  if (!image.api_key) throw new Error("先填写生图 API Key");
-  const result = await api("/api/models/fetch", {
-    method: "POST",
-    body: JSON.stringify({
-      base_url: image.base_url,
-      api_key: image.api_key,
-      upstream_format: image.api_backend,
-    }),
-  });
-  state.imageAvailableModels = unique(result.models || []);
-  renderImageModelOptions();
-  showImageGenStatus(true, `已获取 ${state.imageAvailableModels.length} 个模型`);
-  toast(`获取到 ${state.imageAvailableModels.length} 个生图模型`, "success");
-}, { button: $("fetchImageModelsBtn"), busyLabel: "拉取中…" }));
-$("testImageModelBtn")?.addEventListener("click", () => run(async () => {
-  const image = readForm().image_generation;
-  if (!image.enabled) throw new Error("请先启用 /imagine");
-  if (!image.base_url) throw new Error("先填写生图服务地址");
-  if (!image.api_key) throw new Error("先填写生图 API Key");
-  if (!image.model) throw new Error("请选择或填写生图模型");
-  const result = await api("/api/connection/test", {
-    method: "POST",
-    body: JSON.stringify({
-      base_url: image.base_url,
-      api_key: image.api_key,
-      api_backend: image.api_backend,
-      model: image.model,
-      purpose: "image_generation",
-    }),
-  });
-  if (!result.ok) {
-    showImageGenStatus(false, `失败 ${result.latency_ms}ms：${result.error || "未知错误"}`);
-    throw new Error(result.error || "生图测试失败");
-  }
-  showImageGenStatus(true, `生图成功 · ${result.latency_ms}ms · ${result.model}`);
-  toast(`生图测试成功（${result.latency_ms}ms）`, "success");
-}, { button: $("testImageModelBtn"), busyLabel: "生成中…" }));
 $("testConnectionBtn").onclick = () => run(async () => {
   const current = readForm();
   if (!current.base_url) throw new Error("先填写服务地址");
@@ -4827,26 +4675,6 @@ function scheduleRefresh() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") scheduleRefresh();
 });
-
-$("updateDismissBtn")?.addEventListener("click", () => {
-  state.updateHidden = true;
-  renderUpdate(state.update);
-});
-
-$("updateSkipBtn")?.addEventListener("click", () => run(async () => {
-  const version = state.update?.latest_version;
-  if (!version) return false;
-  if (!confirm(`跳过 ${version}？下一个更高版本仍会提醒。`)) return false;
-  const info = await api("/api/update", {
-    method: "POST",
-    body: JSON.stringify({ action: "skip", version }),
-  });
-  state.update = info;
-  state.updateHidden = true;
-  renderUpdate(info);
-  toast(`已跳过 ${version}`, "success");
-  return false;
-}, { button: $("updateSkipBtn"), busyLabel: "保存中…" }));
 window.addEventListener("focus", () => scheduleRefresh());
 window.addEventListener("resize", () => {
   clearTimeout(chatLayoutResizeTimer);
@@ -4885,7 +4713,6 @@ document.addEventListener("keydown", (event) => {
 
 initialiseChatThemes();
 showView("home");
-setTimeout(checkForUpdates, 15_000);
 refreshAll()
   .then(() => {
     loadLatestCpaMint().catch((err) => toast(err.message, "error"));

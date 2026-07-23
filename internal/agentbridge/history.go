@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	acp "github.com/coder/acp-go-sdk"
 )
 
 type SessionSummary struct {
@@ -27,11 +25,10 @@ type SessionSummary struct {
 }
 
 type HistoryMessage struct {
-	Role    string         `json:"role"`
-	Content string         `json:"content,omitempty"`
-	Model   string         `json:"model,omitempty"`
-	Tool    *ToolEvent     `json:"tool,omitempty"`
-	Media   []MediaContent `json:"media,omitempty"`
+	Role    string     `json:"role"`
+	Content string     `json:"content,omitempty"`
+	Model   string     `json:"model,omitempty"`
+	Tool    *ToolEvent `json:"tool,omitempty"`
 }
 
 type SessionHistory struct {
@@ -249,16 +246,12 @@ func readChatHistory(path string) ([]HistoryMessage, error) {
 		}
 		switch entry.Type {
 		case "user":
-			text := cleanStoredUserText(contentTextFromJSON(entry.Content))
-			media := contentMediaFromJSON(entry.Content)
-			if text != "" || len(media) > 0 {
-				messages = append(messages, HistoryMessage{Role: "user", Content: text, Media: media})
+			if text := cleanStoredUserText(contentTextFromJSON(entry.Content)); text != "" {
+				messages = append(messages, HistoryMessage{Role: "user", Content: text})
 			}
 		case "assistant":
-			text := strings.TrimSpace(contentTextFromJSON(entry.Content))
-			media := contentMediaFromJSON(entry.Content)
-			if text != "" || len(media) > 0 {
-				messages = append(messages, HistoryMessage{Role: "assistant", Content: text, Model: entry.ModelID, Media: media})
+			if text := strings.TrimSpace(contentTextFromJSON(entry.Content)); text != "" {
+				messages = append(messages, HistoryMessage{Role: "assistant", Content: text, Model: entry.ModelID})
 			}
 			for _, call := range entry.ToolCalls {
 				var input any
@@ -268,14 +261,7 @@ func readChatHistory(path string) ([]HistoryMessage, error) {
 				messages = append(messages, HistoryMessage{Role: "tool", Tool: &ToolEvent{ID: call.ID, Title: call.Name, Status: "completed", RawInput: input}})
 			}
 		case "tool_result":
-			media := contentMediaFromJSON(entry.Content)
-			if len(media) == 0 {
-				media = storedToolResultMedia(entry.Content)
-			}
-			messages = append(messages, HistoryMessage{
-				Role: "tool_result", Content: contentTextFromJSON(entry.Content), Media: media,
-				Tool: &ToolEvent{ID: entry.ToolCallID, Status: "completed"},
-			})
+			messages = append(messages, HistoryMessage{Role: "tool_result", Content: contentTextFromJSON(entry.Content), Tool: &ToolEvent{ID: entry.ToolCallID, Status: "completed"}})
 		case "reasoning":
 			parts := make([]string, 0, len(entry.Summary))
 			for _, part := range entry.Summary {
@@ -302,76 +288,20 @@ func contentTextFromJSON(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &text) == nil {
 		return text
 	}
-	blocks := contentBlocksFromJSON(raw)
-	if len(blocks) > 0 {
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil {
 		parts := make([]string, 0, len(blocks))
 		for _, block := range blocks {
-			if block.Text != nil && block.Text.Text != "" {
-				parts = append(parts, block.Text.Text)
+			if block.Text != "" {
+				parts = append(parts, block.Text)
 			}
 		}
 		return strings.Join(parts, "\n")
 	}
 	return ""
-}
-
-func contentBlocksFromJSON(raw json.RawMessage) []acp.ContentBlock {
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return nil
-	}
-	var blocks []acp.ContentBlock
-	if json.Unmarshal(raw, &blocks) == nil {
-		return blocks
-	}
-	var block acp.ContentBlock
-	if json.Unmarshal(raw, &block) == nil && (block.Text != nil || block.Image != nil || block.Audio != nil || block.ResourceLink != nil || block.Resource != nil) {
-		return []acp.ContentBlock{block}
-	}
-	return nil
-}
-
-func contentMediaFromJSON(raw json.RawMessage) []MediaContent {
-	blocks := contentBlocksFromJSON(raw)
-	media := make([]MediaContent, 0, len(blocks))
-	for _, block := range blocks {
-		media = append(media, contentMedia(block)...)
-	}
-	return media
-}
-
-func storedToolResultMedia(raw json.RawMessage) []MediaContent {
-	text := strings.TrimSpace(contentTextFromJSON(raw))
-	if text == "" {
-		return nil
-	}
-	var payload map[string]any
-	if json.Unmarshal([]byte(text), &payload) != nil {
-		return nil
-	}
-	name, _ := payload["filename"].(string)
-	for _, candidate := range []struct {
-		key  string
-		kind string
-	}{
-		{key: "path"}, {key: "image_path", kind: "image"}, {key: "video_path", kind: "video"},
-		{key: "output_path"}, {key: "image_url", kind: "image"}, {key: "video_url", kind: "video"},
-		{key: "url"}, {key: "uri"}, {key: "filename"},
-	} {
-		value, _ := payload[candidate.key].(string)
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		kind := candidate.kind
-		if kind == "" {
-			kind = mediaKind("", value)
-		}
-		if kind == "resource" {
-			continue
-		}
-		return []MediaContent{{Kind: kind, URI: value, Name: strings.TrimSpace(name)}}
-	}
-	return nil
 }
 
 func cleanStoredUserText(text string) string {

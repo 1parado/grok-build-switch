@@ -6,12 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +31,7 @@ type AgentService interface {
 	RespondPermission(string, bool) error
 	RespondPermissionEx(string, bool, bool) error
 	SetSessionAutoApprove(bool)
+	SetSessionConfig(context.Context, string, string) error
 	ListStoredSessions(string, int) ([]agentbridge.SessionSummary, error)
 	StoredSessionHistory(string) (agentbridge.SessionHistory, error)
 	RenameStoredSession(string, string) error
@@ -209,186 +207,6 @@ func (s *Server) handleAgentSessionHistory(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, history)
 }
 
-func (s *Server) handleAgentMedia(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		methodNotAllowed(w)
-		return
-	}
-	mediaPath, err := s.resolveAgentMediaPath(r.URL.Query().Get("session_id"), r.URL.Query().Get("path"))
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	file, err := os.Open(mediaPath)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		http.NotFound(w, r)
-		return
-	}
-
-	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(mediaPath)))
-	if contentType == "" {
-		header := make([]byte, 512)
-		count, _ := file.Read(header)
-		_, _ = file.Seek(0, io.SeekStart)
-		contentType = http.DetectContentType(header[:count])
-	}
-	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
-	if !strings.HasPrefix(mediaType, "image/") && !strings.HasPrefix(mediaType, "video/") && !strings.HasPrefix(mediaType, "audio/") {
-		http.Error(w, "不支持的媒体类型", http.StatusUnsupportedMediaType)
-		return
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "private, max-age=3600")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, filepath.Base(mediaPath), info.ModTime(), file)
-}
-
-func (s *Server) resolveAgentMediaPath(sessionID, reference string) (string, error) {
-	sessionID = strings.TrimSpace(sessionID)
-	reference = strings.TrimSpace(reference)
-	if sessionID == "" || reference == "" || strings.ContainsAny(sessionID, `/\\`) || s.Paths.GrokHome == "" {
-		return "", os.ErrNotExist
-	}
-	sessionsRoot, err := filepath.Abs(filepath.Join(s.Paths.GrokHome, "sessions"))
-	if err != nil {
-		return "", err
-	}
-	entries, err := os.ReadDir(sessionsRoot)
-	if err != nil {
-		return "", err
-	}
-	var sessionDir string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		candidate := filepath.Join(sessionsRoot, entry.Name(), sessionID)
-		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
-			sessionDir = candidate
-			break
-		}
-	}
-	if sessionDir == "" {
-		return "", os.ErrNotExist
-	}
-	sessionDir, err = filepath.EvalSymlinks(sessionDir)
-	if err != nil {
-		return "", err
-	}
-
-	referencePath, absolute, err := localMediaReferencePath(reference)
-	if err != nil || referencePath == "" {
-		return "", os.ErrNotExist
-	}
-	var candidate string
-	if absolute {
-		candidate = filepath.Clean(referencePath)
-	} else {
-		candidate = filepath.Join(sessionDir, filepath.FromSlash(strings.TrimLeft(referencePath, `/\\`)))
-	}
-	if resolved, ok := verifiedSessionMediaPath(sessionDir, candidate); ok {
-		return resolved, nil
-	}
-	if hasPathTraversal(referencePath) {
-		return "", os.ErrNotExist
-	}
-
-	// Some Grok builds return only /2.jpg even when the file is stored in a
-	// generated subdirectory. Fall back to a bounded basename search in this
-	// session, never outside it.
-	name := filepath.Base(filepath.FromSlash(referencePath))
-	if name == "." || name == string(filepath.Separator) || name == "" {
-		return "", os.ErrNotExist
-	}
-	visited := 0
-	found := ""
-	err = filepath.WalkDir(sessionDir, func(current string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return nil
-		}
-		visited++
-		if visited > 10000 {
-			return filepath.SkipAll
-		}
-		if !entry.IsDir() && strings.EqualFold(entry.Name(), name) {
-			if resolved, ok := verifiedSessionMediaPath(sessionDir, current); ok {
-				found = resolved
-				return filepath.SkipAll
-			}
-		}
-		return nil
-	})
-	if err != nil || found == "" {
-		return "", os.ErrNotExist
-	}
-	return found, nil
-}
-
-func localMediaReferencePath(reference string) (string, bool, error) {
-	if filepath.IsAbs(reference) {
-		return reference, true, nil
-	}
-	parsed, err := url.Parse(reference)
-	if err != nil {
-		return "", false, err
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "":
-		return parsed.Path, false, nil
-	case "file":
-		if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
-			return "", false, os.ErrPermission
-		}
-		decoded, decodeErr := url.PathUnescape(parsed.Path)
-		if decodeErr != nil {
-			return "", false, decodeErr
-		}
-		decoded = filepath.FromSlash(decoded)
-		if len(decoded) >= 3 && (decoded[0] == '/' || decoded[0] == '\\') && decoded[2] == ':' {
-			decoded = decoded[1:]
-		}
-		return decoded, true, nil
-	case "http", "https":
-		host := parsed.Hostname()
-		ip := net.ParseIP(host)
-		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
-			return "", false, os.ErrPermission
-		}
-		decoded, decodeErr := url.PathUnescape(parsed.Path)
-		return decoded, false, decodeErr
-	default:
-		return "", false, os.ErrPermission
-	}
-}
-
-func verifiedSessionMediaPath(sessionDir, candidate string) (string, bool) {
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "", false
-	}
-	relative, err := filepath.Rel(sessionDir, resolved)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	info, err := os.Stat(resolved)
-	return resolved, err == nil && info.Mode().IsRegular()
-}
-
-func hasPathTraversal(value string) bool {
-	for _, part := range strings.FieldsFunc(filepath.ToSlash(value), func(r rune) bool { return r == '/' }) {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) handleAgentRename(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -420,6 +238,8 @@ func (s *Server) handleAgentRename(w http.ResponseWriter, r *http.Request) {
 type agentSocketMessage struct {
 	Type        string                   `json:"type"`
 	Text        string                   `json:"text,omitempty"`
+	Model       string                   `json:"model,omitempty"`
+	Strength    string                   `json:"strength,omitempty"`
 	RequestID   string                   `json:"request_id,omitempty"`
 	Allow       bool                     `json:"allow,omitempty"`
 	Remember    bool                     `json:"remember,omitempty"`
@@ -487,6 +307,11 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 		var err error
 		switch message.Type {
 		case "user_message":
+			if message.Model != "" || message.Strength != "" {
+				if setErr := s.Agent.SetSessionConfig(ctx, message.Model, message.Strength); setErr != nil {
+					fmt.Fprintf(os.Stderr, "grok_switch: set session config failed: %v\n", setErr)
+				}
+			}
 			err = s.Agent.Prompt(message.Text, message.Attachments)
 		case "cancel":
 			err = s.Agent.CancelPrompt()

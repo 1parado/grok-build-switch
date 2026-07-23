@@ -135,12 +135,7 @@ installer = "local"
 
 [endpoints]
 models_base_url = "https://provider.example/v1"
-xai_api_base_url = "https://provider.example/v1"
 image_base_url = "https://images.example/v1"
-
-[features]
-image_gen_model_override = "provider-image"
-codebase_indexing = true
 
 [models]
 default = "provider-default"
@@ -172,17 +167,8 @@ base_url = "https://provider.example/v1"
 	if _, ok := tableAt(doc, "endpoints")["models_base_url"]; ok {
 		t.Fatalf("models_base_url was not removed:\n%s", string(data))
 	}
-	if _, ok := tableAt(doc, "endpoints")["xai_api_base_url"]; ok {
-		t.Fatalf("xai_api_base_url was not removed:\n%s", string(data))
-	}
 	if tableAt(doc, "endpoints")["image_base_url"] != "https://images.example/v1" {
 		t.Fatalf("unrelated endpoint was not preserved: %#v", tableAt(doc, "endpoints"))
-	}
-	if _, ok := tableAt(doc, "features")["image_gen_model_override"]; ok {
-		t.Fatalf("image model override was not removed: %#v", tableAt(doc, "features"))
-	}
-	if tableAt(doc, "features")["codebase_indexing"] != true {
-		t.Fatalf("unrelated feature was not preserved: %#v", tableAt(doc, "features"))
 	}
 	if _, ok := tableAt(doc, "models")["default"]; ok {
 		t.Fatalf("default model was not removed: %#v", tableAt(doc, "models"))
@@ -527,190 +513,6 @@ func TestApplyProfileWritesReasoningEffortDefaults(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("reasoning_efforts = %#v, want %#v", got, want)
 		}
-	}
-}
-
-func TestApplyProfileWritesIndependentImageGeneration(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("[features]\ntelemetry = false\nimage_edit = true\nvideo_gen = true\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	profile := profiles.Profile{
-		BaseURL:      "https://chat.example.com/v1",
-		APIKey:       "sk-chat",
-		DefaultModel: "chat-model",
-		Models: []profiles.ModelDef{{
-			Name: "chat-model", Model: "chat-model", APIBackend: "responses",
-		}},
-		ImageGeneration: &profiles.ImageGenerationConfig{
-			Enabled: true, BaseURL: "https://image.example.com/v1", APIKey: "sk-image",
-			APIBackend: "messages", Model: "image-model-v2",
-		},
-	}
-	if err := ApplyProfileToFile(path, profile); err != nil {
-		t.Fatal(err)
-	}
-	doc, err := readDoc(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	features := tableAt(doc, "features")
-	if features["telemetry"] != false || features["image_gen"] != true || stringAt(features, "image_gen_model_override") != "image-model-v2" {
-		t.Fatalf("features = %#v", features)
-	}
-	for _, removed := range []string{"image_edit", "video_gen"} {
-		if _, ok := features[removed]; ok {
-			t.Fatalf("removed feature %q should be absent: %#v", removed, features)
-		}
-	}
-	endpoints := tableAt(doc, "endpoints")
-	if stringAt(endpoints, "models_base_url") != "https://chat.example.com/v1" || stringAt(endpoints, "xai_api_base_url") != "https://image.example.com/v1" {
-		t.Fatalf("independent endpoints = %#v", endpoints)
-	}
-	models := tableAt(doc, "model")
-	alias, ok := models["grok-imagine-image"].(map[string]any)
-	if !ok {
-		t.Fatalf("image alias missing: %#v", models)
-	}
-	if stringAt(alias, "model") != "image-model-v2" || stringAt(alias, "base_url") != "https://image.example.com/v1" || stringAt(alias, "api_key") != "sk-image" || stringAt(alias, "api_backend") != "messages" {
-		t.Fatalf("independent image alias = %#v", alias)
-	}
-	if _, ok := alias["supports_reasoning_effort"]; ok {
-		t.Fatalf("image alias should omit reasoning: %#v", alias)
-	}
-	chat := models["chat-model"].(map[string]any)
-	if stringAt(chat, "api_key") != "sk-chat" {
-		t.Fatalf("chat model should retain chat key: %#v", chat)
-	}
-	for _, removed := range []string{"grok-imagine-image-quality", "grok-imagine-video"} {
-		if _, ok := models[removed]; ok {
-			t.Fatalf("removed media alias %q was written: %#v", removed, models)
-		}
-	}
-
-	// With a local imagine proxy URL, xai_api_base_url must point at the proxy
-	// while the real upstream stays on [model.grok-imagine-image].
-	if err := ApplyProfileToFile(path, profile, ApplyOpts{ImagineProxyBaseURL: "http://127.0.0.1:17878/imagine/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	doc, err = readDoc(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoints = tableAt(doc, "endpoints")
-	if stringAt(endpoints, "xai_api_base_url") != "http://127.0.0.1:17878/imagine/v1" {
-		t.Fatalf("proxy xai endpoint = %#v", endpoints)
-	}
-	alias, ok = tableAt(doc, "model")["grok-imagine-image"].(map[string]any)
-	if !ok || stringAt(alias, "base_url") != "https://image.example.com/v1" || stringAt(alias, "api_key") != "sk-image" || stringAt(alias, "model") != "image-model-v2" {
-		t.Fatalf("image alias should keep real upstream under proxy mode: %#v", alias)
-	}
-
-	profile.ImageGeneration.Enabled = false
-	if err := ApplyProfileToFile(path, profile); err != nil {
-		t.Fatal(err)
-	}
-	doc, err = readDoc(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	features = tableAt(doc, "features")
-	for _, key := range []string{"image_gen", "image_edit", "video_gen"} {
-		if _, ok := features[key]; ok {
-			t.Fatalf("unselected feature %q should be removed: %#v", key, features)
-		}
-	}
-	if _, ok := tableAt(doc, "model")["grok-imagine-image"]; ok {
-		t.Fatalf("disabled image alias should be absent: %#v", tableAt(doc, "model"))
-	}
-	if _, ok := tableAt(doc, "endpoints")["xai_api_base_url"]; ok {
-		t.Fatalf("disabled image endpoint should be absent: %#v", tableAt(doc, "endpoints"))
-	}
-}
-
-func TestIndependentImageGenerationRoundTrips(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("[models]\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	profile := profiles.Profile{
-		BaseURL: "https://chat.example.com/v1",
-		APIKey:  "sk-chat",
-		Models: []profiles.ModelDef{{
-			Name: "chat", Model: "chat", APIBackend: "responses",
-		}},
-		DefaultModel: "chat",
-		ImageGeneration: &profiles.ImageGenerationConfig{
-			Enabled: true, BaseURL: "https://image.example.com/v1", APIKey: "sk-image",
-			APIBackend: "responses", Model: "grok-imagine-image-lite",
-		},
-	}
-	if err := ApplyProfileToFile(path, profile); err != nil {
-		t.Fatal(err)
-	}
-	imported, err := ImportProfile(path, "roundtrip")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if imported.ImageGeneration == nil || imported.ImageGeneration.APIKey != "sk-image" || imported.ImageGeneration.BaseURL != "https://image.example.com/v1" || imported.ImageGeneration.Model != "grok-imagine-image-lite" {
-		t.Fatalf("imported image config = %#v", imported.ImageGeneration)
-	}
-	if len(imported.Models) != 1 || imported.Models[0].Model != "chat" {
-		t.Fatalf("image alias leaked into chat models: %#v", imported.Models)
-	}
-	if !profile.Matches(imported) {
-		t.Fatalf("applied media profile should match its imported config:\nprofile=%#v\nimported=%#v", profile, imported)
-	}
-}
-
-func TestImportDropsDisabledLegacyMediaAliases(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	data := `
-[endpoints]
-models_base_url = "https://api.example.com/v1"
-
-[models]
-default = "chat"
-web_search = "chat"
-default_reasoning_effort = "high"
-
-[model.chat]
-model = "chat"
-api_key = "sk-test"
-api_backend = "responses"
-supports_reasoning_effort = true
-reasoning_efforts = ["low", "medium", "high"]
-
-[model.grok-imagine-image]
-model = "grok-imagine-image"
-api_key = "sk-test"
-api_backend = "responses"
-
-[model.grok-imagine-image-quality]
-model = "grok-imagine-image-quality"
-api_key = "sk-test"
-api_backend = "responses"
-
-[model.grok-imagine-video]
-model = "grok-imagine-video"
-api_key = "sk-test"
-api_backend = "responses"
-`
-	if err := os.WriteFile(path, []byte(strings.TrimSpace(data)+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	profile, err := ImportProfile(path, "canonical-disabled")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if profile.ImageGeneration != nil && profile.ImageGeneration.Enabled {
-		t.Fatalf("disabled aliases should not enable image generation: %#v", profile.ImageGeneration)
-	}
-	if len(profile.Models) != 1 || profile.Models[0].Model != "chat" {
-		t.Fatalf("legacy media aliases should be removed from chat models: %#v", profile.Models)
 	}
 }
 

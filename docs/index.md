@@ -15,8 +15,9 @@
 - 自动备份切换前的 `config.toml`
 - 通过本地 Web 面板完成配置和编辑
 - 使用 Windows 托盘菜单快速打开面板或切换供应商
-- 新版本发布后自动提醒，可在更新条中下载或跳过当前版本
 
 ## 下载
 
-[一键下载最新版 Windows 托盘版](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch.exe)，或前往 [Releases](https://github.com/1parado/grok-build-switch/releases/latest) 查看更新说明和 GUI 版。
+前往 GitHub 仓库的 [Releases](https://github.com/1parado/grok-build-switch/releases) 页面下载 Windows 可执行文件。
+
+

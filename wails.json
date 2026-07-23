@@ -1,0 +1,13 @@
+{
+  "name": "grok_switch",
+  "outputfilename": "grok-switch-gui.exe",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "",
+    "email": ""
+  },
+  "tags": "wailsgui"
+}

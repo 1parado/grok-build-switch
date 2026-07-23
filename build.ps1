@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-	[string]$Version = $env:GROK_SWITCH_VERSION,
   [string]$CertificatePath = $env:GROK_SWITCH_SIGN_CERT,
   [string]$CertificatePassword = $env:GROK_SWITCH_SIGN_PASSWORD,
   [string]$CertificateThumbprint = $env:GROK_SWITCH_SIGN_THUMBPRINT,
@@ -73,15 +72,6 @@ function Sign-Executable([string]$ExecutablePath) {
 
 Push-Location $PSScriptRoot
 try {
-	if (-not $Version) {
-		$PSNativeCommandUseErrorActionPreference = $false
-		$Version = (git describe --tags --exact-match 2>$null)
-		$PSNativeCommandUseErrorActionPreference = $true
-		if ($LASTEXITCODE -ne 0 -or -not $Version) { $Version = "dev" }
-	}
-	if ($Version -ne "dev" -and $Version -notmatch '^v?\d+(\.\d+)+([+-][0-9A-Za-z.-]+)?$') {
-		throw "Invalid build version: $Version"
-	}
   go test ./...
   if (Get-Command magick -ErrorAction SilentlyContinue) {
     $temporaryIcon = Join-Path $env:TEMP ("grok-switch-icon-" + [guid]::NewGuid().ToString("N") + ".ico")
@@ -132,14 +122,13 @@ try {
     Remove-Item -LiteralPath $resourceOutput -Force -ErrorAction SilentlyContinue
     Write-Host "rsrc not found; building without embedded exe icon"
   }
-	go build -ldflags "-s -w -H windowsgui -X main.version=$Version" -o grok_switch.exe .
+  go build -ldflags "-s -w -H windowsgui" -o grok_switch.exe .
   $executable = Join-Path $PSScriptRoot "grok_switch.exe"
   [void](Sign-Executable $executable)
   $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
   $checksumPath = "$executable.sha256"
   Set-Content -LiteralPath $checksumPath -Value "$hash  grok_switch.exe" -Encoding ascii
   Write-Host "Built $executable"
-	Write-Host "Version $Version"
   Write-Host "SHA-256 $checksumPath"
 } finally {
   Pop-Location

@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=40">
+  <link rel="stylesheet" href="/style.css?v=38">
 </head>
 <body>
   <div class="shell">
@@ -26,22 +26,10 @@
         <button type="button" id="chatBtn" class="btn" data-home-only>聊天</button>
         <button type="button" id="addBtn" class="btn primary" data-home-only>添加供应商</button>
         <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
+			<button type="button" id="navSkillsBtn" class="btn">Skills</button>
         <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
       </div>
     </header>
-
-    <aside id="updateBanner" class="updateBanner" hidden>
-      <div class="updateCopy">
-        <strong>发现新版本 <span id="updateVersion"></span></strong>
-        <span id="updateDetail">最新版已发布，可直接下载更新。</span>
-      </div>
-      <div class="inlineActions updateActions">
-        <a id="updateDownloadBtn" class="btn sm primary" href="#" target="_blank" rel="noopener">下载最新版</a>
-        <a id="updateReleaseBtn" class="btn sm" href="#" target="_blank" rel="noopener">查看更新说明</a>
-        <button type="button" id="updateSkipBtn" class="btn sm ghost">跳过此版本</button>
-        <button type="button" id="updateDismissBtn" class="btn sm ghost" aria-label="关闭更新提示" title="关闭更新提示">×</button>
-      </div>
-    </aside>
 
     <div id="driftBanner" class="alert warn" hidden style="display:none">
       <div>
@@ -161,44 +149,6 @@
                 </select>
               </label>
             </div>
-            <section class="mediaModelTools" aria-labelledby="imageGenTitle">
-              <div class="rowBetween">
-                <div>
-                  <strong id="imageGenTitle">生图模型</strong>
-                  <p class="muted tiny">用于 Grok 的 /imagine 与 image_gen。启用后会经本机 /imagine/v1 代理注入独立 API Key（Grok 客户端本身会带聊天 Key），真实上游地址与 Key 写在下方。</p>
-                </div>
-                <label class="check"><input type="checkbox" id="imageGenEnabled"> 启用 /imagine</label>
-              </div>
-              <fieldset id="imageGenFields" class="imageGenFields" disabled>
-                <div class="formGrid">
-                  <label class="field span2">生图服务地址
-                    <input id="imageGenBaseUrl" class="mono" placeholder="https://api.example.com/v1">
-                  </label>
-                  <label class="field span2">生图 API Key
-                    <div class="keyRow">
-                      <input id="imageGenApiKey" type="password" autocomplete="off" placeholder="粘贴生图服务的 API Key">
-                      <button type="button" id="toggleImageGenKey" class="btn sm">显示</button>
-                    </div>
-                  </label>
-                  <label class="field">API Backend
-                    <select id="imageGenApiBackend" class="mono">
-                      <option value="chat_completions">chat_completions</option>
-                      <option value="responses">responses</option>
-                      <option value="messages">messages</option>
-                    </select>
-                  </label>
-                  <label class="field">生图模型
-                    <input id="imageGenModel" class="mono" list="imageGenModelOptions" placeholder="拉取后选择或手动输入">
-                    <datalist id="imageGenModelOptions"></datalist>
-                  </label>
-                </div>
-                <div class="inlineActions wrap imageGenActions">
-                  <button type="button" id="fetchImageModelsBtn" class="btn sm">拉取生图模型</button>
-                  <button type="button" id="testImageModelBtn" class="btn sm">测试生图</button>
-                  <p id="imageGenStatus" class="connStatus" hidden></p>
-                </div>
-              </fieldset>
-            </section>
             <input id="modelSearchInput" class="mono search" placeholder="搜索上游模型…">
             <div id="modelSuggestions" class="chips"></div>
             <p id="modelPoolStatus" class="muted tiny">尚未拉取模型。点 chip 启用后，会出现在上方下拉框中。</p>
@@ -336,9 +286,32 @@
 
           <form id="chatComposer" class="chatComposer">
             <div id="chatAttachments" class="chatAttachments" hidden></div>
+            <!-- Composer tool controls -->
+            <div id="composerToolbar" class="composerToolbar">
+              <div class="composerToolbarLeft">
+                <select id="composerModelSelect" class="composerModelSelect" title="模型" disabled>
+                  <option value="">选择模型…</option>
+                </select>
+                <select id="composerStrengthSelect" class="composerStrengthSelect" title="推理强度" disabled>
+                  <option value="auto">自动</option>
+                  <option value="high">高</option>
+                  <option value="medium">中</option>
+                  <option value="low">低</option>
+                </select>
+              </div>
+            </div>
             <div class="composerInputWrap">
-              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…" aria-label="消息" disabled></textarea>
+              <textarea id="chatInput" rows="4" placeholder="询问代码、规划任务或继续这段对话… (输入 /skills 查看可用 Skills)" aria-label="消息" disabled></textarea>
               <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行</span>
+              <div id="skillsPopup" class="skillsPopup" hidden>
+                <div class="skillsPopupHead">
+                  <strong>Skills</strong>
+                  <span id="skillsPopupCount" class="muted tiny">0</span>
+                </div>
+                <div id="skillsPopupList" class="skillsPopupList">
+                  <span class="skillsPopupLoading">加载中…</span>
+                </div>
+              </div>
             </div>
             <div class="composerActions">
               <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
@@ -398,6 +371,25 @@
       </section>
     </main>
 
+
+    <!-- SKILLS -->
+    <main id="viewSkills" class="view" hidden>
+      <div class="pageHead">
+        <h1 class="pageTitle">Skills 管理</h1>
+        <p class="pageDesc">浏览 ~/.agents 和 ~/.grok 中的 Skills</p>
+      </div>
+
+      <div id="skillsEmpty" class="empty" hidden>
+        <h2>没有找到 Skills</h2>
+        <p>~/.agents 和 ~/.grok 目录下没有发现任何 Skill 文件或目录。</p>
+      </div>
+
+      <div id="skillsLoading" class="loadingHint">正在加载 Skills…</div>
+
+      <div id="skillsList" class="skillsList"></div>
+
+      <button type="button" id="backFromSkillsBtn" class="btn">返回供应商列表</button>
+    </main>
     <!-- SETTINGS -->
     <main id="viewSettings" class="view" hidden>
       <div class="pageHead">
@@ -837,6 +829,6 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=44"></script>
+  <script src="/app.js?v=40"></script>
 </body>
 </html>

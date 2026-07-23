@@ -536,6 +536,49 @@ func (b *Bridge) SetSessionAutoApprove(enabled bool) {
 	b.broadcastStatus()
 }
 
+// SetSessionConfig sets model and/or reasoning effort on the current session
+// via ACP SetSessionConfigOption. Empty strings are skipped.
+func (b *Bridge) SetSessionConfig(ctx context.Context, model, strength string) error {
+	b.mu.RLock()
+	conn := b.conn
+	sessionID := b.sessionID
+	b.mu.RUnlock()
+	if conn == nil || sessionID == "" {
+		return ErrNotRunning
+	}
+
+	if model != "" {
+		fmt.Fprintf(os.Stderr, "grok_switch: setting model config id=\"model\" value=%s\n", model)
+		if _, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				SessionId: acp.SessionId(sessionID),
+				ConfigId:  "model",
+				Value:     acp.SessionConfigValueId(model),
+			},
+		}); err != nil {
+			return fmt.Errorf("设置模型 %s 失败: %w", model, err)
+		}
+		b.mu.Lock()
+		b.model = model
+		b.mu.Unlock()
+		b.broadcastStatus()
+	}
+
+	if strength != "" {
+		if _, err := conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
+			ValueId: &acp.SetSessionConfigOptionValueId{
+				SessionId: acp.SessionId(sessionID),
+				ConfigId:  "thought_level",
+				Value:     acp.SessionConfigValueId(strength),
+			},
+		}); err != nil {
+			return fmt.Errorf("设置推理强度 %s 失败: %w", strength, err)
+		}
+	}
+
+	return nil
+}
+
 func (b *Bridge) runPrompt(ctx context.Context, turnCancel context.CancelFunc, generation uint64, conn *acp.ClientSideConnection, sessionID string, blocks []acp.ContentBlock) {
 	defer turnCancel()
 	response, err := conn.Prompt(ctx, acp.PromptRequest{

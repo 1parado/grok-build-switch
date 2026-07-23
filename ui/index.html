@@ -26,6 +26,7 @@
         <button type="button" id="chatBtn" class="btn" data-home-only>聊天</button>
         <button type="button" id="addBtn" class="btn primary" data-home-only>添加供应商</button>
         <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
+        <button type="button" id="navSkillsBtn" class="btn">Skills</button>
         <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
       </div>
     </header>
@@ -336,9 +337,31 @@
 
           <form id="chatComposer" class="chatComposer">
             <div id="chatAttachments" class="chatAttachments" hidden></div>
+            <div id="composerToolbar" class="composerToolbar">
+              <div class="composerToolbarLeft">
+                <select id="composerModelSelect" class="composerModelSelect" title="模型" disabled>
+                  <option value="">选择模型…</option>
+                </select>
+                <select id="composerStrengthSelect" class="composerStrengthSelect" title="推理强度" disabled>
+                  <option value="auto">自动</option>
+                  <option value="high">高</option>
+                  <option value="medium">中</option>
+                  <option value="low">低</option>
+                </select>
+              </div>
+            </div>
             <div class="composerInputWrap">
-              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…" aria-label="消息" disabled></textarea>
+              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话… (输入 /skills 查看可用 Skills)" aria-label="消息" disabled></textarea>
               <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行</span>
+              <div id="skillsPopup" class="skillsPopup" hidden>
+                <div class="skillsPopupHead">
+                  <strong>Skills</strong>
+                  <span id="skillsPopupCount" class="muted tiny">0</span>
+                </div>
+                <div id="skillsPopupList" class="skillsPopupList">
+                  <span class="skillsPopupLoading">加载中…</span>
+                </div>
+              </div>
             </div>
             <div class="composerActions">
               <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
@@ -396,6 +419,25 @@
         </aside>
         <div id="nativeChatScrim" class="nativeChatScrim" hidden></div>
       </section>
+    </main>
+
+    <!-- SKILLS -->
+    <main id="viewSkills" class="view" hidden>
+      <div class="pageHead">
+        <h1 class="pageTitle">Skills 管理</h1>
+        <p class="pageDesc">浏览 ~/.agents 和 ~/.grok 中的 Skills</p>
+      </div>
+
+      <div id="skillsEmpty" class="empty" hidden>
+        <h2>没有找到 Skills</h2>
+        <p>~/.agents 和 ~/.grok 目录下没有发现任何 Skill 文件或目录。</p>
+      </div>
+
+      <div id="skillsLoading" class="loadingHint">正在加载 Skills…</div>
+
+      <div id="skillsList" class="skillsList"></div>
+
+      <button type="button" id="backFromSkillsBtn" class="btn">返回供应商列表</button>
     </main>
 
     <!-- SETTINGS -->

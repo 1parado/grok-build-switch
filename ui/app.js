@@ -498,6 +498,7 @@ async function refreshAll() {
   renderDrift();
   renderEmptyState();
   renderProfiles();
+  populateComposerModelSelect();
   renderBackups(backups);
   renderSettings(settings);
   renderLANAccess(lanAccess);
@@ -539,6 +540,93 @@ async function checkForUpdates() {
     renderUpdate(info);
   } catch {
     // Update checks are best-effort and must not block the management UI.
+  }
+}
+
+async function loadSkills() {
+  const loading = $("skillsLoading");
+  const list = $("skillsList");
+  const empty = $("skillsEmpty");
+  if (!list) return;
+  try {
+    if (loading) loading.hidden = false;
+    if (list) list.innerHTML = "";
+    if (empty) empty.hidden = true;
+    const skills = await api("/api/skills");
+    if (loading) loading.hidden = true;
+    if (!skills || skills.length === 0) {
+      if (empty) empty.hidden = false;
+      return;
+    }
+    const groups = {};
+    for (const sk of skills) {
+      const src = sk.source || "other";
+      if (!groups[src]) groups[src] = [];
+      groups[src].push(sk);
+    }
+    const sourceLabels = {
+      "agents": "~/.agents",
+      "grok/skills": "~/.grok/skills",
+      "grok/.skills": "~/.grok/.skills",
+      "grok/agents": "~/.grok/agents",
+    };
+    let html = "";
+    for (const [source, items] of Object.entries(groups)) {
+      const label = sourceLabels[source] || source;
+      html += `<section class="skillsGroup"><h3 class="skillsGroupTitle">${escapeHtml(label)}</h3>`;
+      html += `<div class="skillsItems">`;
+      for (const sk of items) {
+        const icon = sk.is_dir ? "📁" : "📄";
+        html += `<div class="skillItem">
+          <span class="skillIcon">${icon}</span>
+          <div class="skillInfo">
+            <strong class="skillName">${escapeHtml(sk.name)}</strong>
+            <span class="skillPath">${escapeHtml(sk.path)}</span>
+          </div>
+          <div class="skillActions">
+            <button type="button" class="btn sm ghost copySkillPathBtn" data-path="${escapeHtml(sk.path)}" title="复制路径">复制</button>
+            ${sk.source !== "grok/bundled" ? `<button type="button" class="btn sm danger deleteSkillBtn" data-path="${escapeHtml(sk.path)}" data-name="${escapeHtml(sk.name)}" title="删除">删除</button>` : ""}
+          </div>
+        </div>`;
+      }
+      html += `</div></section>`;
+    }
+    list.innerHTML = html;
+    list.querySelectorAll(".copySkillPathBtn").forEach((btn) => {
+      btn.onclick = () => {
+        navigator.clipboard.writeText(btn.dataset.path).then(() => {
+          toast("路径已复制", "success");
+        }).catch(() => {
+          toast("复制失败", "error");
+        });
+      };
+    });
+    list.querySelectorAll(".deleteSkillBtn").forEach((btn) => {
+      btn.onclick = async () => {
+        const name = btn.dataset.name;
+        const path = btn.dataset.path;
+        if (!confirm(`确定要删除 "${name}" 吗？\n\n路径: ${path}\n\n此操作不可恢复。`)) {
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "删除中…";
+        try {
+          await api("/api/skills/delete", {
+            method: "POST",
+            body: JSON.stringify({ path }),
+          });
+          toast(`已删除: ${name}`, "success");
+          await loadSkills();
+        } catch (err) {
+          toast(err.message || "删除失败", "error");
+          btn.disabled = false;
+          btn.textContent = "删除";
+        }
+      };
+    });
+  } catch (err) {
+    if (loading) loading.hidden = true;
+    if (list) list.innerHTML = `<div class="alert warn"><strong>加载失败</strong><span>${escapeHtml(err.message || String(err))}</span></div>`;
   }
 }
 
@@ -627,6 +715,7 @@ function showView(name) {
   const edit = $("viewEdit");
   const settings = $("viewSettings");
   const chat = $("viewChat");
+  const skills = $("viewSkills");
   if (home) {
     home.hidden = name !== "home";
     home.style.display = name === "home" ? "" : "none";
@@ -643,6 +732,10 @@ function showView(name) {
     chat.hidden = name !== "chat";
     chat.style.display = name === "chat" ? "" : "none";
   }
+  if (skills) {
+    skills.hidden = name !== "skills";
+    skills.style.display = name === "skills" ? "" : "none";
+  }
   if ($("navHomeBtn")) $("navHomeBtn").hidden = name === "home";
   document.querySelectorAll("[data-home-only]").forEach((el) => {
     el.hidden = name !== "home";
@@ -650,13 +743,17 @@ function showView(name) {
   // Keep header add/import only on home list.
   if ($("headerSubtitle")) {
     $("headerSubtitle").textContent =
-      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : "供应商";
+      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : name === "skills" ? "Skills" : "供应商";
   }
   if (name === "settings") {
     loadConfigEditor().catch((err) => toast(err.message, "error"));
   }
+  if (name === "skills") {
+    loadSkills().catch((err) => toast(err.message, "error"));
+  }
   if (name === "chat") {
     openAgentView().catch((err) => toast(err.message, "error"));
+    loadSkillsForPopup().catch(() => {});
   } else {
     closeNativeChatPanels();
   }
@@ -1133,6 +1230,8 @@ function renderAgentStatus(status) {
   }
   if ($("agentModelBadge")) $("agentModelBadge").textContent = model ? `MODEL ${model}` : "MODEL —";
   if ($("contextModel")) $("contextModel").textContent = model || "—";
+  populateComposerModelSelect();
+  populateComposerStrengthSelect();
   if ($("contextSessionId")) $("contextSessionId").textContent = status.session_id || state.activeAgentSession?.id || "—";
   if ($("activeChatPath")) $("activeChatPath").textContent = status.cwd || state.activeAgentSession?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
   const running = agentIsRunning(status);
@@ -1163,6 +1262,8 @@ function renderAgentStatus(status) {
     $("chatSendBtn").disabled = !composerReady || busy || !hasContent;
   }
   if ($("chatAttachBtn")) $("chatAttachBtn").disabled = !composerReady || busy;
+  if ($("composerModelSelect")) $("composerModelSelect").disabled = !composerReady || busy;
+  if ($("composerStrengthSelect")) $("composerStrengthSelect").disabled = !composerReady || busy;
   if ($("chatStopBtn")) {
     $("chatStopBtn").hidden = !busy;
     $("chatStopBtn").disabled = !busy;
@@ -1659,7 +1760,10 @@ async function resendEditedUserMessage(article, rawText) {
   agentActiveThought = null;
   agentRetryNotice = null;
   updateContextUsage();
-  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  const _mSend = $("composerModelSelect")?.value || "";
+  const _rawSSend = $("composerStrengthSelect")?.value || "";
+  const _sSend = _rawSSend === "auto" ? "" : _rawSSend;
+  agentSocket.send(JSON.stringify({ type: "user_message", text, model: _mSend, strength: _sSend }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
   forceScrollChatToBottom();
 }
@@ -2417,7 +2521,10 @@ async function regenerateLastAssistant(article = lastAssistantMessageEl) {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
-  agentSocket.send(JSON.stringify({ type: "user_message", text }));
+  const _mSend = $("composerModelSelect")?.value || "";
+  const _rawSSend = $("composerStrengthSelect")?.value || "";
+  const _sSend = _rawSSend === "auto" ? "" : _rawSSend;
+  agentSocket.send(JSON.stringify({ type: "user_message", text, model: _mSend, strength: _sSend }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
   appendAgentNotice("正在重新生成…");
   forceScrollChatToBottom();
@@ -2827,7 +2934,10 @@ async function sendAgentMessage() {
   clearChatAttachments();
   updateContextUsage();
   forceScrollChatToBottom();
-  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments }));
+  const _m = $("composerModelSelect")?.value || "";
+  const _rawS = $("composerStrengthSelect")?.value || "";
+  const _s = _rawS === "auto" ? "" : _rawS;
+  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments, model: _m, strength: _s }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
 }
 
@@ -2984,6 +3094,7 @@ async function toggleProviderPin(key) {
 		if (pinned.has(key)) pinned.delete(key); else pinned.add(key);
 		await saveProviderLayout(cards.map((card) => card.key), [...pinned]);
 		renderProfiles();
+  populateComposerModelSelect();
 	}, { success: "卡片顺序已保存" });
 }
 
@@ -3026,6 +3137,7 @@ async function reorderProviderCards(sourceKey, targetKey) {
 		order.splice(targetIndex, 0, sourceKey);
 		await saveProviderLayout(order, state.settings?.pinned_provider_ids || []);
 		renderProfiles();
+  populateComposerModelSelect();
 	}, { success: "卡片顺序已保存" });
 }
 
@@ -4157,8 +4269,10 @@ async function saveCurrentProfile() {
 
 // Navigation
 $("navHomeBtn").onclick = () => showView("home");
+$("navSkillsBtn").onclick = () => showView("skills");
 $("navSettingsBtn").onclick = () => showView("settings");
 $("backFromEditBtn").onclick = () => showView("home");
+$("backFromSkillsBtn").onclick = () => showView("home");
 $("backFromSettingsBtn").onclick = () => showView("home");
 $("chatBtn").onclick = () => showView("chat");
 $("addBtn").onclick = () => openEdit(newProfileDraft());
@@ -4212,11 +4326,50 @@ $("chatInput").addEventListener("paste", (event) => {
   handleChatFiles(files);
 });
 $("agentReadonlyNewBtn").onclick = () => run(newAgentSession, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
-$("chatInput").oninput = () => renderAgentStatus(state.agentStatus);
+$("chatInput").oninput = () => {
+  renderAgentStatus(state.agentStatus);
+  showSkillsPopup();
+};
 $("chatInput").onkeydown = (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    if (!$("skillsPopup").hidden) {
+      selectSkillsPopupItem(skillsPopupIdx >= 0 ? skillsPopupIdx : 0);
+      return;
+    }
     $("chatComposer").requestSubmit();
+  }
+  if (event.key === "Escape") {
+    hideSkillsPopup();
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "Tab") {
+    const popup = $("skillsPopup");
+    if (!popup.hidden) {
+      event.preventDefault();
+      const items = popup.querySelectorAll(".skillsPopupItem");
+      if (items.length === 0) return;
+      const next = skillsPopupIdx < 0 ? 0 : (skillsPopupIdx + 1) % items.length;
+      items.forEach((el, i) => {
+        el.toggleAttribute("data-selected", i === next);
+        el.style.background = i === next ? "var(--primary-soft)" : "";
+      });
+      skillsPopupIdx = next;
+    }
+  }
+  if (event.key === "ArrowUp") {
+    const popup = $("skillsPopup");
+    if (!popup.hidden) {
+      event.preventDefault();
+      const items = popup.querySelectorAll(".skillsPopupItem");
+      if (items.length === 0) return;
+      const prev = skillsPopupIdx <= 0 ? items.length - 1 : skillsPopupIdx - 1;
+      items.forEach((el, i) => {
+        el.toggleAttribute("data-selected", i === prev);
+        el.style.background = i === prev ? "var(--primary-soft)" : "";
+      });
+      skillsPopupIdx = prev;
+    }
   }
 };
 $("reloadConfigBtn").onclick = () => run(async () => {
@@ -4252,6 +4405,7 @@ if ($("providerSearch")) {
   $("providerSearch").oninput = () => {
     state.search = $("providerSearch").value;
     renderProfiles();
+  populateComposerModelSelect();
   };
 }
 if ($("layoutCardBtn")) {
@@ -4259,6 +4413,7 @@ if ($("layoutCardBtn")) {
     state.layout = "card";
     applyLayoutUI();
     renderProfiles();
+  populateComposerModelSelect();
   };
 }
 if ($("layoutListBtn")) {
@@ -4266,6 +4421,7 @@ if ($("layoutListBtn")) {
     state.layout = "list";
     applyLayoutUI();
     renderProfiles();
+  populateComposerModelSelect();
   };
 }
 
@@ -4891,3 +5047,125 @@ refreshAll()
     loadLatestCpaMint().catch((err) => toast(err.message, "error"));
   })
   .catch((err) => toast(err.message, "error"));
+
+/* Skills popup state */
+let skillsPopupSkills = [];
+let skillsPopupIdx = -1;
+
+function showSkillsPopup() {
+  const popup = $("skillsPopup");
+  if (!popup) return;
+  const input = $("chatInput");
+  if (!input || input.disabled) return;
+  const text = input.value;
+  const cursorPos = input.selectionStart;
+  const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
+  const currentLine = text.slice(lineStart, cursorPos);
+  if (!currentLine.match(/^\/skills\b/)) {
+    popup.hidden = true;
+    return;
+  }
+  if (skillsPopupSkills.length === 0) {
+    popup.hidden = true;
+    return;
+  }
+  const list = $("skillsPopupList");
+  if (!list) return;
+  skillsPopupIdx = 0;
+  list.innerHTML = skillsPopupSkills.map((sk, i) =>
+    `<button type="button" class="skillsPopupItem" data-index="${i}" ${i === 0 ? 'data-selected' : ''}>
+      <span class="skillsPopupItemIcon">${sk.is_dir ? "📁" : "📄"}</span>
+      <span class="skillsPopupItemInfo">
+        <span class="skillsPopupItemName">${escapeHtml(sk.name)}</span>
+        <span class="skillsPopupItemPath">${escapeHtml(sk.path)}</span>
+      </span>
+    </button>`
+  ).join("");
+  if ($("skillsPopupCount")) $("skillsPopupCount").textContent = String(skillsPopupSkills.length);
+  popup.hidden = false;
+}
+
+function hideSkillsPopup() {
+  const popup = $("skillsPopup");
+  if (popup) popup.hidden = true;
+  skillsPopupIdx = -1;
+}
+
+function selectSkillsPopupItem(index) {
+  const items = skillsPopupSkills;
+  if (index < 0 || index >= items.length) return;
+  const input = $("chatInput");
+  if (!input) return;
+  const sk = items[index];
+  const text = input.value;
+  const cursorPos = input.selectionStart;
+  const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
+  const lineEnd = text.indexOf("\n", cursorPos);
+  const before = text.slice(0, lineStart);
+  const after = text.slice(lineEnd >= 0 ? lineEnd : text.length);
+  input.value = before + `@${sk.name} ` + (after ? after : "");
+  input.selectionStart = input.selectionEnd = (before + `@${sk.name} `).length;
+  hideSkillsPopup();
+  input.focus();
+  renderAgentStatus(state.agentStatus);
+}
+
+async function loadSkillsForPopup() {
+  try {
+    const data = await api("/api/skills");
+    skillsPopupSkills = Array.isArray(data) ? data : [];
+    if ($("skillsPopupCount") && !$("skillsPopup").hidden) {
+      $("skillsPopupCount").textContent = String(skillsPopupSkills.length);
+    }
+  } catch {
+    skillsPopupSkills = [];
+  }
+}
+
+async function populateComposerModelSelect() {
+  const sel = $("composerModelSelect");
+  if (!sel) return;
+  const models = new Set();
+  if (state.agentStatus?.model) models.add(state.agentStatus.model);
+  if (state.activeAgentSession?.model) models.add(state.activeAgentSession.model);
+  for (const p of state.profiles || []) {
+    if (p.default_model) models.add(p.default_model);
+    for (const m of p.models || []) if (m.id) models.add(m.id);
+    for (const m of p.available_models || []) if (m) models.add(typeof m === "string" ? m : m.id);
+  }
+  try {
+    const data = await api("/api/grok-config-models");
+    if (data && Array.isArray(data.models)) {
+      for (const m of data.models) if (m) models.add(m);
+    }
+  } catch {}
+  const sorted = Array.from(models).sort();
+  const stored = localStorage.getItem("gs_composer_model") || "";
+  const current = sel.value || stored;
+  sel.innerHTML = '<option value="">继承配置</option>' + sorted.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join("");
+  sel.disabled = sorted.length === 0;
+  if (stored && sorted.includes(stored)) sel.value = stored;
+  sel.onchange = () => {
+    if (sel.value) localStorage.setItem("gs_composer_model", sel.value);
+    else localStorage.removeItem("gs_composer_model");
+  };
+}
+
+function populateComposerStrengthSelect() {
+  const sel = $("composerStrengthSelect");
+  if (!sel) return;
+  const stored = localStorage.getItem("gs_composer_strength") || "auto";
+  sel.value = stored;
+  sel.onchange = () => {
+    if (sel.value && sel.value !== "auto") localStorage.setItem("gs_composer_strength", sel.value);
+    else localStorage.removeItem("gs_composer_strength");
+  };
+}
+
+// Close skills popup on click outside
+document.addEventListener("click", (event) => {
+  const popup = $("skillsPopup");
+  if (popup && !popup.hidden && !event.target.closest("#skillsPopup") && event.target.id !== "chatInput") {
+    hideSkillsPopup();
+  }
+});

@@ -1,4 +1,4 @@
-name: Windows Release
+name: Release
 
 on:
   push:
@@ -10,7 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  build-sign-release:
+  build-windows:
+    name: Build Windows (amd64)
     runs-on: windows-latest
     env:
       WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
@@ -52,32 +53,28 @@ jobs:
           .\build.ps1
           .\build-gui.ps1
 
-      - name: Upload Windows artifact
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          Copy-Item grok_switch.exe grok_switch_windows_amd64.exe
+          Copy-Item grok_switch_gui.exe grok_switch_gui_windows_amd64.exe
+          Get-FileHash -Algorithm SHA256 grok_switch_windows_amd64.exe | ForEach-Object { "$($_.Hash.ToLower())  grok_switch_windows_amd64.exe" } | Set-Content grok_switch_windows_amd64.exe.sha256
+          Get-FileHash -Algorithm SHA256 grok_switch_gui_windows_amd64.exe | ForEach-Object { "$($_.Hash.ToLower())  grok_switch_gui_windows_amd64.exe" } | Set-Content grok_switch_gui_windows_amd64.exe.sha256
+
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: grok-switch-windows-x64
+          name: grok-switch-windows-amd64
           path: |
             grok_switch.exe
             grok_switch.exe.sha256
             grok_switch_gui.exe
             grok_switch_gui.exe.sha256
+            grok_switch_windows_amd64.exe
+            grok_switch_windows_amd64.exe.sha256
+            grok_switch_gui_windows_amd64.exe
+            grok_switch_gui_windows_amd64.exe.sha256
           if-no-files-found: error
-
-      - name: Create or update GitHub Release
-        if: github.ref_type == 'tag'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $false
-          gh release view $env:RELEASE_TAG 2>$null
-          $releaseExists = $LASTEXITCODE -eq 0
-          $PSNativeCommandUseErrorActionPreference = $true
-          if (-not $releaseExists) {
-            gh release create $env:RELEASE_TAG --verify-tag --generate-notes --title $env:RELEASE_TAG
-          }
-          gh release upload $env:RELEASE_TAG grok_switch.exe grok_switch.exe.sha256 grok_switch_gui.exe grok_switch_gui.exe.sha256 --clobber
 
       - name: Remove temporary certificate
         if: always()
@@ -86,3 +83,146 @@ jobs:
           if ($env:GROK_SWITCH_SIGN_CERT -and (Test-Path -LiteralPath $env:GROK_SWITCH_SIGN_CERT)) {
             Remove-Item -LiteralPath $env:GROK_SWITCH_SIGN_CERT -Force
           }
+
+  build-mac:
+    name: Build macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: amd64
+            goarch: amd64
+          - os: macos-latest
+            arch: arm64
+            goarch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Build CLI
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags "-s -w" -o grok_switch .
+
+      - name: Build GUI
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_LDFLAGS: "-framework UniformTypeIdentifiers"
+        run: |
+          go build -tags "wailsgui,desktop,production" -trimpath -ldflags "-s -w" -o grok_switch_gui .
+
+      - name: Package macOS build
+        run: |
+          ARCHIVE_NAME="grok_switch_darwin_${{ matrix.goarch }}.tar.gz"
+          tar -czvf "${ARCHIVE_NAME}" grok_switch grok_switch_gui LICENSE README.md
+          shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-switch-darwin-${{ matrix.goarch }}
+          path: |
+            grok_switch_darwin_${{ matrix.goarch }}.tar.gz
+            grok_switch_darwin_${{ matrix.goarch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+            goarch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            goarch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install Linux GUI Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev || sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev
+
+      - name: Build CLI
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+        run: |
+          go build -ldflags "-s -w" -o grok_switch .
+
+      - name: Build GUI
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -tags "wailsgui,desktop,production" -trimpath -ldflags "-s -w" -o grok_switch_gui .
+
+      - name: Package Linux build
+        run: |
+          ARCHIVE_NAME="grok_switch_linux_${{ matrix.goarch }}.tar.gz"
+          tar -czvf "${ARCHIVE_NAME}" grok_switch grok_switch_gui LICENSE README.md
+          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-switch-linux-${{ matrix.goarch }}
+          path: |
+            grok_switch_linux_${{ matrix.goarch }}.tar.gz
+            grok_switch_linux_${{ matrix.goarch }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Release
+    needs: [build-windows, build-mac, build-linux]
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist
+          merge-multiple: true
+
+      - name: Display downloaded files
+        run: |
+          ls -R ./dist
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG_NAME="${RELEASE_TAG}"
+          else
+            TAG_NAME="manual-build"
+          fi
+
+          if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release create "${TAG_NAME}" --generate-notes --title "${TAG_NAME}"
+          fi
+          gh release upload "${TAG_NAME}" ./dist/* --clobber

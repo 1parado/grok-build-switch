@@ -39,9 +39,9 @@
 
 | 项目 | 说明 |
 |------|------|
-| 系统 | **Windows 10 / 11 x64**（当前主要支持） |
-| 运行 | 双击 `grok_switch.exe` 即可，**无需**安装 Go / Node |
-| 可选 | 本机已安装 [Grok CLI](https://x.ai)，配置目录默认为 `%USERPROFILE%\.grok` |
+| 系统 | **Windows 10 / 11 x64**、**macOS (Intel / Apple Silicon M 系列)**、**Linux (amd64 / arm64)** |
+| 运行 | 下载对应平台的二进制/压缩包解压即可运行，**无需**安装 Go / Node |
+| 可选 | 本机已安装 [Grok CLI](https://x.ai)，配置目录默认为 `~/.grok` (Windows 下为 `%USERPROFILE%\.grok`) |
 
 ## 安装与使用
 
@@ -53,14 +53,23 @@
 
 ### 方式一：从 Release 下载（推荐）
 
-**[一键下载最新版托盘版 EXE](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch.exe)**
+**[一键下载最新版 Windows 托盘版 EXE](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch.exe)**
 
-[下载最新版 GUI 版 EXE](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch_gui.exe) · [查看全部版本与更新说明](https://github.com/1parado/grok-build-switch/releases/latest)
+[下载 Windows GUI 版 EXE](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch_gui.exe) · [查看全部版本与更新说明](https://github.com/1parado/grok-build-switch/releases/latest)
 
-1. 点击上面的下载链接获取 `grok_switch.exe`
-2. 如需原生 WebView2 窗口，可改为下载 `grok_switch_gui.exe`
-3. 放到任意目录，双击运行
-4. 托盘出现图标；浏览器会打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
+根据你的操作系统与架构下载对应的发布包：
+
+| 操作系统 (OS) | 架构 (Arch) | 发布的统一文件包 (Artifact Name) | 说明 |
+|---|---|---|---|
+| **Windows** | `amd64` (x64) | `grok_switch.exe` / `grok_switch_gui.exe` (或 `grok_switch_windows_amd64.exe`) | 包含 CLI 与 GUI EXE |
+| **macOS** | `amd64` (Intel) | `grok_switch_darwin_amd64.tar.gz` | 解压包含 CLI 与 GUI |
+| **macOS** | `arm64` (M 系列) | `grok_switch_darwin_arm64.tar.gz` | 解压包含 CLI 与 GUI |
+| **Linux** | `amd64` (x86_64) | `grok_switch_linux_amd64.tar.gz` | 解压包含 CLI 与 GUI |
+| **Linux** | `arm64` (aarch64) | `grok_switch_linux_arm64.tar.gz` | 解压包含 CLI 与 GUI |
+
+1. 点击上方直链或到 Releases 页面获取对应平台的压缩包/二进制
+2. 解压并运行（Windows 双击 `.exe`，macOS / Linux 在终端解压并运行 `./grok_switch`）
+3. 托盘出现图标；浏览器会打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
 5. 再次双击 EXE 不会启动第二个后台实例，而是打开已经运行的管理页面
 
 普通用户只需下载并运行，**不需要**配置证书、签名密码、Go 或 Node。发布流程会在

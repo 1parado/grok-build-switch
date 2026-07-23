@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type SkillEntry struct {
@@ -63,6 +64,166 @@ func scanSkillsDir(dir, source string, skills *[]SkillEntry, seen map[string]boo
 			}
 		}
 	}
+}
+
+const maxSkillInstructionBytes = 128 << 10
+
+// expandSkillPrompt resolves the slash syntax used by Grok's TUI and expands
+// the referenced SKILL.md before the text is sent through ACP Prompt.
+func (s *Server) expandSkillPrompt(text string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return text, err
+	}
+	grokHome := s.Paths.GrokHome
+	if grokHome == "" {
+		grokHome = filepath.Join(home, ".grok")
+	}
+	roots := []string{
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(grokHome, "skills"),
+		filepath.Join(grokHome, "bundled", "skills"),
+	}
+	return expandSkillPromptWithRoots(text, roots)
+}
+
+func expandSkillPromptWithRoots(text string, roots []string) (string, error) {
+	parts := strings.SplitAfter(text, "\n")
+	changed := false
+	for i, raw := range parts {
+		line := strings.TrimSuffix(raw, "\n")
+		name, remainder, ok := parseSkillDirective(line)
+		if !ok {
+			continue
+		}
+		content, ok, err := loadSkillInstructions(roots, name)
+		if err != nil {
+			return text, err
+		}
+		if !ok {
+			continue
+		}
+		parts[i] = formatSkillPrompt(name, content, remainder)
+		if strings.HasSuffix(raw, "\n") {
+			parts[i] += "\n"
+		}
+		changed = true
+	}
+	if !changed {
+		return text, nil
+	}
+	return strings.Join(parts, ""), nil
+}
+
+func parseSkillDirective(line string) (name, remainder string, ok bool) {
+	command := strings.TrimSpace(line)
+	if !strings.HasPrefix(command, "/") {
+		return "", "", false
+	}
+	command = strings.TrimSpace(strings.TrimPrefix(command, "/"))
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "", "", false
+	}
+	if strings.EqualFold(fields[0], "skills") {
+		if len(fields) < 2 {
+			return "", "", false
+		}
+		name = fields[1]
+		idx := strings.Index(command, name)
+		remainder = strings.TrimSpace(command[idx+len(name):])
+		return name, remainder, true
+	}
+	name = fields[0]
+	idx := strings.Index(command, name)
+	remainder = strings.TrimSpace(command[idx+len(name):])
+	return name, remainder, true
+}
+
+func loadSkillInstructions(roots []string, name string) (string, bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, `/\\`) || name == "." || name == ".." {
+		return "", false, nil
+	}
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", false, err
+		}
+		for _, entry := range entries {
+			if !strings.EqualFold(entry.Name(), name) {
+				continue
+			}
+			candidate := filepath.Join(root, entry.Name())
+			instructionPath, found, err := findSkillInstructionPath(candidate)
+			if err != nil {
+				return "", false, err
+			}
+			if !found {
+				continue
+			}
+			data, err := os.ReadFile(instructionPath)
+			if err != nil {
+				return "", false, err
+			}
+			if len(data) > maxSkillInstructionBytes {
+				data = append(data[:maxSkillInstructionBytes], []byte("\n\n[Skill 内容已截断。]")...)
+			}
+			return strings.TrimSpace(string(data)), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func findSkillInstructionPath(candidate string) (string, bool, error) {
+	info, err := os.Stat(candidate)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !info.IsDir() {
+		if strings.EqualFold(filepath.Ext(candidate), ".md") {
+			return candidate, true, nil
+		}
+		return "", false, nil
+	}
+	direct := filepath.Join(candidate, "SKILL.md")
+	if stat, err := os.Stat(direct); err == nil && !stat.IsDir() {
+		return direct, true, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", false, err
+	}
+	entries, err := os.ReadDir(candidate)
+	if err != nil {
+		return "", false, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		nested := filepath.Join(candidate, entry.Name(), "SKILL.md")
+		if stat, err := os.Stat(nested); err == nil && !stat.IsDir() {
+			return nested, true, nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", false, err
+		}
+	}
+	return "", false, nil
+}
+
+func formatSkillPrompt(name, content, remainder string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "请按照 Skill `%s` 执行本轮请求。\n\n<skill name=\"%s\">\n%s\n</skill>", name, name, content)
+	if remainder != "" {
+		b.WriteString("\n\n")
+		b.WriteString(remainder)
+	}
+	return b.String()
 }
 
 func (s *Server) handleSkillsDelete(w http.ResponseWriter, r *http.Request) {

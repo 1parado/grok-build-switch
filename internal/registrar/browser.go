@@ -42,8 +42,8 @@ type browserSession struct {
 	createEmailCodeStatus   int64
 	createEmailCodeSeen     bool
 	createEmailCodeBodyHint string
-	verifyEmailCodeSeen bool
-	blockedAPI          string
+	verifyEmailCodeSeen     bool
+	blockedAPI              string
 }
 
 func registerAccount(ctx context.Context, config Config, mailbox Mailbox, authDir string, log func(string)) (registrationOutcome, error) {
@@ -71,40 +71,56 @@ func isCreateEmailBlocked(err error) bool {
 func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox, authDir string, headless bool, log func(string)) (registrationOutcome, error) {
 	session, err := startBrowser(parent, config, headless)
 	if err != nil {
-		return registrationOutcome{}, err
+		return registrationOutcome{}, wrapStage(stageBrowserStart, err)
 	}
 	defer session.Close()
 	ctx, cancel := context.WithTimeout(session.ctx, time.Duration(config.PageTimeoutSeconds)*time.Second)
 	defer cancel()
 
-	log(firstNonEmpty(map[bool]string{true: "启动无窗口浏览器", false: "启动可见浏览器"}[headless]))
+	mode := "可见浏览器"
+	if headless {
+		mode = "无窗口浏览器"
+	}
+	logStage(log, stageBrowserStart, mode+"已就绪")
 	if config.ProxyURL != "" {
-		log("浏览器代理: " + chromiumProxyServer(config.ProxyURL))
+		logStage(log, stageBrowserStart, "代理 "+chromiumProxyServer(config.ProxyURL))
+	} else {
+		logStage(log, stageBrowserStart, "未配置浏览器代理（直连）")
 	}
 
+	logStage(log, stageOpenSignup, "正在打开 "+signupURL)
 	if err := chromedp.Run(ctx, chromedp.Navigate(signupURL), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
-		return registrationOutcome{}, fmt.Errorf("打开注册页: %w", err)
+		return registrationOutcome{}, wrapStage(stageOpenSignup, err)
 	}
-	if err := waitForChallengeClear(ctx, session, 45*time.Second, log); err != nil {
+	// Managed Challenge / Turnstile: actively probe with trusted CDP clicks + human motion.
+	if err := waitForChallengeClear(ctx, session, 90*time.Second, log); err != nil {
 		return registrationOutcome{}, err
 	}
 	if err := assertSignupPageOK(ctx, session); err != nil {
-		return registrationOutcome{}, err
+		snap := capturePageSnapshot(ctx, session)
+		return registrationOutcome{}, wrapStage(stageCFChallenge, errWithDetail(err, snap.Summary()))
 	}
+	logCF(log, "注册页可操作", capturePageSnapshot(ctx, session))
 	time.Sleep(2 * time.Second)
 
+	logStage(log, stageEmailSignup, "点击「使用邮箱注册」")
 	if err := clickEmailSignup(ctx, 25*time.Second); err != nil {
 		if pageErr := assertSignupPageOK(ctx, session); pageErr != nil {
-			return registrationOutcome{}, pageErr
+			snap := capturePageSnapshot(ctx, session)
+			return registrationOutcome{}, wrapStage(stageEmailSignup, errWithDetail(pageErr, snap.Summary()))
 		}
-		return registrationOutcome{}, fmt.Errorf("点击邮箱注册: %w", err)
+		return registrationOutcome{}, regErr(stageEmailSignup, "email_button_missing",
+			"未找到邮箱注册按钮或邮箱输入框未出现",
+			"页面可能仍被 Cloudflare 拦截，或 xAI 改版了按钮文案",
+			capturePageSnapshot(ctx, session).Summary())
 	}
 	time.Sleep(800 * time.Millisecond)
 
+	logStage(log, stageEmailSubmit, "填写并提交邮箱 "+mailbox.Address())
 	if err := submitEmailWithRetries(ctx, session, mailbox.Address(), log); err != nil {
-		return registrationOutcome{}, err
+		return registrationOutcome{}, wrapStage(stageEmailSubmit, enrichEmailSubmitError(ctx, session, err))
 	}
-	log("邮箱已提交，等待验证码")
+	logStage(log, stageMailWait, "邮箱已提交，开始等待邮件验证码")
 
 	code, err := waitMailboxCodeWithResend(
 		ctx,
@@ -113,9 +129,9 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 		emailResendInterval,
 		func(message string) {
 			if log != nil {
-				log(message)
+				logStage(log, stageMailWait, message)
 				if apiErr := session.createEmailError(); apiErr != nil {
-					log(apiErr.Error())
+					logStage(log, stageEmailSubmit, apiErr.Error())
 				}
 			}
 		},
@@ -134,56 +150,131 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 	)
 	if err != nil {
 		if apiErr := session.createEmailError(); apiErr != nil {
-			return registrationOutcome{}, apiErr
+			return registrationOutcome{}, wrapStage(stageEmailSubmit, enrichEmailSubmitError(ctx, session, apiErr))
 		}
 		if pageErr := assertSignupPageOK(ctx, session); pageErr != nil {
-			return registrationOutcome{}, fmt.Errorf("%w；同时注册页异常: %v", err, pageErr)
+			snap := capturePageSnapshot(ctx, session)
+			return registrationOutcome{}, regErr(stageMailWait, "mail_timeout_page_bad",
+				err.Error()+"；同时注册页异常: "+pageErr.Error(),
+				"邮件未到且页面异常，优先处理 Cloudflare/代理问题",
+				snap.Summary())
 		}
-		return registrationOutcome{}, err
+		return registrationOutcome{}, regErr(stageMailWait, "mail_timeout", err.Error(),
+			"确认临时邮箱服务正常，且 CreateEmailValidationCode 曾返回 200",
+			capturePageSnapshot(ctx, session).Summary())
 	}
+	logStage(log, stageCodeSubmit, "已获取验证码，正在提交")
 	if err := fillAndSubmitCode(ctx, code); err != nil {
-		return registrationOutcome{}, fmt.Errorf("提交验证码: %w", err)
+		return registrationOutcome{}, regErr(stageCodeSubmit, "code_submit_failed", err.Error(),
+			"验证码可能已过期或页面未进入验证码输入步骤",
+			capturePageSnapshot(ctx, session).Summary())
 	}
 	_ = waitVerifyEmailResult(ctx, session, 10*time.Second)
-	log("验证码已提交")
+	logStage(log, stageCodeSubmit, "验证码已提交")
 
 	// Some flows already have SSO after email verify (no profile step).
 	if earlySSO, ssoErr := waitForSSOCookie(ctx, 10*time.Second); ssoErr == nil && earlySSO != "" {
+		logStage(log, stageSSO, "邮箱验证后已拿到 SSO，跳过资料页")
 		return finalizeRegistration(ctx, session, config, mailbox, earlySSO, "", authDir, log)
 	}
 
 	given, family, password, err := randomProfile()
 	if err != nil {
-		return registrationOutcome{}, err
+		return registrationOutcome{}, wrapStage(stageProfile, err)
 	}
+	logStage(log, stageProfile, "填写注册资料并处理 Turnstile")
 	if err := fillProfileAndSubmit(ctx, given, family, password); err != nil {
-		return registrationOutcome{}, err
+		return registrationOutcome{}, wrapStage(stageProfile, enrichProfileError(ctx, session, err))
 	}
-	log("注册资料已提交")
+	logStage(log, stageProfile, "注册资料已提交，等待 SSO")
 
 	sso, err := waitForSSOCookie(ctx, 120*time.Second)
 	if err != nil {
+		snap := capturePageSnapshot(ctx, session)
+		hint := "资料页可能仍卡在 Turnstile，或注册未真正完成"
 		if headless {
-			return registrationOutcome{}, &browserChallengeError{message: err.Error()}
+			hint = "无窗口模式更容易失败，建议改用可见浏览器后重试"
 		}
-		return registrationOutcome{}, err
+		return registrationOutcome{}, regErr(stageSSO, "sso_timeout", err.Error(), hint, snap.Summary())
 	}
 	return finalizeRegistration(ctx, session, config, mailbox, sso, password, authDir, log)
+}
+
+func errWithDetail(err error, detail string) error {
+	if err == nil {
+		return nil
+	}
+	if re, ok := err.(*registrationError); ok {
+		if re.Detail == "" {
+			re.Detail = detail
+		}
+		return re
+	}
+	if be, ok := err.(*browserChallengeError); ok {
+		return &browserChallengeError{message: be.message + " | " + detail}
+	}
+	return fmt.Errorf("%w | %s", err, detail)
+}
+
+func enrichEmailSubmitError(ctx context.Context, session *browserSession, err error) error {
+	if err == nil {
+		return nil
+	}
+	snap := capturePageSnapshot(ctx, session)
+	if re, ok := err.(*registrationError); ok {
+		return re.withDetail(snap.Summary())
+	}
+	if be, ok := err.(*browserChallengeError); ok {
+		wrapped := classifyBrowserChallenge(stageEmailSubmit, be)
+		if re, ok := wrapped.(*registrationError); ok {
+			return re.withDetail(snap.Summary())
+		}
+		return errWithDetail(wrapped, snap.Summary())
+	}
+	msg := err.Error()
+	low := strings.ToLower(msg)
+	code := "email_submit_failed"
+	hint := "检查代理与 Cloudflare 是否已通过；必要时在可见窗口手动勾选后重试"
+	if strings.Contains(low, "createemailvalidationcode") || strings.Contains(msg, "验证码接口") {
+		code = "email_api_blocked"
+		hint = "接口被拦通常表示 Turnstile/环境信誉不足；换代理或等待自动通过后再提交邮箱"
+	} else if strings.Contains(msg, "未观察到") {
+		code = "email_rpc_missing"
+		hint = "页面可能未真正提交，或请求被静默拦截"
+	}
+	return regErr(stageEmailSubmit, code, msg, hint, snap.Summary())
+}
+
+func enrichProfileError(ctx context.Context, session *browserSession, err error) error {
+	if err == nil {
+		return nil
+	}
+	snap := capturePageSnapshot(ctx, session)
+	if re, ok := err.(*registrationError); ok {
+		return re.withDetail(snap.Summary())
+	}
+	return regErr(stageProfile, "profile_or_turnstile", err.Error(),
+		"确认资料页 Turnstile 控件存在且自动交互日志中出现「通过」",
+		snap.Summary())
 }
 
 // finalizeRegistration mints CPA tokens from the SSO cookie and writes the auth
 // file. Shared by the skip-profile path (SSO already present after verify) and
 // the normal path (SSO obtained after profile submission).
 func finalizeRegistration(ctx context.Context, session *browserSession, config Config, mailbox Mailbox, sso, password, authDir string, log func(string)) (registrationOutcome, error) {
-	log("已获取 SSO，开始 CPA 铸造")
+	logStage(log, stageSSO, "已获取 SSO")
+	logStage(log, stageMint, "开始 CPA 铸造")
 	tokens, method, err := mintFromSSO(ctx, session, sso, config.ProxyURL, config.PreferProtocolMint, config.ProtocolOnly, log)
 	if err != nil {
-		return registrationOutcome{}, err
+		return registrationOutcome{}, regErr(stageMint, "mint_failed", err.Error(),
+			"协议铸造失败时可关闭「协议失败不回退」以走浏览器授权", "")
 	}
 	authPath, err := writeCPAAuth(authDir, mailbox.Address(), tokens)
 	if err != nil {
-		return registrationOutcome{}, err
+		return registrationOutcome{}, regErr(stageMint, "write_cpa_failed", err.Error(),
+			"检查 CPA 认证目录是否可写", authDir)
 	}
+	logStage(log, stageMint, "铸造成功 method="+method+" file="+authPath)
 	return registrationOutcome{
 		Email: mailbox.Address(), Password: password, SSO: sso,
 		MintMethod: method, AuthFile: authPath,
@@ -257,9 +348,12 @@ func submitEmailWithRetries(ctx context.Context, session *browserSession, email 
 			lastErr = err
 			if attempt < 3 {
 				if isCreateEmailBlocked(err) {
-					log(fmt.Sprintf("CreateEmailValidationCode 第 %d 次被拦截，等待后重试", attempt))
+					logStage(log, stageEmailSubmit, fmt.Sprintf(
+						"CreateEmailValidationCode 第 %d 次被拦截: %s", attempt, err.Error()))
+					logCF(log, "提交邮箱被拦后的页面", capturePageSnapshot(ctx, session))
 				} else {
-					log(fmt.Sprintf("第 %d 次邮箱提交未生效，重新填写并提交", attempt))
+					logStage(log, stageEmailSubmit, fmt.Sprintf(
+						"第 %d 次邮箱提交未生效: %s", attempt, err.Error()))
 				}
 				// Give Turnstile / CF cookies a chance to settle, then resubmit.
 				_ = waitForChallengeClear(ctx, session, 20*time.Second, log)
@@ -310,8 +404,7 @@ func startBrowser(parent context.Context, config Config, headless bool) (*browse
 	}
 
 	// Launch Chrome ourselves so chromedp does not inject --enable-automation.
-	// Flags match the working Python registrar (CHROMIUM_SLIM_FLAGS in grok_register_ttk.py),
-	// including --disable-gpu — that path registers successfully; keep parity.
+	// Launch flags match the previously working registrar path.
 	args := []string{
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 		"--remote-debugging-address=127.0.0.1",
@@ -531,10 +624,11 @@ func (s *browserSession) createEmailError() error {
 	if s.createEmailCodeStatus == 0 || s.createEmailCodeStatus == 200 {
 		return nil
 	}
-	return &browserChallengeError{message: fmt.Sprintf(
-		"验证码接口 CreateEmailValidationCode 返回 HTTP %d（被 Cloudflare/xAI 拦截，邮件不会发出）。请使用可见浏览器，确认代理节点可正常访问 accounts.x.ai，并在页面上完成 Turnstile 后重试",
-		s.createEmailCodeStatus,
-	)}
+	return regErr(stageEmailSubmit, "email_api_http_"+fmt.Sprint(s.createEmailCodeStatus),
+		fmt.Sprintf("验证码接口 CreateEmailValidationCode 返回 HTTP %d，邮件不会发出", s.createEmailCodeStatus),
+		"通常为 Cloudflare/Turnstile 未通过或 IP 被标记；查看 [CF] 日志中的状态与 token 长度",
+		fmt.Sprintf("blocked_api=%s", firstNonEmpty(s.blockedAPI, "CreateEmailValidationCode")),
+	)
 }
 
 func waitVerifyEmailResult(ctx context.Context, session *browserSession, timeout time.Duration) error {
@@ -566,10 +660,10 @@ func waitCreateEmailResult(ctx context.Context, session *browserSession, timeout
 			if status == 200 || status == 0 {
 				return nil
 			}
-			return &browserChallengeError{message: fmt.Sprintf(
-				"验证码接口 CreateEmailValidationCode 返回 HTTP %d（邮件不会发送）",
-				status,
-			)}
+			return regErr(stageEmailSubmit, "email_api_http_"+fmt.Sprint(status),
+				fmt.Sprintf("验证码接口 CreateEmailValidationCode 返回 HTTP %d（邮件不会发送）", status),
+				"先解决人机验证/代理信誉，再重新提交邮箱",
+				"")
 		}
 		// If UI already advanced to code input, treat as success even if we missed the RPC.
 		var advanced bool
@@ -588,7 +682,10 @@ return code || text.includes('verification code') || text.includes('验证码') 
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("提交邮箱后未观察到 CreateEmailValidationCode 请求，页面也未进入验证码步骤")
+	return regErr(stageEmailSubmit, "email_rpc_missing",
+		"提交邮箱后未观察到 CreateEmailValidationCode 请求，页面也未进入验证码步骤",
+		"可能提交按钮未生效，或请求在浏览器层被拦截",
+		"")
 }
 
 func waitForChallengeClear(ctx context.Context, session *browserSession, timeout time.Duration, log func(string)) error {
@@ -611,14 +708,14 @@ return email?'ready':'wait';
 			return assertSignupPageOK(ctx, session)
 		case "challenge":
 			if !logged && log != nil {
-				log("等待 Cloudflare 人机验证通过（请在可见窗口中完成勾选）")
+				logStage(log, stageCFChallenge, "等待 Cloudflare 人机验证通过（请在可见窗口中完成勾选）")
 				logged = true
 			}
 		}
 		if err := assertSignupPageOK(ctx, session); err != nil && !strings.Contains(err.Error(), "Just a moment") {
 			// keep waiting on soft challenge states
 			if state != "challenge" && state != "wait" {
-				return err
+				return wrapStage(stageCFChallenge, err)
 			}
 		}
 		select {
@@ -628,12 +725,12 @@ return email?'ready':'wait';
 		}
 	}
 	if err := assertSignupPageOK(ctx, session); err != nil {
-		return err
 	}
 	return nil
 }
 
 func assertSignupPageOK(ctx context.Context, session *browserSession) error {
+	snap := capturePageSnapshot(ctx, session)
 	var title, href, bodyText string
 	_ = chromedp.Run(ctx,
 		chromedp.Location(&href),
@@ -646,13 +743,17 @@ func assertSignupPageOK(ctx context.Context, session *browserSession) error {
 	session.mu.Unlock()
 	if status == 403 || strings.Contains(combined, "403 forbidden") || strings.Contains(combined, "access denied") ||
 		strings.Contains(combined, "sorry, you have been blocked") || strings.Contains(combined, "attention required") {
-		return &browserChallengeError{message: fmt.Sprintf(
-			"注册页被拦截 HTTP=%d title=%q url=%s",
-			status, title, href,
-		)}
+		return regErr(stageCFChallenge, "cf_blocked",
+			fmt.Sprintf("注册页被拦截 HTTP=%d title=%q", status, title),
+			"IP 或环境被硬拦截，请更换代理后再试",
+			snap.Summary())
 	}
-	if strings.Contains(combined, "just a moment") || strings.Contains(combined, "checking your browser") {
-		return &browserChallengeError{message: "注册页卡在 Cloudflare 人机验证（Just a moment）"}
+	if strings.Contains(combined, "just a moment") || strings.Contains(combined, "checking your browser") ||
+		strings.Contains(combined, "verify you are human") {
+		return regErr(stageCFChallenge, "cf_stuck",
+			"注册页卡在 Cloudflare 人机验证（Just a moment / Verify you are human）",
+			"等待自动交互日志；可见模式下可手动勾选；仍失败则换代理",
+			snap.Summary())
 	}
 	return nil
 }

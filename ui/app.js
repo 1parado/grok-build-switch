@@ -51,6 +51,16 @@ let mermaidReady = false;
 let mermaidRenderID = 0;
 let chatLayoutResizeTimer = null;
 let lastAssistantMessageEl = null;
+let composerConfigLoaded = false;
+let composerConfigPromise = null;
+let composerModelOverride = "";
+let composerStrengthOverride = "";
+let composerConfig = {
+  models: [],
+  defaultModel: "",
+  defaultStrength: "",
+  reasoningEfforts: {},
+};
 const chatNodes = []; // ordered list of { id, article, el } for navigation jumps
 
 const HISTORY_PAGE_SIZE = 60; // messages rendered per incremental window
@@ -491,6 +501,7 @@ async function refreshAll() {
   state.grokPool = grokPool;
   state.registrar = registrar;
   state.lanAccess = lanAccess;
+  composerConfigLoaded = false;
   // Coerce to strict boolean for UI.
   if (state.status && typeof state.status.config_matches_active !== "boolean") {
     state.status.config_matches_active = true;
@@ -543,90 +554,186 @@ async function checkForUpdates() {
   }
 }
 
+const SKILL_SOURCE_META = {
+  "agents/skills": { label: "Agent Skills", path: "~/.agents/skills", tone: "agents", short: "Agent" },
+  "grok/skills": { label: "用户 Skills", path: "~/.grok/skills", tone: "user", short: "用户" },
+  "grok/bundled": { label: "内置 Skills", path: "~/.grok/bundled/skills", tone: "bundled", short: "内置" },
+  agents: { label: "Agent Skills", path: "~/.agents", tone: "agents", short: "Agent" },
+  "grok/.skills": { label: "用户 Skills", path: "~/.grok/.skills", tone: "user", short: "用户" },
+  "grok/agents": { label: "Grok Agents", path: "~/.grok/agents", tone: "user", short: "Agents" },
+};
+
+let skillsCache = [];
+let skillsSearchQuery = "";
+const skillsGroupExpanded = new Set();
+
+function skillSourceMeta(source) {
+  return SKILL_SOURCE_META[source] || {
+    label: source || "其他",
+    path: source || "",
+    tone: "other",
+    short: source || "其他",
+  };
+}
+
+function skillMatchesQuery(sk, query) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return [sk.name, sk.path, sk.source]
+    .filter(Boolean)
+    .some((part) => String(part).toLowerCase().includes(q));
+}
+
+function updateSkillsCount(total, shown) {
+  const el = $("skillsCount");
+  if (!el) return;
+  if (!total) {
+    el.textContent = "0 个";
+    return;
+  }
+  el.textContent = shown === total ? `${total} 个` : `${shown} / ${total} 个`;
+}
+
+function renderSkillsList() {
+  const list = $("skillsList");
+  const empty = $("skillsEmpty");
+  const searchEmpty = $("skillsSearchEmpty");
+  if (!list) return;
+
+  const query = skillsSearchQuery.trim();
+  const filtered = skillsCache.filter((sk) => skillMatchesQuery(sk, query));
+  updateSkillsCount(skillsCache.length, filtered.length);
+
+  if (empty) empty.hidden = skillsCache.length > 0;
+  if (searchEmpty) searchEmpty.hidden = !(skillsCache.length > 0 && filtered.length === 0);
+
+  if (!filtered.length) {
+    list.innerHTML = "";
+    return;
+  }
+
+  const groups = {};
+  const order = [];
+  for (const sk of filtered) {
+    const src = sk.source || "other";
+    if (!groups[src]) {
+      groups[src] = [];
+      order.push(src);
+    }
+    groups[src].push(sk);
+  }
+
+  let html = "";
+  for (const [groupIndex, source] of order.entries()) {
+    const items = groups[source];
+    const meta = skillSourceMeta(source);
+    const expanded = skillsGroupExpanded.has(source);
+    const groupID = `skills-group-${groupIndex}`;
+    html += `<section class="skillsGroup" data-tone="${escapeHtml(meta.tone)}">
+      <button type="button" class="skillsGroupHead" data-source="${escapeHtml(source)}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${groupID}">
+        <span class="skillsGroupHeadLeft">
+          <span class="skillsGroupDisclosure" aria-hidden="true"></span>
+          <span class="skillsGroupHeadCopy">
+            <span class="skillsGroupTitle">${escapeHtml(meta.label)}</span>
+            <span class="skillsGroupPath">${escapeHtml(meta.path)}</span>
+          </span>
+        </span>
+        <span class="skillsGroupCount">${items.length}</span>
+      </button>
+      <div id="${groupID}" class="skillsItems"${expanded ? "" : " hidden"}>`;
+    for (const sk of items) {
+      const isBundled = sk.source === "grok/bundled";
+      const kind = sk.is_dir ? "dir" : "file";
+      html += `<div class="skillItem" data-kind="${kind}">
+        <span class="skillIcon" aria-hidden="true"><img class="skillIconSvg" src="/skill.svg" alt=""></span>
+        <div class="skillInfo">
+          <div class="skillNameRow">
+            <strong class="skillName">${escapeHtml(sk.name)}</strong>
+            <span class="skillKindBadge">${sk.is_dir ? "目录" : "文件"}</span>
+          </div>
+          <span class="skillPath" title="${escapeHtml(sk.path)}">${escapeHtml(sk.path)}</span>
+        </div>
+        <div class="skillActions">
+          <button type="button" class="btn sm ghost copySkillPathBtn" data-path="${escapeHtml(sk.path)}" title="复制路径">复制</button>
+          ${isBundled
+            ? `<span class="skillReadonlyBadge" title="内置技能不可删除">只读</span>`
+            : `<button type="button" class="btn sm danger deleteSkillBtn" data-path="${escapeHtml(sk.path)}" data-name="${escapeHtml(sk.name)}" title="删除">删除</button>`}
+        </div>
+      </div>`;
+    }
+    html += `</div></section>`;
+  }
+
+  list.innerHTML = html;
+  list.querySelectorAll(".skillsGroupHead").forEach((button) => {
+    button.onclick = () => {
+      const source = button.dataset.source || "";
+      const panel = document.getElementById(button.getAttribute("aria-controls"));
+      if (!panel) return;
+      const expanded = button.getAttribute("aria-expanded") === "true";
+      button.setAttribute("aria-expanded", expanded ? "false" : "true");
+      panel.hidden = expanded;
+      if (expanded) skillsGroupExpanded.delete(source);
+      else skillsGroupExpanded.add(source);
+    };
+  });
+  list.querySelectorAll(".copySkillPathBtn").forEach((btn) => {
+    btn.onclick = () => {
+      navigator.clipboard.writeText(btn.dataset.path).then(() => {
+        toast("路径已复制", "success");
+      }).catch(() => {
+        toast("复制失败", "error");
+      });
+    };
+  });
+  list.querySelectorAll(".deleteSkillBtn").forEach((btn) => {
+    btn.onclick = async () => {
+      const name = btn.dataset.name;
+      const path = btn.dataset.path;
+      if (!confirm(`确定要删除 "${name}" 吗？\n\n路径: ${path}\n\n此操作不可恢复。`)) {
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "删除中…";
+      try {
+        await api("/api/skills/delete", {
+          method: "POST",
+          body: JSON.stringify({ path }),
+        });
+        toast(`已删除: ${name}`, "success");
+        await loadSkills();
+        await loadSkillsForPopup();
+      } catch (err) {
+        toast(err.message || "删除失败", "error");
+        btn.disabled = false;
+        btn.textContent = "删除";
+      }
+    };
+  });
+}
+
 async function loadSkills() {
   const loading = $("skillsLoading");
   const list = $("skillsList");
   const empty = $("skillsEmpty");
+  const searchEmpty = $("skillsSearchEmpty");
   if (!list) return;
   try {
     if (loading) loading.hidden = false;
-    if (list) list.innerHTML = "";
+    list.innerHTML = "";
     if (empty) empty.hidden = true;
+    if (searchEmpty) searchEmpty.hidden = true;
     const skills = await api("/api/skills");
+    skillsCache = Array.isArray(skills) ? skills : [];
     if (loading) loading.hidden = true;
-    if (!skills || skills.length === 0) {
-      if (empty) empty.hidden = false;
-      return;
-    }
-    const groups = {};
-    for (const sk of skills) {
-      const src = sk.source || "other";
-      if (!groups[src]) groups[src] = [];
-      groups[src].push(sk);
-    }
-    const sourceLabels = {
-      "agents": "~/.agents",
-      "grok/skills": "~/.grok/skills",
-      "grok/.skills": "~/.grok/.skills",
-      "grok/agents": "~/.grok/agents",
-    };
-    let html = "";
-    for (const [source, items] of Object.entries(groups)) {
-      const label = sourceLabels[source] || source;
-      html += `<section class="skillsGroup"><h3 class="skillsGroupTitle">${escapeHtml(label)}</h3>`;
-      html += `<div class="skillsItems">`;
-      for (const sk of items) {
-        const icon = sk.is_dir ? "📁" : "📄";
-        html += `<div class="skillItem">
-          <span class="skillIcon">${icon}</span>
-          <div class="skillInfo">
-            <strong class="skillName">${escapeHtml(sk.name)}</strong>
-            <span class="skillPath">${escapeHtml(sk.path)}</span>
-          </div>
-          <div class="skillActions">
-            <button type="button" class="btn sm ghost copySkillPathBtn" data-path="${escapeHtml(sk.path)}" title="复制路径">复制</button>
-            ${sk.source !== "grok/bundled" ? `<button type="button" class="btn sm danger deleteSkillBtn" data-path="${escapeHtml(sk.path)}" data-name="${escapeHtml(sk.name)}" title="删除">删除</button>` : ""}
-          </div>
-        </div>`;
-      }
-      html += `</div></section>`;
-    }
-    list.innerHTML = html;
-    list.querySelectorAll(".copySkillPathBtn").forEach((btn) => {
-      btn.onclick = () => {
-        navigator.clipboard.writeText(btn.dataset.path).then(() => {
-          toast("路径已复制", "success");
-        }).catch(() => {
-          toast("复制失败", "error");
-        });
-      };
-    });
-    list.querySelectorAll(".deleteSkillBtn").forEach((btn) => {
-      btn.onclick = async () => {
-        const name = btn.dataset.name;
-        const path = btn.dataset.path;
-        if (!confirm(`确定要删除 "${name}" 吗？\n\n路径: ${path}\n\n此操作不可恢复。`)) {
-          return;
-        }
-        btn.disabled = true;
-        btn.textContent = "删除中…";
-        try {
-          await api("/api/skills/delete", {
-            method: "POST",
-            body: JSON.stringify({ path }),
-          });
-          toast(`已删除: ${name}`, "success");
-          await loadSkills();
-        } catch (err) {
-          toast(err.message || "删除失败", "error");
-          btn.disabled = false;
-          btn.textContent = "删除";
-        }
-      };
-    });
+    renderSkillsList();
   } catch (err) {
     if (loading) loading.hidden = true;
-    if (list) list.innerHTML = `<div class="alert warn"><strong>加载失败</strong><span>${escapeHtml(err.message || String(err))}</span></div>`;
+    skillsCache = [];
+    updateSkillsCount(0, 0);
+    if (empty) empty.hidden = true;
+    if (searchEmpty) searchEmpty.hidden = true;
+    list.innerHTML = `<div class="alert warn"><strong>加载失败</strong><span>${escapeHtml(err.message || String(err))}</span></div>`;
   }
 }
 
@@ -3334,6 +3441,63 @@ function updateRegistrarProviderFields() {
   }
 }
 
+function escapeRegistrarHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Parse the latest [CF] log line into a short status strip for the UI. */
+function extractRegistrarChallengeStatus(lines) {
+  if (!Array.isArray(lines) || !lines.length) return "";
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = String(lines[i] || "");
+    const idx = line.indexOf("[CF]");
+    if (idx < 0) continue;
+    return line.slice(idx).trim();
+  }
+  // Fall back to stage markers when CF not yet hit.
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = String(lines[i] || "");
+    if (line.includes("[Cloudflare 人机验证]") || line.includes("[资料页 Turnstile]") || line.includes("[提交邮箱]")) {
+      const m = line.match(/\[([^\]]+)\]\s*(.*)$/);
+      if (m) return `${m[1]}：${m[2]}`.trim();
+    }
+  }
+  return "";
+}
+
+function renderRegistrarResults(job) {
+  const el = $("registrarResults");
+  if (!el) return;
+  const results = job?.results || [];
+  if (!results.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = results.map((r) => {
+    const ok = r.status === "success";
+    const email = escapeRegistrarHtml(r.email || "（未分配邮箱）");
+    const status = ok ? "成功" : "失败";
+    const mint = r.mint_method ? `<span class="registrarResultMint">铸造 ${escapeRegistrarHtml(r.mint_method)}</span>` : "";
+    const err = r.error
+      ? `<div class="registrarResultError">${escapeRegistrarHtml(r.error)}</div>`
+      : "";
+    return `<div class="registrarResult ${ok ? "ok" : "fail"}">
+      <div class="registrarResultHead">
+        <span class="registrarResultEmail mono">${email}</span>
+        <span class="registrarResultStatus">${status}</span>
+        ${mint}
+      </div>
+      ${err}
+    </div>`;
+  }).join("");
+}
+
 function renderRegistrarJob(job) {
   clearTimeout(registrarPollTimer);
   const active = job && (job.status === "starting" || job.status === "running");
@@ -3355,20 +3519,53 @@ function renderRegistrarJob(job) {
       if (job.imported || job.updated) detail.push(`导入 ${job.imported || 0}，更新 ${job.updated || 0}`);
       if (job.error) detail.push(job.error);
       $("registrarProgressDetail").textContent = detail.join(" · ");
+      $("registrarProgressDetail").title = job.error || detail.join(" · ");
     }
     if ($("registrarProgressBar")) {
       $("registrarProgressBar").max = Math.max(total, 1);
       $("registrarProgressBar").value = Math.min(completed, total);
     }
+    const lines = job.log_tail || [];
     if ($("registrarLog")) {
-      const lines = job.log_tail || [];
       $("registrarLog").textContent = lines.length ? lines.join("\n") : "等待日志…";
       $("registrarLog").scrollTop = $("registrarLog").scrollHeight;
     }
+    const challenge = $("registrarChallengeStatus");
+    if (challenge) {
+      const statusLine = extractRegistrarChallengeStatus(lines);
+      if (statusLine) {
+        challenge.hidden = false;
+        challenge.textContent = statusLine;
+        const failed = /未通过|硬拦截|超时|失败|blocked|stuck|token_missing|no_widget/i.test(statusLine);
+        const passed = /通过|可操作|token_already|clearance_cookie|page_ready/i.test(statusLine) && !failed;
+        challenge.classList.toggle("is-fail", failed);
+        challenge.classList.toggle("is-ok", passed && !failed);
+      } else {
+        challenge.hidden = true;
+        challenge.textContent = "";
+        challenge.classList.remove("is-fail", "is-ok");
+      }
+    }
+    renderRegistrarResults(job);
     if (!active && job.id && registrarTerminalNotice !== job.id) {
       registrarTerminalNotice = job.id;
-      if (job.status === "succeeded") toast("注册任务已完成，账号已进入号池", "success");
-      if (job.status === "failed") toast(job.error || "注册任务失败", "error");
+      if (job.status === "succeeded") {
+        const partial = job.failed > 0
+          ? `注册部分完成：成功 ${job.succeeded || 0}，失败 ${job.failed || 0}`
+          : "注册任务已完成，账号已进入号池";
+        toast(partial, job.failed > 0 ? "warn" : "success");
+      }
+      if (job.status === "failed") {
+        const msg = job.error || "注册任务失败";
+        toast(msg.length > 180 ? `${msg.slice(0, 180)}…` : msg, "error");
+      }
+      if (job.status === "cancelled") toast(job.error || "注册任务已停止", "warn");
+    }
+  } else {
+    renderRegistrarResults(null);
+    if ($("registrarChallengeStatus")) {
+      $("registrarChallengeStatus").hidden = true;
+      $("registrarChallengeStatus").textContent = "";
     }
   }
   if (active && job.id) {
@@ -4331,47 +4528,54 @@ $("chatInput").oninput = () => {
   showSkillsPopup();
 };
 $("chatInput").onkeydown = (event) => {
+  const popup = $("skillsPopup");
+  const popupOpen = popup && !popup.hidden;
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    if (!$("skillsPopup").hidden) {
-      selectSkillsPopupItem(skillsPopupIdx >= 0 ? skillsPopupIdx : 0);
+    if (popupOpen) {
+      if (skillsPopupVisible.length > 0) {
+        selectSkillsPopupItem(skillsPopupIdx >= 0 ? skillsPopupIdx : 0);
+      }
       return;
     }
     $("chatComposer").requestSubmit();
-  }
-  if (event.key === "Escape") {
-    hideSkillsPopup();
     return;
   }
-  if (event.key === "ArrowDown" || event.key === "Tab") {
-    const popup = $("skillsPopup");
-    if (!popup.hidden) {
+  if (event.key === "Escape") {
+    if (popupOpen) {
       event.preventDefault();
-      const items = popup.querySelectorAll(".skillsPopupItem");
-      if (items.length === 0) return;
-      const next = skillsPopupIdx < 0 ? 0 : (skillsPopupIdx + 1) % items.length;
-      items.forEach((el, i) => {
-        el.toggleAttribute("data-selected", i === next);
-        el.style.background = i === next ? "var(--primary-soft)" : "";
-      });
-      skillsPopupIdx = next;
+      hideSkillsPopup();
     }
+    return;
   }
-  if (event.key === "ArrowUp") {
-    const popup = $("skillsPopup");
-    if (!popup.hidden) {
-      event.preventDefault();
-      const items = popup.querySelectorAll(".skillsPopupItem");
-      if (items.length === 0) return;
-      const prev = skillsPopupIdx <= 0 ? items.length - 1 : skillsPopupIdx - 1;
-      items.forEach((el, i) => {
-        el.toggleAttribute("data-selected", i === prev);
-        el.style.background = i === prev ? "var(--primary-soft)" : "";
-      });
-      skillsPopupIdx = prev;
-    }
+  if ((event.key === "ArrowDown" || event.key === "Tab") && popupOpen) {
+    if (skillsPopupVisible.length === 0) return;
+    event.preventDefault();
+    const next = skillsPopupIdx < 0 ? 0 : (skillsPopupIdx + 1) % skillsPopupVisible.length;
+    skillsPopupIdx = next;
+    highlightSkillsPopupItems();
+    return;
+  }
+  if (event.key === "ArrowUp" && popupOpen) {
+    if (skillsPopupVisible.length === 0) return;
+    event.preventDefault();
+    const prev = skillsPopupIdx <= 0 ? skillsPopupVisible.length - 1 : skillsPopupIdx - 1;
+    skillsPopupIdx = prev;
+    highlightSkillsPopupItems();
   }
 };
+if ($("skillsSearch")) {
+  $("skillsSearch").oninput = () => {
+    skillsSearchQuery = $("skillsSearch").value || "";
+    renderSkillsList();
+  };
+}
+if ($("refreshSkillsBtn")) {
+  $("refreshSkillsBtn").onclick = () => run(async () => {
+    await loadSkills();
+    await loadSkillsForPopup();
+  }, { button: $("refreshSkillsBtn"), busyLabel: "刷新中…", success: "已刷新 Skills" });
+}
 $("reloadConfigBtn").onclick = () => run(async () => {
   await loadConfigEditor();
 }, { button: $("reloadConfigBtn"), busyLabel: "加载中…", success: "已重新加载" });
@@ -5050,116 +5254,248 @@ refreshAll()
 
 /* Skills popup state */
 let skillsPopupSkills = [];
+let skillsPopupVisible = [];
 let skillsPopupIdx = -1;
+let skillsPopupLoading = false;
+
+function skillsPopupFilterQuery() {
+  const input = $("chatInput");
+  if (!input) return null;
+  const text = input.value;
+  const cursorPos = input.selectionStart ?? text.length;
+  const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
+  const currentLine = text.slice(lineStart, cursorPos);
+  const match = currentLine.match(/^\/skills(?:\s+(.*))?$/i);
+  if (!match) return null;
+  const query = String(match[1] || "").trimStart();
+  if (!query) return "";
+  const nameEnd = query.search(/\s/);
+  const skillName = nameEnd >= 0 ? query.slice(0, nameEnd) : query;
+  const selected = nameEnd >= 0 && skillsPopupSkills.some((sk) => String(sk.name || "").toLowerCase() === skillName.toLowerCase());
+  if (selected) return null;
+  return skillName.toLowerCase();
+}
+
+function highlightSkillsPopupItems() {
+  const list = $("skillsPopupList");
+  if (!list) return;
+  list.querySelectorAll(".skillsPopupItem").forEach((el, i) => {
+    el.classList.toggle("is-selected", i === skillsPopupIdx);
+  });
+  list.querySelector(".skillsPopupItem.is-selected")?.scrollIntoView({ block: "nearest" });
+}
 
 function showSkillsPopup() {
   const popup = $("skillsPopup");
   if (!popup) return;
   const input = $("chatInput");
-  if (!input || input.disabled) return;
-  const text = input.value;
-  const cursorPos = input.selectionStart;
-  const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
-  const currentLine = text.slice(lineStart, cursorPos);
-  if (!currentLine.match(/^\/skills\b/)) {
-    popup.hidden = true;
+  if (!input || input.disabled) {
+    hideSkillsPopup();
     return;
   }
-  if (skillsPopupSkills.length === 0) {
-    popup.hidden = true;
+  const filterQuery = skillsPopupFilterQuery();
+  if (filterQuery === null) {
+    hideSkillsPopup();
     return;
   }
+
   const list = $("skillsPopupList");
+  const countEl = $("skillsPopupCount");
   if (!list) return;
-  skillsPopupIdx = 0;
-  list.innerHTML = skillsPopupSkills.map((sk, i) =>
-    `<button type="button" class="skillsPopupItem" data-index="${i}" ${i === 0 ? 'data-selected' : ''}>
-      <span class="skillsPopupItemIcon">${sk.is_dir ? "📁" : "📄"}</span>
+
+  if (skillsPopupLoading && skillsPopupSkills.length === 0) {
+    skillsPopupVisible = [];
+    skillsPopupIdx = -1;
+    list.innerHTML = `<div class="skillsPopupLoading">正在加载 Skills…</div>`;
+    if (countEl) countEl.textContent = "…";
+    popup.hidden = false;
+    return;
+  }
+
+  skillsPopupVisible = skillsPopupSkills.filter((sk) => skillMatchesQuery(sk, filterQuery));
+  if (!skillsPopupVisible.length) {
+    skillsPopupIdx = -1;
+    const emptyTitle = skillsPopupSkills.length === 0
+      ? "暂无可用 Skills"
+      : `没有匹配「${escapeHtml(filterQuery)}」`;
+    const emptyHint = skillsPopupSkills.length === 0
+      ? "可在顶部 Skills 页查看安装位置"
+      : "试试其他关键词，或清空过滤词";
+    list.innerHTML = `<div class="skillsPopupEmpty"><strong>${emptyTitle}</strong><span>${emptyHint}</span></div>`;
+    if (countEl) countEl.textContent = "0";
+    popup.hidden = false;
+    return;
+  }
+
+  if (skillsPopupIdx < 0 || skillsPopupIdx >= skillsPopupVisible.length) {
+    skillsPopupIdx = 0;
+  }
+
+  list.innerHTML = skillsPopupVisible.map((sk, i) => {
+    const meta = skillSourceMeta(sk.source);
+    return `<button type="button" class="skillsPopupItem${i === skillsPopupIdx ? " is-selected" : ""}" role="option" data-index="${i}" aria-selected="${i === skillsPopupIdx ? "true" : "false"}">
+      <img class="skillsPopupItemIcon" src="/skill.svg" alt="" aria-hidden="true">
       <span class="skillsPopupItemInfo">
         <span class="skillsPopupItemName">${escapeHtml(sk.name)}</span>
-        <span class="skillsPopupItemPath">${escapeHtml(sk.path)}</span>
+        <span class="skillsPopupItemMeta">
+          <span class="skillsPopupItemSource">${escapeHtml(meta.short)}</span>
+          <span class="skillsPopupItemPath" title="${escapeHtml(sk.path)}">${escapeHtml(sk.path)}</span>
+        </span>
       </span>
-    </button>`
-  ).join("");
-  if ($("skillsPopupCount")) $("skillsPopupCount").textContent = String(skillsPopupSkills.length);
+    </button>`;
+  }).join("");
+
+  list.querySelectorAll(".skillsPopupItem").forEach((btn) => {
+    btn.onmouseenter = () => {
+      skillsPopupIdx = Number(btn.dataset.index);
+      highlightSkillsPopupItems();
+    };
+    btn.onclick = (event) => {
+      event.preventDefault();
+      selectSkillsPopupItem(Number(btn.dataset.index));
+    };
+  });
+
+  if (countEl) countEl.textContent = String(skillsPopupVisible.length);
   popup.hidden = false;
+  highlightSkillsPopupItems();
 }
 
 function hideSkillsPopup() {
   const popup = $("skillsPopup");
   if (popup) popup.hidden = true;
   skillsPopupIdx = -1;
+  skillsPopupVisible = [];
 }
 
 function selectSkillsPopupItem(index) {
-  const items = skillsPopupSkills;
+  const items = skillsPopupVisible;
   if (index < 0 || index >= items.length) return;
   const input = $("chatInput");
   if (!input) return;
   const sk = items[index];
   const text = input.value;
-  const cursorPos = input.selectionStart;
+  const cursorPos = input.selectionStart ?? text.length;
   const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
   const lineEnd = text.indexOf("\n", cursorPos);
   const before = text.slice(0, lineStart);
   const after = text.slice(lineEnd >= 0 ? lineEnd : text.length);
-  input.value = before + `@${sk.name} ` + (after ? after : "");
-  input.selectionStart = input.selectionEnd = (before + `@${sk.name} `).length;
+  const insert = `/skills ${sk.name} `;
+  input.value = before + insert + after;
+  input.selectionStart = input.selectionEnd = before.length + insert.length;
   hideSkillsPopup();
   input.focus();
   renderAgentStatus(state.agentStatus);
 }
 
 async function loadSkillsForPopup() {
+  skillsPopupLoading = true;
+  showSkillsPopup();
   try {
     const data = await api("/api/skills");
     skillsPopupSkills = Array.isArray(data) ? data : [];
-    if ($("skillsPopupCount") && !$("skillsPopup").hidden) {
-      $("skillsPopupCount").textContent = String(skillsPopupSkills.length);
-    }
   } catch {
     skillsPopupSkills = [];
+  } finally {
+    skillsPopupLoading = false;
+    showSkillsPopup();
   }
 }
 
 async function populateComposerModelSelect() {
   const sel = $("composerModelSelect");
   if (!sel) return;
-  const models = new Set();
-  if (state.agentStatus?.model) models.add(state.agentStatus.model);
-  if (state.activeAgentSession?.model) models.add(state.activeAgentSession.model);
-  for (const p of state.profiles || []) {
-    if (p.default_model) models.add(p.default_model);
-    for (const m of p.models || []) if (m.id) models.add(m.id);
-    for (const m of p.available_models || []) if (m) models.add(typeof m === "string" ? m : m.id);
-  }
-  try {
-    const data = await api("/api/grok-config-models");
-    if (data && Array.isArray(data.models)) {
-      for (const m of data.models) if (m) models.add(m);
-    }
-  } catch {}
-  const sorted = Array.from(models).sort();
-  const stored = localStorage.getItem("gs_composer_model") || "";
-  const current = sel.value || stored;
-  sel.innerHTML = '<option value="">继承配置</option>' + sorted.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join("");
-  sel.disabled = sorted.length === 0;
-  if (stored && sorted.includes(stored)) sel.value = stored;
+  const config = await loadComposerConfig();
+  const models = config.models;
+  const defaultModel = models.includes(config.defaultModel) ? config.defaultModel : (models[0] || "");
+  if (composerModelOverride && !models.includes(composerModelOverride)) composerModelOverride = "";
+  const current = composerModelOverride || (models.includes(sel.value) ? sel.value : defaultModel);
+  sel.innerHTML = models.length
+    ? models.map((model) => {
+        const label = model === defaultModel ? `${model}（默认）` : model;
+        return `<option value="${escapeHtml(model)}"${model === current ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("")
+    : '<option value="">配置中没有启用模型</option>';
+  sel.value = current;
+  sel.disabled = models.length === 0 || composerControlsUnavailable();
   sel.onchange = () => {
-    if (sel.value) localStorage.setItem("gs_composer_model", sel.value);
-    else localStorage.removeItem("gs_composer_model");
+    composerModelOverride = sel.value;
+    populateComposerStrengthSelect();
+  };
+  populateComposerStrengthSelect();
+}
+
+async function populateComposerStrengthSelect() {
+  const sel = $("composerStrengthSelect");
+  if (!sel) return;
+  const config = await loadComposerConfig();
+  const model = $("composerModelSelect")?.value || config.defaultModel;
+  const configured = Array.isArray(config.reasoningEfforts[model]) ? config.reasoningEfforts[model] : [];
+  const efforts = configured.length ? configured : ["low", "medium", "high"];
+  const defaultStrength = efforts.includes(config.defaultStrength) ? config.defaultStrength : "auto";
+  if (composerStrengthOverride !== "auto" && composerStrengthOverride && !efforts.includes(composerStrengthOverride)) {
+    composerStrengthOverride = "";
+  }
+  const current = composerStrengthOverride || defaultStrength;
+  const labels = { low: "低", medium: "中", high: "高" };
+  sel.innerHTML = `<option value="auto"${current === "auto" ? " selected" : ""}>自动（配置默认）</option>` + efforts.map((effort) => {
+    const label = `${labels[effort] || effort}${effort === config.defaultStrength ? "（默认）" : ""}`;
+    return `<option value="${escapeHtml(effort)}"${effort === current ? " selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+  sel.value = current;
+  sel.disabled = efforts.length === 0 || composerControlsUnavailable();
+  sel.onchange = () => {
+    composerStrengthOverride = sel.value;
   };
 }
 
-function populateComposerStrengthSelect() {
-  const sel = $("composerStrengthSelect");
-  if (!sel) return;
-  const stored = localStorage.getItem("gs_composer_strength") || "auto";
-  sel.value = stored;
-  sel.onchange = () => {
-    if (sel.value && sel.value !== "auto") localStorage.setItem("gs_composer_strength", sel.value);
-    else localStorage.removeItem("gs_composer_strength");
+function composerControlsUnavailable() {
+  const status = state.agentStatus;
+  return status?.state !== "ready" || !!status?.busy || state.agentEngineState === "loading";
+}
+
+function composerConfigFromActiveProfile() {
+  const profile = activeProfile();
+  if (!profile) return { models: [], defaultModel: "", defaultStrength: "", reasoningEfforts: {} };
+  const models = [];
+  const reasoningEfforts = {};
+  for (const model of profile.models || []) {
+    const name = String(model?.name || model?.model || "").trim();
+    if (!name || models.includes(name)) continue;
+    models.push(name);
+    if (Array.isArray(model.reasoning_efforts) && model.reasoning_efforts.length) {
+      reasoningEfforts[name] = model.reasoning_efforts.filter(Boolean);
+    }
+  }
+  return {
+    models: models.sort(),
+    defaultModel: profile.default_model || "",
+    defaultStrength: profile.default_reasoning_effort || "",
+    reasoningEfforts,
   };
+}
+
+async function loadComposerConfig() {
+  if (composerConfigLoaded) return composerConfig;
+  if (composerConfigPromise) return composerConfigPromise;
+  composerConfigPromise = api("/api/grok-config-models").then((data) => {
+    const models = Array.from(new Set((Array.isArray(data?.models) ? data.models : []).filter(Boolean))).sort();
+    composerConfig = {
+      models,
+      defaultModel: String(data?.default_model || ""),
+      defaultStrength: String(data?.default_reasoning_effort || ""),
+      reasoningEfforts: data?.reasoning_efforts && typeof data.reasoning_efforts === "object" ? data.reasoning_efforts : {},
+    };
+    composerConfigLoaded = true;
+    return composerConfig;
+  }).catch(() => {
+    composerConfig = composerConfigFromActiveProfile();
+    composerConfigLoaded = true;
+    return composerConfig;
+  }).finally(() => {
+    composerConfigPromise = null;
+  });
+  return composerConfigPromise;
 }
 
 // Close skills popup on click outside

@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=40">
+  <link rel="stylesheet" href="/style.css?v=43">
 </head>
 <body>
   <div class="shell">
@@ -339,27 +339,34 @@
             <div id="chatAttachments" class="chatAttachments" hidden></div>
             <div id="composerToolbar" class="composerToolbar">
               <div class="composerToolbarLeft">
-                <select id="composerModelSelect" class="composerModelSelect" title="模型" disabled>
-                  <option value="">选择模型…</option>
-                </select>
-                <select id="composerStrengthSelect" class="composerStrengthSelect" title="推理强度" disabled>
-                  <option value="auto">自动</option>
-                  <option value="high">高</option>
-                  <option value="medium">中</option>
-                  <option value="low">低</option>
-                </select>
+                <label class="composerControl composerModelControl">
+                  <span class="composerControlLabel">模型</span>
+                  <select id="composerModelSelect" class="composerModelSelect" title="模型" disabled>
+                    <option value="">加载配置…</option>
+                  </select>
+                </label>
+                <label class="composerControl composerStrengthControl">
+                  <span class="composerControlLabel">推理</span>
+                  <select id="composerStrengthSelect" class="composerStrengthSelect" title="推理强度" disabled>
+                    <option value="">加载配置…</option>
+                  </select>
+                </label>
               </div>
             </div>
             <div class="composerInputWrap">
-              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话… (输入 /skills 查看可用 Skills)" aria-label="消息" disabled></textarea>
-              <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行</span>
-              <div id="skillsPopup" class="skillsPopup" hidden>
+              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…  输入 /skills 插入 Skill" aria-label="消息" disabled></textarea>
+              <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行 · /skills 浏览技能</span>
+              <div id="skillsPopup" class="skillsPopup" hidden role="listbox" aria-label="可用 Skills">
                 <div class="skillsPopupHead">
-                  <strong>Skills</strong>
-                  <span id="skillsPopupCount" class="muted tiny">0</span>
+                  <div class="skillsPopupHeadLeft">
+                    <strong>Skills</strong>
+                    <span class="skillsPopupKbd muted tiny">↑↓ 选择 · Enter 插入 · Esc 关闭</span>
+                  </div>
+                  <span id="skillsPopupCount" class="skillsPopupBadge">0</span>
                 </div>
-                <div id="skillsPopupList" class="skillsPopupList">
-                  <span class="skillsPopupLoading">加载中…</span>
+                <div id="skillsPopupList" class="skillsPopupList"></div>
+                <div class="skillsPopupFoot">
+                  <span class="muted tiny">插入为 <code>/skills 技能名</code>，可继续输入说明</span>
                 </div>
               </div>
             </div>
@@ -422,22 +429,57 @@
     </main>
 
     <!-- SKILLS -->
-    <main id="viewSkills" class="view" hidden>
-      <div class="pageHead">
-        <h1 class="pageTitle">Skills 管理</h1>
-        <p class="pageDesc">浏览 ~/.agents 和 ~/.grok 中的 Skills</p>
+    <main id="viewSkills" class="view skillsView" hidden>
+      <div class="toolbar">
+        <div>
+          <h1 class="pageTitle">Skills</h1>
+          <p class="pageDesc">浏览本机 Agent Skills，复制路径或卸载用户安装的技能</p>
+        </div>
+        <span id="skillsCount" class="muted count">0 个</span>
+      </div>
+
+      <div class="listControls skillsControls">
+        <input id="skillsSearch" class="search providerSearch" type="search" placeholder="搜索名称或路径…" autocomplete="off">
+        <button type="button" id="refreshSkillsBtn" class="btn sm">刷新</button>
+      </div>
+
+      <div class="skillsSourceHint formCard">
+        <div class="skillsSourceHintGrid">
+          <div class="skillsSourceChip" data-tone="agents">
+            <span class="skillsSourceChipLabel">Agent</span>
+            <code>~/.agents/skills</code>
+          </div>
+          <div class="skillsSourceChip" data-tone="user">
+            <span class="skillsSourceChipLabel">用户</span>
+            <code>~/.grok/skills</code>
+          </div>
+          <div class="skillsSourceChip" data-tone="bundled">
+            <span class="skillsSourceChipLabel">内置</span>
+            <code>~/.grok/bundled/skills</code>
+          </div>
+        </div>
+        <div class="skillsSourceHintActions">
+          <p class="muted tiny skillsSourceHintNote">聊天中输入 <code>/skills</code> 可快速插入技能；内置技能仅可浏览，不可删除。</p>
+          <a class="skillsMarketplaceLink" href="https://skillsmp.com/skills" target="_blank" rel="noopener noreferrer">find skills <span aria-hidden="true">↗</span></a>
+        </div>
       </div>
 
       <div id="skillsEmpty" class="empty" hidden>
-        <h2>没有找到 Skills</h2>
-        <p>~/.agents 和 ~/.grok 目录下没有发现任何 Skill 文件或目录。</p>
+        <h2>还没有 Skills</h2>
+        <p>在 <code>~/.agents/skills</code> 或 <code>~/.grok/skills</code> 安装 Skill 后会出现在这里。</p>
       </div>
 
-      <div id="skillsLoading" class="loadingHint">正在加载 Skills…</div>
+      <div id="skillsSearchEmpty" class="empty searchEmpty" hidden>
+        <p>没有匹配的 Skills</p>
+      </div>
+
+      <div id="skillsLoading" class="loadingHint" hidden>正在加载 Skills…</div>
 
       <div id="skillsList" class="skillsList"></div>
 
-      <button type="button" id="backFromSkillsBtn" class="btn">返回供应商列表</button>
+      <div class="inlineActions">
+        <button type="button" id="backFromSkillsBtn" class="btn">返回供应商列表</button>
+      </div>
     </main>
 
     <!-- SETTINGS -->
@@ -678,6 +720,8 @@
           <div><strong id="registrarProgressCount">0 / 0</strong><span id="registrarProgressDetail" class="muted tiny">等待任务</span></div>
           <progress id="registrarProgressBar" max="1" value="0"></progress>
         </div>
+        <div id="registrarChallengeStatus" class="registrarChallengeStatus muted tiny" hidden></div>
+        <div id="registrarResults" class="registrarResults" hidden></div>
         <pre id="registrarLog" class="registrarLog mono">尚未运行注册任务。</pre>
       </section>
 
@@ -879,6 +923,6 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=44"></script>
+  <script src="/app.js?v=48"></script>
 </body>
 </html>

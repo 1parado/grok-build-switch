@@ -284,13 +284,15 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 	log("开始注册")
 	outcome, err := s.runAccount(ctx, config, mailbox, s.resolvedAuthDir(), log)
 	if err != nil {
-		log("失败：" + err.Error())
-		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: err.Error()})
+		failMsg := err.Error()
+		log("失败：" + failMsg)
+		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: failMsg})
 		return
 	}
 	if err := s.appendAccount(outcome); err != nil {
-		log("账号已注册，但账本写入失败：" + err.Error())
-		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: err.Error(), AuthFile: outcome.AuthFile})
+		failMsg := "账号已注册，但账本写入失败：" + err.Error()
+		log(failMsg)
+		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: failMsg, AuthFile: outcome.AuthFile})
 		return
 	}
 	log("注册与 CPA 铸造成功")
@@ -328,11 +330,18 @@ func (s *Service) finish(live *liveJob, runErr error) {
 	if errors.Is(runErr, context.Canceled) {
 		live.job.Status = StatusCancelled
 		live.job.Error = "任务已取消"
+		if summary := aggregateJobFailures(live.job.Results); strings.Contains(summary, "：") {
+			live.job.Error = "任务已取消；" + strings.TrimPrefix(summary, "没有账号注册成功：")
+		}
 	} else if live.job.Succeeded > 0 {
 		live.job.Status = StatusSucceeded
+		if live.job.Failed > 0 {
+			live.job.Error = fmt.Sprintf("部分成功：成功 %d，失败 %d。%s",
+				live.job.Succeeded, live.job.Failed, strings.TrimPrefix(aggregateJobFailures(live.job.Results), "没有账号注册成功："))
+		}
 	} else {
 		live.job.Status = StatusFailed
-		live.job.Error = "没有账号注册成功"
+		live.job.Error = aggregateJobFailures(live.job.Results)
 	}
 	_ = live.log.Close()
 	job := cloneJob(live.job)

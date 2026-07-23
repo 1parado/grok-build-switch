@@ -495,7 +495,12 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 					fmt.Fprintf(os.Stderr, "grok_switch: set session config failed: %v\n", setErr)
 				}
 			}
-			err = s.Agent.Prompt(message.Text, message.Attachments)
+			promptText, expandErr := s.expandSkillPrompt(message.Text)
+			if expandErr != nil {
+				err = fmt.Errorf("加载 Skill 失败: %w", expandErr)
+			} else {
+				err = s.Agent.Prompt(promptText, message.Attachments)
+			}
 		case "cancel":
 			err = s.Agent.CancelPrompt()
 		case "permission_response":

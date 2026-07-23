@@ -29,6 +29,10 @@ func ImportProfile(path, name string) (profiles.Profile, error) {
 	if explore == "" && plan == "" && legacy != "" {
 		explore, plan = legacy, legacy
 	}
+	allModels := readModels(doc)
+	features := readManagedFeatures(doc)
+	imageGeneration := readImageGenerationConfig(doc, allModels, features)
+	models := removeLegacyMediaModels(allModels, imageGeneration)
 	profile := profiles.Profile{
 		Name:                   name,
 		UpstreamFormat:         "openai",
@@ -40,7 +44,8 @@ func ImportProfile(path, name string) (profiles.Profile, error) {
 			Explore: explore,
 			Plan:    plan,
 		},
-		Models: readModels(doc),
+		Models:          models,
+		ImageGeneration: imageGeneration,
 	}
 	if profile.Name == "" {
 		profile.Name = "Default"
@@ -48,12 +53,30 @@ func ImportProfile(path, name string) (profiles.Profile, error) {
 	return profiles.Normalize(profile), nil
 }
 
-func ApplyProfileToFile(path string, profile profiles.Profile) error {
+// ApplyOpts controls optional rewrites when applying a profile to config.toml.
+type ApplyOpts struct {
+	// ImagineProxyBaseURL, when non-empty and image generation is enabled, is
+	// written to endpoints.xai_api_base_url instead of the real image base URL.
+	// Grok's ImageGen tool authenticates with the chat/session API key against
+	// xai_api_base_url, so dual-provider setups need a local proxy that injects
+	// the independent image API key. The real upstream stays on
+	// [model.grok-imagine-image].base_url / profile.ImageGeneration.
+	ImagineProxyBaseURL string
+}
+
+func firstApplyOpts(opts []ApplyOpts) ApplyOpts {
+	if len(opts) == 0 {
+		return ApplyOpts{}
+	}
+	return opts[0]
+}
+
+func ApplyProfileToFile(path string, profile profiles.Profile, opts ...ApplyOpts) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	next, err := ApplyProfileText(data, profile)
+	next, err := ApplyProfileText(data, profile, opts...)
 	if err != nil {
 		return err
 	}
@@ -89,7 +112,7 @@ func UseOfficialAuthText(data []byte) []byte {
 		end := skipSection(lines, i+1)
 		switch header {
 		case "endpoints":
-			out = append(out, removeAssignments(lines[i:end], "models_base_url")...)
+			out = append(out, removeAssignments(lines[i:end], "models_base_url", "xai_api_base_url")...)
 		case "models":
 			out = append(out, removeAssignments(lines[i:end], "default", "web_search", "default_reasoning_effort")...)
 		case "subagents":
@@ -98,6 +121,8 @@ func UseOfficialAuthText(data []byte) []byte {
 		case "subagents.models":
 			// Drop switch-managed type model pins so official auth is clean.
 			out = append(out, removeAssignments(lines[i:end], "explore", "plan")...)
+		case "features":
+			out = append(out, removeAssignments(lines[i:end], "image_gen", "image_edit", "video_gen", "image_gen_model_override")...)
 		default:
 			out = append(out, lines[i:end]...)
 		}
@@ -168,7 +193,7 @@ func ApplyPrivacyProtectionText(data []byte) []byte {
 
 // PreviewApply returns the full config.toml text that would result from
 // applying profile onto the existing file (or an empty template if missing).
-func PreviewApply(path string, profile profiles.Profile) ([]byte, error) {
+func PreviewApply(path string, profile profiles.Profile, opts ...ApplyOpts) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -176,16 +201,21 @@ func PreviewApply(path string, profile profiles.Profile) ([]byte, error) {
 		}
 		data = []byte{}
 	}
-	return ApplyProfileText(data, profile)
+	return ApplyProfileText(data, profile, opts...)
 }
 
 // SnippetForProfile returns only the provider-owned sections as a readable TOML fragment.
-func SnippetForProfile(profile profiles.Profile) (string, error) {
+func SnippetForProfile(profile profiles.Profile, opts ...ApplyOpts) (string, error) {
 	profile = profiles.Normalize(profile)
+	opt := firstApplyOpts(opts)
 	var b strings.Builder
 	b.WriteString("# 此供应商启用时会写入/覆盖的片段（其它段落保留）\n\n")
 	b.WriteString("[endpoints]\n")
-	b.WriteString("models_base_url = " + quote(profile.BaseURL) + "\n\n")
+	b.WriteString("models_base_url = " + quote(profile.BaseURL) + "\n")
+	if mediaBaseURL := mediaAPIBaseURL(profile, opt); mediaBaseURL != "" {
+		b.WriteString("xai_api_base_url = " + quote(mediaBaseURL) + "\n")
+	}
+	b.WriteString("\n")
 	b.WriteString("[models]\n")
 	b.WriteString("default = " + quote(profile.DefaultModel) + "\n")
 	b.WriteString("web_search = " + quote(profile.WebSearchModel) + "\n")
@@ -195,6 +225,9 @@ func SnippetForProfile(profile profiles.Profile) (string, error) {
 		if !strings.HasSuffix(snippet, "\n\n") {
 			b.WriteString("\n")
 		}
+	}
+	if snippet := formatFeaturesSnippet(profile); snippet != "" {
+		b.WriteString(snippet)
 	}
 	modelData, err := marshalModelSection(profile)
 	if err != nil {
@@ -207,10 +240,16 @@ func SnippetForProfile(profile profiles.Profile) (string, error) {
 	return b.String(), nil
 }
 
-func ApplyProfile(doc map[string]any, profile profiles.Profile) {
+func ApplyProfile(doc map[string]any, profile profiles.Profile, opts ...ApplyOpts) {
 	profile = profiles.Normalize(profile)
+	opt := firstApplyOpts(opts)
 	endpoints := ensureTable(doc, "endpoints")
 	endpoints["models_base_url"] = profile.BaseURL
+	if mediaBaseURL := mediaAPIBaseURL(profile, opt); mediaBaseURL != "" {
+		endpoints["xai_api_base_url"] = mediaBaseURL
+	} else {
+		delete(endpoints, "xai_api_base_url")
+	}
 
 	models := ensureTable(doc, "models")
 	models["default"] = profile.DefaultModel
@@ -218,6 +257,20 @@ func ApplyProfile(doc map[string]any, profile profiles.Profile) {
 	models["default_reasoning_effort"] = profile.DefaultReasoningEffort
 
 	applySubagentsModelsToDoc(doc, profile)
+	if features, ok := doc["features"].(map[string]any); ok {
+		delete(features, "image_gen")
+		delete(features, "image_edit")
+		delete(features, "video_gen")
+		delete(features, "image_gen_model_override")
+	}
+	if profile.ImageGeneration != nil && profile.ImageGeneration.Enabled {
+		features := ensureTable(doc, "features")
+		features["image_gen"] = true
+	}
+	if imageModel := mediaImageModelOverride(profile); imageModel != "" {
+		features := ensureTable(doc, "features")
+		features["image_gen_model_override"] = imageModel
+	}
 
 	modelTable := make(map[string]any, len(profile.Models))
 	effectiveKey := profile.EffectiveAPIKey()
@@ -226,41 +279,59 @@ func ApplyProfile(doc map[string]any, profile profiles.Profile) {
 		if key == "" {
 			key = model.Model
 		}
-		apiKey := model.APIKey
-		if apiKey == "" {
-			apiKey = effectiveKey
+		if isMediaAlias(key) {
+			continue
 		}
-		entry := map[string]any{
-			"model":                     model.Model,
-			"api_key":                   apiKey,
-			"api_backend":               model.APIBackend,
-			"supports_backend_search":   model.SupportsBackendSearch,
-			"supports_reasoning_effort": model.SupportsReasoningEffort,
-			"reasoning_efforts":         model.ReasoningEfforts,
-		}
-		// Omit zero values so Grok uses its own defaults:
-		// - omitted context_window → ~200k for new models (or built-in inherit)
-		// - omitted max_completion_tokens → global [models] default if set
-		if model.ContextWindow > 0 {
-			entry["context_window"] = model.ContextWindow
-		}
-		if model.MaxCompletionTokens > 0 {
-			entry["max_completion_tokens"] = model.MaxCompletionTokens
-		}
-		if model.BaseURL != "" {
-			entry["base_url"] = model.BaseURL
-		}
-		if len(model.ExtraHeaders) > 0 {
-			entry["extra_headers"] = model.ExtraHeaders
-		}
-		modelTable[key] = entry
+		modelTable[key] = modelConfigEntry(model, effectiveKey)
+	}
+	if image := profile.ImageGeneration; image != nil && image.Enabled && image.Model != "" {
+		modelTable["grok-imagine-image"] = modelConfigEntry(profiles.ModelDef{
+			Name: "grok-imagine-image", Model: image.Model, BaseURL: image.BaseURL,
+			APIKey: image.APIKey, APIBackend: image.APIBackend,
+		}, "")
 	}
 	doc["model"] = modelTable
 }
 
-func ApplyProfileText(data []byte, profile profiles.Profile) ([]byte, error) {
+func modelConfigEntry(model profiles.ModelDef, effectiveKey string) map[string]any {
+	apiKey := model.APIKey
+	if apiKey == "" {
+		apiKey = effectiveKey
+	}
+	entry := map[string]any{
+		"model":       model.Model,
+		"api_key":     apiKey,
+		"api_backend": model.APIBackend,
+	}
+	if model.SupportsBackendSearch {
+		entry["supports_backend_search"] = true
+	}
+	if model.DisplayName != "" {
+		entry["name"] = model.DisplayName
+	}
+	if model.SupportsReasoningEffort {
+		entry["supports_reasoning_effort"] = true
+		entry["reasoning_efforts"] = model.ReasoningEfforts
+	}
+	if model.ContextWindow > 0 {
+		entry["context_window"] = model.ContextWindow
+	}
+	if model.MaxCompletionTokens > 0 {
+		entry["max_completion_tokens"] = model.MaxCompletionTokens
+	}
+	if model.BaseURL != "" {
+		entry["base_url"] = model.BaseURL
+	}
+	if len(model.ExtraHeaders) > 0 {
+		entry["extra_headers"] = model.ExtraHeaders
+	}
+	return entry
+}
+
+func ApplyProfileText(data []byte, profile profiles.Profile, opts ...ApplyOpts) ([]byte, error) {
 	data = trimUTF8BOM(data)
 	profile = profiles.Normalize(profile)
+	opt := firstApplyOpts(opts)
 	newModelData, err := marshalModelSection(profile)
 	if err != nil {
 		return nil, err
@@ -269,6 +340,7 @@ func ApplyProfileText(data []byte, profile profiles.Profile) ([]byte, error) {
 	var out []string
 	seen := map[string]bool{}
 	seenSubagentsModels := false
+	seenFeatures := false
 	for i := 0; i < len(lines); {
 		header := parseHeader(lines[i])
 		if header == "" {
@@ -297,9 +369,16 @@ func ApplyProfileText(data []byte, profile profiles.Profile) ([]byte, error) {
 			i = end
 			continue
 		}
+		if header == "features" {
+			end := skipSection(lines, i+1)
+			out = append(out, rewriteFeaturesSection(lines[i:end], profile)...)
+			seenFeatures = true
+			i = end
+			continue
+		}
 		if header == "endpoints" || header == "models" {
 			end := skipSection(lines, i+1)
-			out = append(out, rewriteSection(lines[i:end], header, profile)...)
+			out = append(out, rewriteSection(lines[i:end], header, profile, opt)...)
 			seen[header] = true
 			i = end
 			continue
@@ -313,7 +392,7 @@ func ApplyProfileText(data []byte, profile profiles.Profile) ([]byte, error) {
 			if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
 				out = append(out, "")
 			}
-			out = append(out, rewriteSection([]string{"[" + section + "]"}, section, profile)...)
+			out = append(out, rewriteSection([]string{"[" + section + "]"}, section, profile, opt)...)
 		}
 	}
 	if !seenSubagentsModels {
@@ -323,6 +402,12 @@ func ApplyProfileText(data []byte, profile profiles.Profile) ([]byte, error) {
 			}
 			out = append(out, rewritten...)
 		}
+	}
+	if hasManagedFeatureConfig(profile) && !seenFeatures {
+		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+			out = append(out, "")
+		}
+		out = append(out, rewriteFeaturesSection([]string{"[features]"}, profile)...)
 	}
 	if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
 		out = append(out, "")
@@ -376,6 +461,7 @@ func readModels(doc map[string]any) []profiles.ModelDef {
 		}
 		out = append(out, profiles.ModelDef{
 			Name:                    key,
+			DisplayName:             stringAt(table, "name"),
 			Model:                   stringAt(table, "model"),
 			BaseURL:                 stringAt(table, "base_url"),
 			APIKey:                  stringAt(table, "api_key"),
@@ -391,12 +477,108 @@ func readModels(doc map[string]any) []profiles.ModelDef {
 	return out
 }
 
+func readManagedFeatures(doc map[string]any) map[string]bool {
+	table := tableAt(doc, "features")
+	if boolAt(table, "image_gen") {
+		return map[string]bool{"image_gen": true}
+	}
+	return nil
+}
+
+func mediaAPIBaseURL(profile profiles.Profile, opt ApplyOpts) string {
+	if image := profile.ImageGeneration; image != nil && image.Enabled {
+		if proxy := strings.TrimSpace(opt.ImagineProxyBaseURL); proxy != "" {
+			return proxy
+		}
+		return strings.TrimSpace(image.BaseURL)
+	}
+	return ""
+}
+
+func mediaImageModelOverride(profile profiles.Profile) string {
+	if image := profile.ImageGeneration; image != nil && image.Enabled {
+		return strings.TrimSpace(image.Model)
+	}
+	return ""
+}
+
+func readImageGenerationConfig(doc map[string]any, models []profiles.ModelDef, features map[string]bool) *profiles.ImageGenerationConfig {
+	if !features["image_gen"] {
+		return nil
+	}
+	override := stringAt(tableAt(doc, "features"), "image_gen_model_override")
+	var selected *profiles.ModelDef
+	for i := range models {
+		if models[i].Name == "grok-imagine-image" {
+			selected = &models[i]
+			break
+		}
+	}
+	if selected == nil && override != "" {
+		for i := range models {
+			if models[i].Name == override || models[i].Model == override {
+				selected = &models[i]
+				break
+			}
+		}
+	}
+	config := &profiles.ImageGenerationConfig{
+		Enabled: true,
+		BaseURL: stringAt(tableAt(doc, "endpoints"), "xai_api_base_url"),
+		Model:   override,
+	}
+	if selected != nil {
+		if config.Model == "" {
+			config.Model = selected.Model
+		}
+		if selected.BaseURL != "" {
+			config.BaseURL = selected.BaseURL
+		}
+		config.APIKey = selected.APIKey
+		config.APIBackend = selected.APIBackend
+	}
+	if config.APIBackend == "" {
+		config.APIBackend = "chat_completions"
+	}
+	return config
+}
+
+func removeLegacyMediaModels(models []profiles.ModelDef, image *profiles.ImageGenerationConfig) []profiles.ModelDef {
+	legacyTargets := map[string]bool{}
+	for _, model := range models {
+		if isMediaAlias(model.Name) && model.Model != "" {
+			legacyTargets[model.Model] = true
+		}
+	}
+	if image != nil && image.Model != "" {
+		legacyTargets[image.Model] = true
+	}
+	out := make([]profiles.ModelDef, 0, len(models))
+	for _, model := range models {
+		if isMediaAlias(model.Name) || legacyTargets[model.Name] || legacyTargets[model.Model] {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
+func isMediaAlias(name string) bool {
+	switch name {
+	case "grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-video":
+		return true
+	default:
+		return false
+	}
+}
+
 func marshalModelSection(profile profiles.Profile) ([]byte, error) {
 	doc := map[string]any{}
 	ApplyProfile(doc, profile)
 	delete(doc, "endpoints")
 	delete(doc, "models")
 	delete(doc, "subagents")
+	delete(doc, "features")
 	return toml.Marshal(doc)
 }
 
@@ -426,6 +608,27 @@ func formatSubagentsModelsSnippet(profile profiles.Profile) string {
 		return ""
 	}
 	return strings.Join(lines, "\n") + "\n\n"
+}
+
+func formatFeaturesSnippet(profile profiles.Profile) string {
+	if !hasManagedFeatureConfig(profile) {
+		return ""
+	}
+	return strings.Join(rewriteFeaturesSection([]string{"[features]"}, profile), "\n") + "\n\n"
+}
+
+func rewriteFeaturesSection(lines []string, profile profiles.Profile) []string {
+	values := map[string]string{}
+	if imageModel := mediaImageModelOverride(profile); imageModel != "" {
+		values["image_gen"] = "true"
+		values["image_gen_model_override"] = quote(imageModel)
+	}
+	base := removeAssignments(lines, "image_gen", "image_edit", "video_gen", "image_gen_model_override")
+	return rewriteValues(base, values)
+}
+
+func hasManagedFeatureConfig(profile profiles.Profile) bool {
+	return mediaImageModelOverride(profile) != ""
 }
 
 // rewriteSubagentsModelsSection rewrites or creates [subagents.models].
@@ -506,15 +709,25 @@ func skipSection(lines []string, start int) int {
 	return start
 }
 
-func rewriteSection(lines []string, section string, profile profiles.Profile) []string {
+func rewriteSection(lines []string, section string, profile profiles.Profile, opt ApplyOpts) []string {
 	values := map[string]string{}
 	switch section {
 	case "endpoints":
 		values["models_base_url"] = quote(profile.BaseURL)
+		if mediaBaseURL := mediaAPIBaseURL(profile, opt); mediaBaseURL != "" {
+			values["xai_api_base_url"] = quote(mediaBaseURL)
+		}
 	case "models":
 		values["default"] = quote(profile.DefaultModel)
 		values["web_search"] = quote(profile.WebSearchModel)
 		values["default_reasoning_effort"] = quote(profile.DefaultReasoningEffort)
+	}
+	managed := []string{}
+	if section == "endpoints" {
+		managed = []string{"models_base_url", "xai_api_base_url"}
+	}
+	if len(managed) > 0 {
+		lines = removeAssignments(lines, managed...)
 	}
 	seen := map[string]bool{}
 	out := make([]string, 0, len(lines)+len(values))

@@ -18,7 +18,11 @@ type Switcher struct {
 	ConfigPath string
 	BackupsDir string
 	Profiles   *profiles.Store
-	mu         sync.Mutex
+	// ImagineProxyBaseURL is the local reverse-proxy base (…/imagine/v1) that
+	// injects the independent image API key for Grok ImageGen. Empty means
+	// write the real image base URL into config.toml.
+	ImagineProxyBaseURL string
+	mu                  sync.Mutex
 }
 
 type Backup struct {
@@ -39,7 +43,7 @@ func (s *Switcher) Activate(id string) (profiles.Profile, error) {
 	if _, err := s.Backup(); err != nil {
 		return profiles.Profile{}, err
 	}
-	if err := grokconfig.ApplyProfileToFile(s.ConfigPath, profile); err != nil {
+	if err := grokconfig.ApplyProfileToFile(s.ConfigPath, profile, s.applyOpts()); err != nil {
 		return profiles.Profile{}, err
 	}
 	if err := s.Profiles.SetActive(id); err != nil {
@@ -47,6 +51,59 @@ func (s *Switcher) Activate(id string) (profiles.Profile, error) {
 	}
 	profile.IsActive = true
 	return profile, nil
+}
+
+func (s *Switcher) applyOpts() grokconfig.ApplyOpts {
+	return grokconfig.ApplyOpts{ImagineProxyBaseURL: strings.TrimSpace(s.ImagineProxyBaseURL)}
+}
+
+// ReapplyActive rewrites config.toml for the currently active profile using
+// the latest ApplyOpts (e.g. after the local imagine proxy URL becomes known).
+// Skips work when there is no active profile or no rewrite is needed.
+func (s *Switcher) ReapplyActive() (profiles.Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	list, err := s.Profiles.List()
+	if err != nil {
+		return profiles.Profile{}, err
+	}
+	var active *profiles.Profile
+	for i := range list {
+		if list[i].IsActive {
+			active = &list[i]
+			break
+		}
+	}
+	if active == nil {
+		return profiles.Profile{}, fmt.Errorf("没有已启用的供应商")
+	}
+	profile := profiles.Normalize(*active)
+	// Only force a rewrite when independent image gen needs the local proxy URL.
+	if profile.ImageGeneration == nil || !profile.ImageGeneration.Enabled || strings.TrimSpace(s.ImagineProxyBaseURL) == "" {
+		active.IsActive = true
+		return *active, nil
+	}
+	next, err := grokconfig.PreviewApply(s.ConfigPath, profile, s.applyOpts())
+	if err != nil {
+		return profiles.Profile{}, err
+	}
+	current, err := os.ReadFile(s.ConfigPath)
+	if err != nil && !os.IsNotExist(err) {
+		return profiles.Profile{}, err
+	}
+	if string(current) == string(next) {
+		active.IsActive = true
+		return *active, nil
+	}
+	if _, err := s.Backup(); err != nil {
+		return profiles.Profile{}, err
+	}
+	if err := grokconfig.ApplyProfileToFile(s.ConfigPath, profile, s.applyOpts()); err != nil {
+		return profiles.Profile{}, err
+	}
+	active.IsActive = true
+	return *active, nil
 }
 
 func (s *Switcher) ActivateOfficial() error {

@@ -1,9 +1,13 @@
 package profiles
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type ModelDef struct {
 	Name                    string            `json:"name"`
+	DisplayName             string            `json:"display_name,omitempty"`
 	Model                   string            `json:"model"`
 	BaseURL                 string            `json:"base_url"`
 	APIKey                  string            `json:"api_key"`
@@ -23,18 +27,35 @@ type SubagentsModels struct {
 	Plan    string `json:"plan,omitempty"`
 }
 
+// ImageGenerationConfig configures Grok's built-in /imagine command. It is
+// deliberately independent from the chat provider connection.
+type ImageGenerationConfig struct {
+	Enabled         bool     `json:"enabled"`
+	BaseURL         string   `json:"base_url"`
+	APIKey          string   `json:"api_key"`
+	APIBackend      string   `json:"api_backend"`
+	Model           string   `json:"model"`
+	AvailableModels []string `json:"available_models,omitempty"`
+}
+
 type Profile struct {
-	ID                     string          `json:"id"`
-	Name                   string          `json:"name"`
-	Template               string          `json:"template,omitempty"`
-	UpstreamFormat         string          `json:"upstream_format"`
-	BaseURL                string          `json:"base_url"`
-	APIKey                 string          `json:"api_key"`
-	AvailableModels        []string        `json:"available_models"`
-	DefaultModel           string          `json:"default_model"`
-	DefaultReasoningEffort string          `json:"default_reasoning_effort"`
-	WebSearchModel         string          `json:"web_search_model"`
-	SubagentsModels        SubagentsModels `json:"subagents_models"`
+	ID                     string                 `json:"id"`
+	Name                   string                 `json:"name"`
+	Template               string                 `json:"template,omitempty"`
+	UpstreamFormat         string                 `json:"upstream_format"`
+	BaseURL                string                 `json:"base_url"`
+	APIKey                 string                 `json:"api_key"`
+	AvailableModels        []string               `json:"available_models"`
+	DefaultModel           string                 `json:"default_model"`
+	DefaultReasoningEffort string                 `json:"default_reasoning_effort"`
+	WebSearchModel         string                 `json:"web_search_model"`
+	SubagentsModels        SubagentsModels        `json:"subagents_models"`
+	ImageGeneration        *ImageGenerationConfig `json:"image_generation,omitempty"`
+	// Features, MediaModels and FeatureModels are legacy fields migrated into
+	// ImageGeneration by Normalize. New profiles do not persist them.
+	Features      map[string]bool   `json:"features,omitempty"`
+	MediaModels   map[string]string `json:"media_models,omitempty"`
+	FeatureModels map[string]string `json:"feature_models,omitempty"`
 	// SubagentsDefaultModel is deprecated (legacy profiles / old config key).
 	// Normalize migrates a non-empty value into SubagentsModels when explore/plan are empty.
 	SubagentsDefaultModel string     `json:"subagents_default_model,omitempty"`
@@ -48,11 +69,12 @@ func (p Profile) Matches(other Profile) bool {
 	p = Normalize(p)
 	other = Normalize(other)
 	if p.BaseURL != other.BaseURL ||
-		p.DefaultModel != other.DefaultModel ||
+		!runtimeDefaultMatches(p, other.DefaultModel) ||
 		p.DefaultReasoningEffort != other.DefaultReasoningEffort ||
 		p.WebSearchModel != other.WebSearchModel ||
 		p.SubagentsModels.Explore != other.SubagentsModels.Explore ||
-		p.SubagentsModels.Plan != other.SubagentsModels.Plan {
+		p.SubagentsModels.Plan != other.SubagentsModels.Plan ||
+		!imageGenerationMatches(p.ImageGeneration, other.ImageGeneration) {
 		return false
 	}
 	// config.toml only stores keys on [model.*] entries. A profile with no
@@ -70,11 +92,27 @@ func (p Profile) Matches(other Profile) bool {
 	}
 	for _, model := range other.Models {
 		stored, ok := byName[modelKey(model)]
-		if !ok || !modelEqual(stored, model) {
+		if !ok {
+			return false
+		}
+		if !modelEqual(stored, model) {
 			return false
 		}
 	}
 	return true
+}
+
+func runtimeDefaultMatches(profile Profile, actual string) bool {
+	if profile.DefaultModel == actual {
+		return true
+	}
+	for _, model := range profile.Models {
+		if modelKey(model) != actual {
+			continue
+		}
+		return !IsMediaModel(model)
+	}
+	return false
 }
 
 func modelKey(m ModelDef) string {
@@ -87,6 +125,7 @@ func modelKey(m ModelDef) string {
 func modelEqual(a, b ModelDef) bool {
 	if modelKey(a) != modelKey(b) ||
 		a.Model != b.Model ||
+		a.DisplayName != b.DisplayName ||
 		a.BaseURL != b.BaseURL ||
 		a.APIKey != b.APIKey ||
 		a.APIBackend != b.APIBackend ||
@@ -133,6 +172,26 @@ func Normalize(p Profile) Profile {
 		p.SubagentsModels.Plan = p.SubagentsDefaultModel
 	}
 	p.SubagentsDefaultModel = ""
+	p.ImageGeneration = migrateImageGeneration(p)
+	legacyImageModel := strings.TrimSpace(p.MediaModels["grok-imagine-image"])
+	if legacyImageModel == "" {
+		legacyImageModel = strings.TrimSpace(p.FeatureModels["image_gen"])
+	}
+	p.Features = nil
+	p.MediaModels = nil
+	p.FeatureModels = nil
+	if IsMediaModel(ModelDef{Name: p.DefaultModel, Model: p.DefaultModel}) || p.DefaultModel == legacyImageModel {
+		p.DefaultModel = ""
+	}
+	if IsMediaModel(ModelDef{Name: p.WebSearchModel, Model: p.WebSearchModel}) || p.WebSearchModel == legacyImageModel {
+		p.WebSearchModel = ""
+	}
+	if IsMediaModel(ModelDef{Name: p.SubagentsModels.Explore, Model: p.SubagentsModels.Explore}) || p.SubagentsModels.Explore == legacyImageModel {
+		p.SubagentsModels.Explore = ""
+	}
+	if IsMediaModel(ModelDef{Name: p.SubagentsModels.Plan, Model: p.SubagentsModels.Plan}) || p.SubagentsModels.Plan == legacyImageModel {
+		p.SubagentsModels.Plan = ""
+	}
 	// Profiles with only default model names (no models[]) still need a
 	// writable [model.*] entry so config.toml can store the API key.
 	if len(p.Models) == 0 {
@@ -152,6 +211,7 @@ func Normalize(p Profile) Profile {
 			})
 		}
 	}
+	normalizedModels := make([]ModelDef, 0, len(p.Models))
 	for i := range p.Models {
 		if p.Models[i].Name == "" {
 			p.Models[i].Name = p.Models[i].Model
@@ -171,15 +231,90 @@ func Normalize(p Profile) Profile {
 		if p.Models[i].ExtraHeaders == nil {
 			p.Models[i].ExtraHeaders = map[string]string{}
 		}
+		if IsMediaModel(p.Models[i]) || (legacyImageModel != "" && (modelKey(p.Models[i]) == legacyImageModel || p.Models[i].Model == legacyImageModel)) {
+			continue
+		}
 		p.Models[i].SupportsReasoningEffort = true
 		if len(p.Models[i].ReasoningEfforts) == 0 {
 			p.Models[i].ReasoningEfforts = []string{"low", "medium", "high"}
 		} else {
 			p.Models[i].ReasoningEfforts = uniqueStrings(p.Models[i].ReasoningEfforts)
 		}
+		normalizedModels = append(normalizedModels, p.Models[i])
 	}
+	p.Models = normalizedModels
 	p.AvailableModels = uniqueStrings(p.AvailableModels)
 	return p
+}
+
+func IsMediaModel(model ModelDef) bool {
+	id := strings.ToLower(strings.TrimSpace(model.Model))
+	if id == "" {
+		id = strings.ToLower(strings.TrimSpace(model.Name))
+	}
+	return id == "grok-imagine-image" || id == "grok-imagine-image-quality" || id == "grok-imagine-video"
+}
+
+func migrateImageGeneration(p Profile) *ImageGenerationConfig {
+	if p.ImageGeneration != nil {
+		config := *p.ImageGeneration
+		return normalizeImageGeneration(&config)
+	}
+	if !p.Features["image_gen"] {
+		return nil
+	}
+	selected := strings.TrimSpace(p.MediaModels["grok-imagine-image"])
+	if selected == "" {
+		selected = strings.TrimSpace(p.FeatureModels["image_gen"])
+	}
+	if selected == "" {
+		selected = "grok-imagine-image"
+	}
+	config := &ImageGenerationConfig{Enabled: true, Model: selected}
+	for _, model := range p.Models {
+		if modelKey(model) != selected && model.Model != selected && model.Name != "grok-imagine-image" {
+			continue
+		}
+		config.Model = model.Model
+		config.BaseURL = model.BaseURL
+		config.APIKey = model.APIKey
+		config.APIBackend = model.APIBackend
+		break
+	}
+	if config.BaseURL == "" {
+		config.BaseURL = p.BaseURL
+	}
+	if config.APIKey == "" {
+		config.APIKey = p.APIKey
+	}
+	return normalizeImageGeneration(config)
+}
+
+func normalizeImageGeneration(config *ImageGenerationConfig) *ImageGenerationConfig {
+	if config == nil {
+		return nil
+	}
+	config.BaseURL = strings.TrimSpace(config.BaseURL)
+	config.APIKey = strings.TrimSpace(config.APIKey)
+	config.Model = strings.TrimSpace(config.Model)
+	switch config.APIBackend {
+	case "responses", "messages", "chat_completions":
+	default:
+		config.APIBackend = "chat_completions"
+	}
+	config.AvailableModels = uniqueStrings(config.AvailableModels)
+	return config
+}
+
+func imageGenerationMatches(expected, actual *ImageGenerationConfig) bool {
+	if expected == nil || !expected.Enabled {
+		return actual == nil || !actual.Enabled
+	}
+	if actual == nil || !actual.Enabled {
+		return false
+	}
+	return expected.BaseURL == actual.BaseURL && expected.APIKey == actual.APIKey &&
+		expected.APIBackend == actual.APIBackend && expected.Model == actual.Model
 }
 
 func stringSlicesEqual(left, right []string) bool {

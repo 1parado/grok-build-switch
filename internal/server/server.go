@@ -34,29 +34,33 @@ import (
 	"grok_switch/internal/remoteaccess"
 	"grok_switch/internal/settings"
 	"grok_switch/internal/switcher"
+	"grok_switch/internal/updatecheck"
 )
 
 type Server struct {
-	Paths        paths.Paths
-	Profiles     *profiles.Store
-	Settings     *settings.Store
-	RemoteAccess *remoteaccess.Store
-	GrokAuth     *grokauth.Store
-	GrokPool     *grokpool.Manager
-	CpaMint      *cpamint.Service
-	Registrar    *registrar.Service
-	Switcher     *switcher.Switcher
-	Agent        AgentService
-	Assets       embed.FS
-	ExePath      string
-	ActualPort   int
-	onChanged    func()
-	listenerMu   sync.Mutex
-	listener     net.Listener
-	bindHost     string
-	httpServer   *http.Server
-	loginMu      sync.Mutex
-	loginFails   map[string]loginFailure
+	Paths         paths.Paths
+	Profiles      *profiles.Store
+	Settings      *settings.Store
+	RemoteAccess  *remoteaccess.Store
+	GrokAuth      *grokauth.Store
+	GrokPool      *grokpool.Manager
+	CpaMint       *cpamint.Service
+	Registrar     *registrar.Service
+	Switcher      *switcher.Switcher
+	Agent         AgentService
+	Assets        embed.FS
+	ExePath       string
+	Version       string
+	UpdateChecker *updatecheck.Checker
+	UpdateState   *updatecheck.PreferenceStore
+	ActualPort    int
+	onChanged     func()
+	listenerMu    sync.Mutex
+	listener      net.Listener
+	bindHost      string
+	httpServer    *http.Server
+	loginMu       sync.Mutex
+	loginFails    map[string]loginFailure
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -123,6 +127,13 @@ func (s *Server) Listen(preferred int) (*http.Server, int, error) {
 		return nil, 0, err
 	}
 	s.ActualPort = port
+	if s.Switcher != nil {
+		s.Switcher.ImagineProxyBaseURL = s.localImagineURL()
+		if _, err := s.Switcher.ReapplyActive(); err != nil {
+			// No active profile, or config missing — non-fatal at startup.
+			fmt.Fprintf(os.Stderr, "imagine proxy reapply: %v\n", err)
+		}
+	}
 	if err := s.ensureGrokAuthProfile(); err != nil {
 		fmt.Fprintf(os.Stderr, "grok auth profile: %v\n", err)
 	}
@@ -191,6 +202,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/pair", s.handlePair)
 	mux.HandleFunc("/api/lan-access", s.handleLANAccess)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/update", s.handleUpdate)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
 	mux.HandleFunc("/api/profiles/", s.handleProfileByID)
 	mux.HandleFunc("/api/official/activate", s.handleOfficialActivate)
@@ -218,6 +230,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/registrar/stop", s.handleRegistrarStop)
 	mux.HandleFunc("/api/registrar/job", s.handleRegistrarJob)
 	mux.HandleFunc("/api/registrar/job/log", s.handleRegistrarLog)
+	mux.HandleFunc("/api/grok-config-models", s.handleGrokConfigModels)
+	mux.HandleFunc("/api/skills", s.handleSkills)
+	mux.HandleFunc("/api/skills/delete", s.handleSkillsDelete)
 	mux.HandleFunc("/api/agent/status", s.handleAgentStatus)
 	mux.HandleFunc("/api/agent/start", s.handleAgentStart)
 	mux.HandleFunc("/api/agent/stop", s.handleAgentStop)
@@ -226,11 +241,71 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/agent/session/load", s.handleAgentSessionLoad)
 	mux.HandleFunc("/api/agent/sessions", s.handleAgentSessions)
 	mux.HandleFunc("/api/agent/sessions/", s.handleAgentSessionHistory)
+	mux.HandleFunc("/api/agent/media", s.handleAgentMedia)
 	mux.HandleFunc("/api/agent/session/rename", s.handleAgentRename)
 	mux.HandleFunc("/api/agent/ws", s.handleAgentWebSocket)
 	mux.HandleFunc("/grok/v1", s.handleGrokProxy)
 	mux.HandleFunc("/grok/v1/", s.handleGrokProxy)
+	mux.HandleFunc("/imagine/v1", s.handleImagineProxy)
+	mux.HandleFunc("/imagine/v1/", s.handleImagineProxy)
 	mux.HandleFunc("/", s.handleStatic)
+}
+
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.UpdateChecker == nil {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{"current_version": "dev", "update_available": false})
+			return
+		}
+		methodNotAllowed(w)
+		return
+	}
+	info, err := s.UpdateChecker.Check(r.Context())
+	if err != nil {
+		writeJSONStatus(w, map[string]string{"error": err.Error()}, http.StatusBadGateway)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if s.UpdateState != nil {
+			prefs, stateErr := s.UpdateState.Get()
+			if stateErr != nil {
+				writeJSONStatus(w, map[string]string{"error": stateErr.Error()}, http.StatusInternalServerError)
+				return
+			}
+			info.Skipped = prefs.SkippedVersion == info.LatestVersion
+		}
+		writeJSON(w, info)
+	case http.MethodPost:
+		var req struct {
+			Action  string `json:"action"`
+			Version string `json:"version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, err, http.StatusBadRequest)
+			return
+		}
+		if req.Action != "skip" || strings.TrimSpace(req.Version) == "" {
+			writeError(w, fmt.Errorf("无效的更新操作"), http.StatusBadRequest)
+			return
+		}
+		if req.Version != info.LatestVersion {
+			writeError(w, fmt.Errorf("更新版本已变化，请重新检查"), http.StatusConflict)
+			return
+		}
+		if s.UpdateState == nil {
+			writeError(w, fmt.Errorf("更新状态未配置"), http.StatusInternalServerError)
+			return
+		}
+		if err := s.UpdateState.Skip(req.Version); err != nil {
+			writeError(w, err, http.StatusInternalServerError)
+			return
+		}
+		info.Skipped = true
+		writeJSON(w, info)
+	default:
+		methodNotAllowed(w)
+	}
 }
 
 func (s *Server) bindHostFor(enabled bool) string {
@@ -253,6 +328,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	currentSettings, _ := s.Settings.Get()
 	_, authErr := os.Stat(filepath.Join(s.Paths.GrokHome, "auth.json"))
 	writeJSON(w, map[string]any{
+		"version":               s.Version,
 		"active_profile":        active,
 		"official_active":       active.ID == "",
 		"official_logged_in":    authErr == nil,
@@ -551,6 +627,7 @@ func (s *Server) handleConnectionTest(w http.ResponseWriter, r *http.Request) {
 		UpstreamFormat string `json:"upstream_format"`
 		Model          string `json:"model"`
 		APIBackend     string `json:"api_backend"`
+		Purpose        string `json:"purpose"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, err, http.StatusBadRequest)
@@ -572,7 +649,12 @@ func (s *Server) handleConnectionTest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// Per-model probe: send a minimal completion request.
 	if strings.TrimSpace(req.Model) != "" {
-		err := probeModel(r.Context(), req.BaseURL, req.APIKey, req.UpstreamFormat, req.APIBackend, req.Model)
+		var err error
+		if req.Purpose == "image_generation" {
+			err = probeImageGeneration(r.Context(), req.BaseURL, req.APIKey, req.Model)
+		} else {
+			err = probeModel(r.Context(), req.BaseURL, req.APIKey, req.UpstreamFormat, req.APIBackend, req.Model)
+		}
 		latency := time.Since(start).Milliseconds()
 		if err != nil {
 			writeJSONStatus(w, map[string]any{
@@ -668,21 +750,29 @@ func (s *Server) handleConfigPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	profile = profiles.Normalize(profile)
-	snippet, err := grokconfig.SnippetForProfile(profile)
+	opts := grokconfig.ApplyOpts{}
+	if s.Switcher != nil {
+		opts.ImagineProxyBaseURL = s.Switcher.ImagineProxyBaseURL
+	}
+	snippet, err := grokconfig.SnippetForProfile(profile, opts)
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return
 	}
-	full, err := grokconfig.PreviewApply(s.Paths.GrokConfig, profile)
+	full, err := grokconfig.PreviewApply(s.Paths.GrokConfig, profile, opts)
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return
+	}
+	note := "磁盘上只有一份生效的 config.toml。每个供应商的 URL/Key/模型保存在 grok_switch 的 profile 里；点「启用」或「保存并启用」时，才会把该供应商的字段写入这份文件。"
+	if profile.ImageGeneration != nil && profile.ImageGeneration.Enabled && strings.TrimSpace(opts.ImagineProxyBaseURL) != "" {
+		note += " 启用生图时，xai_api_base_url 会写成本地 /imagine/v1 代理，由 grok_switch 注入独立生图 API Key（Grok ImageGen 本身会带聊天 Key）。"
 	}
 	writeJSON(w, map[string]any{
 		"path":    s.Paths.GrokConfig,
 		"snippet": snippet,
 		"full":    string(full),
-		"note":    "磁盘上只有一份生效的 config.toml。每个供应商的 URL/Key/模型保存在 grok_switch 的 profile 里；点「启用」或「保存并启用」时，才会把该供应商的字段写入这份文件。",
+		"note":    note,
 	})
 }
 
@@ -808,6 +898,51 @@ func probeModel(ctx context.Context, baseURL, apiKey, upstreamFormat, apiBackend
 		msg = resp.Status
 	}
 	return fmt.Errorf("%s: %s", resp.Status, msg)
+}
+
+func probeImageGeneration(ctx context.Context, baseURL, apiKey, model string) error {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	model = strings.TrimSpace(model)
+	if baseURL == "" {
+		return fmt.Errorf("base_url is required")
+	}
+	if apiKey == "" {
+		return fmt.Errorf("api_key is required")
+	}
+	if model == "" {
+		return fmt.Errorf("model is required")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":  model,
+		"prompt": "A simple blue circle centered on a white background",
+		"n":      1,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/images/generations", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	message := strings.TrimSpace(string(raw))
+	if message == "" {
+		message = resp.Status
+	}
+	return fmt.Errorf("%s: %s", resp.Status, message)
 }
 
 func modelEndpoints(baseURL string) []string {

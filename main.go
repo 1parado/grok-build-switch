@@ -28,6 +28,7 @@ import (
 	"grok_switch/internal/singleinstance"
 	"grok_switch/internal/switcher"
 	"grok_switch/internal/tray"
+	"grok_switch/internal/updatecheck"
 )
 
 func main() {
@@ -117,25 +118,30 @@ func main() {
 	agent := agentbridge.New(resolved.GrokHome, filepath.Join(resolved.DataDir, "agent.log"))
 	agent.SetDefaultCwd(currentSettings.AgentDefaultCwd)
 	defer agent.Stop()
+	updateState := updatecheck.NewPreferenceStore(resolved.UpdateStateFile)
 
 	appServer := &server.Server{
-		Paths:        resolved,
-		Profiles:     profileStore,
-		Settings:     settingsStore,
-		RemoteAccess: remoteaccess.NewStore(resolved.RemoteAccessFile),
-		GrokAuth:     grokAuthStore,
-		GrokPool:     grokPool,
-		CpaMint:      cpamint.NewService(),
-		Registrar:    registrarService,
-		Switcher:     sw,
-		Agent:        agent,
-		Assets:       assets,
-		ExePath:      exePath,
+		Paths:         resolved,
+		Profiles:      profileStore,
+		Settings:      settingsStore,
+		RemoteAccess:  remoteaccess.NewStore(resolved.RemoteAccessFile),
+		GrokAuth:      grokAuthStore,
+		GrokPool:      grokPool,
+		CpaMint:       cpamint.NewService(),
+		Registrar:     registrarService,
+		Switcher:      sw,
+		Agent:         agent,
+		Assets:        assets,
+		ExePath:       exePath,
+		Version:       version,
+		UpdateChecker: updatecheck.New(version, "grok_switch.exe"),
+		UpdateState:   updateState,
 	}
 	httpServer, port, err := appServer.Listen(currentSettings.Port)
 	if err != nil {
 		fatal(err)
 	}
+	startUpdateNotification(appServer.UpdateChecker, updateState, "grok_switch")
 	// Route net/http's internal panic/error reports into the crash log too.
 	if crashFile := resolved.LogFile; crashFile != "" {
 		if f, ferr := os.OpenFile(crashFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); ferr == nil {

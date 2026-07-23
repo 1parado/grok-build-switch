@@ -12,7 +12,8 @@
 
   <img width="1524" height="1012" alt="image" src="https://github.com/user-attachments/assets/cdcfddd0-55d4-4ae5-a830-4f99c1525b9b" />
 
-- 供应商默认使用 `high` 推理强度；每个模型自动写入 `supports_reasoning_effort = true` 和 `low/medium/high` 支持列表
+- 供应商默认使用 `high` 推理强度；普通模型自动写入 `supports_reasoning_effort = true` 和 `low/medium/high` 支持列表
+- 可为 `/imagine` / `image_gen` 单独配置生图服务地址、API Key、后端协议和模型；支持独立拉取模型与实际生图测试，不继承语言模型凭据，也不会把生图模型加入聊天模型列表。**Grok CLI 的 ImageGen 会用聊天会话 Key 访问 `xai_api_base_url`**，因此启用独立生图时，grok_switch 会把 `xai_api_base_url` 写成 `http://127.0.0.1:<port>/imagine/v1` 本地代理并注入你配置的生图 Key（需保持 grok_switch 在运行）
 - 一键启用：写入 `[endpoints]`、`[models]`、`[subagents.models]`（explore / plan）与 `[model.*]`，其它段尽量保留
 - 切换 / 保存 config 前自动备份；设置页可还原备份、直接编辑 `config.toml`
 - 首次运行可从当前 `config.toml` 导入 Default 供应商
@@ -30,6 +31,7 @@
 
 - 可设置Windows 开机自启
 - Windows 单实例运行；再次双击 EXE 会打开已运行实例的管理页面
+- 启动 15 秒后自动检查稳定版 Release，之后每 24 小时检查；发现新版本后显示桌面通知和一键下载入口，可跳过当前版本
 - 启动失败时显示原生错误对话框，并尽可能写入诊断日志
 - 托盘菜单：快速切换、打开面板、复制地址、打开数据/日志目录
 
@@ -51,19 +53,23 @@
 
 ### 方式一：从 Release 下载（推荐）
 
-1. 打开本仓库的 [Releases](../../releases) 页面
-2. 根据你的操作系统与架构下载对应的统一命名发布包：
+**[一键下载最新版 Windows 托盘版 EXE](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch.exe)**
+
+[下载 Windows GUI 版 EXE](https://github.com/1parado/grok-build-switch/releases/latest/download/grok_switch_gui.exe) · [查看全部版本与更新说明](https://github.com/1parado/grok-build-switch/releases/latest)
+
+根据你的操作系统与架构下载对应的发布包：
 
 | 操作系统 (OS) | 架构 (Arch) | 发布的统一文件包 (Artifact Name) | 说明 |
 |---|---|---|---|
-| **Windows** | `amd64` (x64) | `grok_switch_windows_amd64.exe` / `grok_switch_gui_windows_amd64.exe` | 包含 CLI 与 GUI EXE |
+| **Windows** | `amd64` (x64) | `grok_switch.exe` / `grok_switch_gui.exe` (或 `grok_switch_windows_amd64.exe`) | 包含 CLI 与 GUI EXE |
 | **macOS** | `amd64` (Intel) | `grok_switch_darwin_amd64.tar.gz` | 解压包含 CLI 与 GUI |
 | **macOS** | `arm64` (M 系列) | `grok_switch_darwin_arm64.tar.gz` | 解压包含 CLI 与 GUI |
 | **Linux** | `amd64` (x86_64) | `grok_switch_linux_amd64.tar.gz` | 解压包含 CLI 与 GUI |
 | **Linux** | `arm64` (aarch64) | `grok_switch_linux_arm64.tar.gz` | 解压包含 CLI 与 GUI |
 
-3. 解压并运行二进制文件（Windows 双击 `.exe`，macOS / Linux 在终端解压并运行 `./grok_switch`）
-4. 启动后浏览器会自动打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
+1. 点击上方直链或到 Releases 页面获取对应平台的压缩包/二进制
+2. 解压并运行（Windows 双击 `.exe`，macOS / Linux 在终端解压并运行 `./grok_switch`）
+3. 托盘出现图标；浏览器会打开 `http://127.0.0.1:17878/`（可在设置中关闭「启动时打开面板」）
 5. 再次双击 EXE 不会启动第二个后台实例，而是打开已经运行的管理页面
 
 普通用户只需下载并运行，**不需要**配置证书、签名密码、Go 或 Node。发布流程会在
@@ -139,6 +145,7 @@ ZeroTier 或 WireGuard 等 VPN。
 | `%USERPROFILE%\.grok_switch\grok_pool\pool.json` | 号池展示状态与巡检/代理设置（不含 token；代理 URL 可能包含认证信息） |
 | `%USERPROFILE%\.grok_switch\grok_pool\accounts\` | 号池各账号 OAuth 凭据副本（**敏感**） |
 | `%USERPROFILE%\.grok_switch\grok_switch.log` | 日志 |
+| `%USERPROFILE%\.grok_switch\update_state.json` | 更新通知与跳过版本状态 |
 
 如果持久化 JSON 因断电、手动编辑或同步软件冲突而损坏，程序会先将原文件重命名为
 `<文件名>.corrupt-<时间>.bak`，再恢复安全默认值。恢复过程会写入 `grok_switch.log`，
@@ -200,7 +207,8 @@ $env:GROK_SWITCH_SIGN_THUMBPRINT = "<certificate-thumbprint>"
 .\build.ps1 -RequireSignature
 ```
 
-仓库的 `Windows Release` 工作流会在推送 `v*` tag 时构建并上传 EXE 与 SHA-256 文件。
+仓库的 `Windows Release` 工作流会在推送 `v*` tag 时注入版本号、构建并上传固定文件名的
+EXE 与 SHA-256 文件。固定文件名保证 `releases/latest/download/...` 下载链接始终指向最新版。
 配置以下 GitHub Actions Secrets 后会强制执行 Authenticode 签名；未配置时会发布带明确
 警告的未签名构建，不会阻塞 Release：
 

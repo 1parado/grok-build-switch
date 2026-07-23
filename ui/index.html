@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=38">
+  <link rel="stylesheet" href="/style.css?v=43">
 </head>
 <body>
   <div class="shell">
@@ -26,9 +26,23 @@
         <button type="button" id="chatBtn" class="btn" data-home-only>聊天</button>
         <button type="button" id="addBtn" class="btn primary" data-home-only>添加供应商</button>
         <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
+        <button type="button" id="navSkillsBtn" class="btn">Skills</button>
         <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
       </div>
     </header>
+
+    <aside id="updateBanner" class="updateBanner" hidden>
+      <div class="updateCopy">
+        <strong>发现新版本 <span id="updateVersion"></span></strong>
+        <span id="updateDetail">最新版已发布，可直接下载更新。</span>
+      </div>
+      <div class="inlineActions updateActions">
+        <a id="updateDownloadBtn" class="btn sm primary" href="#" target="_blank" rel="noopener">下载最新版</a>
+        <a id="updateReleaseBtn" class="btn sm" href="#" target="_blank" rel="noopener">查看更新说明</a>
+        <button type="button" id="updateSkipBtn" class="btn sm ghost">跳过此版本</button>
+        <button type="button" id="updateDismissBtn" class="btn sm ghost" aria-label="关闭更新提示" title="关闭更新提示">×</button>
+      </div>
+    </aside>
 
     <div id="driftBanner" class="alert warn" hidden style="display:none">
       <div>
@@ -148,6 +162,44 @@
                 </select>
               </label>
             </div>
+            <section class="mediaModelTools" aria-labelledby="imageGenTitle">
+              <div class="rowBetween">
+                <div>
+                  <strong id="imageGenTitle">生图模型</strong>
+                  <p class="muted tiny">用于 Grok 的 /imagine 与 image_gen。启用后会经本机 /imagine/v1 代理注入独立 API Key（Grok 客户端本身会带聊天 Key），真实上游地址与 Key 写在下方。</p>
+                </div>
+                <label class="check"><input type="checkbox" id="imageGenEnabled"> 启用 /imagine</label>
+              </div>
+              <fieldset id="imageGenFields" class="imageGenFields" disabled>
+                <div class="formGrid">
+                  <label class="field span2">生图服务地址
+                    <input id="imageGenBaseUrl" class="mono" placeholder="https://api.example.com/v1">
+                  </label>
+                  <label class="field span2">生图 API Key
+                    <div class="keyRow">
+                      <input id="imageGenApiKey" type="password" autocomplete="off" placeholder="粘贴生图服务的 API Key">
+                      <button type="button" id="toggleImageGenKey" class="btn sm">显示</button>
+                    </div>
+                  </label>
+                  <label class="field">API Backend
+                    <select id="imageGenApiBackend" class="mono">
+                      <option value="chat_completions">chat_completions</option>
+                      <option value="responses">responses</option>
+                      <option value="messages">messages</option>
+                    </select>
+                  </label>
+                  <label class="field">生图模型
+                    <input id="imageGenModel" class="mono" list="imageGenModelOptions" placeholder="拉取后选择或手动输入">
+                    <datalist id="imageGenModelOptions"></datalist>
+                  </label>
+                </div>
+                <div class="inlineActions wrap imageGenActions">
+                  <button type="button" id="fetchImageModelsBtn" class="btn sm">拉取生图模型</button>
+                  <button type="button" id="testImageModelBtn" class="btn sm">测试生图</button>
+                  <p id="imageGenStatus" class="connStatus" hidden></p>
+                </div>
+              </fieldset>
+            </section>
             <input id="modelSearchInput" class="mono search" placeholder="搜索上游模型…">
             <div id="modelSuggestions" class="chips"></div>
             <p id="modelPoolStatus" class="muted tiny">尚未拉取模型。点 chip 启用后，会出现在上方下拉框中。</p>
@@ -285,9 +337,38 @@
 
           <form id="chatComposer" class="chatComposer">
             <div id="chatAttachments" class="chatAttachments" hidden></div>
+            <div id="composerToolbar" class="composerToolbar">
+              <div class="composerToolbarLeft">
+                <label class="composerControl composerModelControl">
+                  <span class="composerControlLabel">模型</span>
+                  <select id="composerModelSelect" class="composerModelSelect" title="模型" disabled>
+                    <option value="">加载配置…</option>
+                  </select>
+                </label>
+                <label class="composerControl composerStrengthControl">
+                  <span class="composerControlLabel">推理</span>
+                  <select id="composerStrengthSelect" class="composerStrengthSelect" title="推理强度" disabled>
+                    <option value="">加载配置…</option>
+                  </select>
+                </label>
+              </div>
+            </div>
             <div class="composerInputWrap">
-              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…" aria-label="消息" disabled></textarea>
-              <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行</span>
+              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…  输入 /skills 插入 Skill" aria-label="消息" disabled></textarea>
+              <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行 · /skills 浏览技能</span>
+              <div id="skillsPopup" class="skillsPopup" hidden role="listbox" aria-label="可用 Skills">
+                <div class="skillsPopupHead">
+                  <div class="skillsPopupHeadLeft">
+                    <strong>Skills</strong>
+                    <span class="skillsPopupKbd muted tiny">↑↓ 选择 · Enter 插入 · Esc 关闭</span>
+                  </div>
+                  <span id="skillsPopupCount" class="skillsPopupBadge">0</span>
+                </div>
+                <div id="skillsPopupList" class="skillsPopupList"></div>
+                <div class="skillsPopupFoot">
+                  <span class="muted tiny">插入为 <code>/skills 技能名</code>，可继续输入说明</span>
+                </div>
+              </div>
             </div>
             <div class="composerActions">
               <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
@@ -345,6 +426,60 @@
         </aside>
         <div id="nativeChatScrim" class="nativeChatScrim" hidden></div>
       </section>
+    </main>
+
+    <!-- SKILLS -->
+    <main id="viewSkills" class="view skillsView" hidden>
+      <div class="toolbar">
+        <div>
+          <h1 class="pageTitle">Skills</h1>
+          <p class="pageDesc">浏览本机 Agent Skills，复制路径或卸载用户安装的技能</p>
+        </div>
+        <span id="skillsCount" class="muted count">0 个</span>
+      </div>
+
+      <div class="listControls skillsControls">
+        <input id="skillsSearch" class="search providerSearch" type="search" placeholder="搜索名称或路径…" autocomplete="off">
+        <button type="button" id="refreshSkillsBtn" class="btn sm">刷新</button>
+      </div>
+
+      <div class="skillsSourceHint formCard">
+        <div class="skillsSourceHintGrid">
+          <div class="skillsSourceChip" data-tone="agents">
+            <span class="skillsSourceChipLabel">Agent</span>
+            <code>~/.agents/skills</code>
+          </div>
+          <div class="skillsSourceChip" data-tone="user">
+            <span class="skillsSourceChipLabel">用户</span>
+            <code>~/.grok/skills</code>
+          </div>
+          <div class="skillsSourceChip" data-tone="bundled">
+            <span class="skillsSourceChipLabel">内置</span>
+            <code>~/.grok/bundled/skills</code>
+          </div>
+        </div>
+        <div class="skillsSourceHintActions">
+          <p class="muted tiny skillsSourceHintNote">聊天中输入 <code>/skills</code> 可快速插入技能；内置技能仅可浏览，不可删除。</p>
+          <a class="skillsMarketplaceLink" href="https://skillsmp.com/skills" target="_blank" rel="noopener noreferrer">find skills <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+
+      <div id="skillsEmpty" class="empty" hidden>
+        <h2>还没有 Skills</h2>
+        <p>在 <code>~/.agents/skills</code> 或 <code>~/.grok/skills</code> 安装 Skill 后会出现在这里。</p>
+      </div>
+
+      <div id="skillsSearchEmpty" class="empty searchEmpty" hidden>
+        <p>没有匹配的 Skills</p>
+      </div>
+
+      <div id="skillsLoading" class="loadingHint" hidden>正在加载 Skills…</div>
+
+      <div id="skillsList" class="skillsList"></div>
+
+      <div class="inlineActions">
+        <button type="button" id="backFromSkillsBtn" class="btn">返回供应商列表</button>
+      </div>
     </main>
 
     <!-- SETTINGS -->
@@ -585,6 +720,8 @@
           <div><strong id="registrarProgressCount">0 / 0</strong><span id="registrarProgressDetail" class="muted tiny">等待任务</span></div>
           <progress id="registrarProgressBar" max="1" value="0"></progress>
         </div>
+        <div id="registrarChallengeStatus" class="registrarChallengeStatus muted tiny" hidden></div>
+        <div id="registrarResults" class="registrarResults" hidden></div>
         <pre id="registrarLog" class="registrarLog mono">尚未运行注册任务。</pre>
       </section>
 
@@ -786,6 +923,6 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=40"></script>
+  <script src="/app.js?v=48"></script>
 </body>
 </html>

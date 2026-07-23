@@ -8,6 +8,7 @@ grok_switch_gui.exe
 grok_switch.exe.sha256
 grok_switch_gui.exe.sha256
 site/
+output/
 
 # Code-signing private keys must never be committed
 *.pfx

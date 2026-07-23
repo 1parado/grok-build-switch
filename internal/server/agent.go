@@ -34,6 +34,7 @@ type AgentService interface {
 	RespondPermission(string, bool) error
 	RespondPermissionEx(string, bool, bool) error
 	SetSessionAutoApprove(bool)
+	SetSessionConfig(context.Context, string, string) error
 	ListStoredSessions(string, int) ([]agentbridge.SessionSummary, error)
 	StoredSessionHistory(string) (agentbridge.SessionHistory, error)
 	RenameStoredSession(string, string) error
@@ -420,6 +421,8 @@ func (s *Server) handleAgentRename(w http.ResponseWriter, r *http.Request) {
 type agentSocketMessage struct {
 	Type        string                   `json:"type"`
 	Text        string                   `json:"text,omitempty"`
+	Model       string                   `json:"model,omitempty"`
+	Strength    string                   `json:"strength,omitempty"`
 	RequestID   string                   `json:"request_id,omitempty"`
 	Allow       bool                     `json:"allow,omitempty"`
 	Remember    bool                     `json:"remember,omitempty"`
@@ -487,6 +490,11 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 		var err error
 		switch message.Type {
 		case "user_message":
+			if message.Model != "" || message.Strength != "" {
+				if setErr := s.Agent.SetSessionConfig(ctx, message.Model, message.Strength); setErr != nil {
+					fmt.Fprintf(os.Stderr, "grok_switch: set session config failed: %v\n", setErr)
+				}
+			}
 			err = s.Agent.Prompt(message.Text, message.Attachments)
 		case "cancel":
 			err = s.Agent.CancelPrompt()

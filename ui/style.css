@@ -3250,6 +3250,46 @@ body.resizingChatPanels * {
   border-radius: 5px;
 }
 
+.composerToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 8px;
+}
+
+.composerToolbarLeft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.composerModelSelect,
+.composerStrengthSelect {
+  min-height: 28px;
+  padding: 2px 20px 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: 11px/1.3 var(--font);
+  cursor: pointer;
+  appearance: auto;
+  max-width: 180px;
+}
+
+.composerModelSelect:disabled,
+.composerStrengthSelect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composerModelSelect:not(:disabled):hover,
+.composerStrengthSelect:not(:disabled):hover {
+  border-color: var(--primary-border);
+  color: var(--text);
+}
+
 .chatComposer {
   padding: 12px max(16px, calc((100% - 820px) / 2)) 16px;
   border-top: 0;
@@ -3404,4 +3444,219 @@ body.resizingChatPanels * {
   .chatMessageText { font-size: 13px; }
   .markdownBody table { display: block; overflow-x: auto; }
   .permissionBar { margin-inline: 8px; }
+}
+
+/* Skills management */
+.skillsList {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.skillsGroup {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.skillsGroupTitle {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.skillsItems {
+  display: flex;
+  flex-direction: column;
+}
+
+.skillItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  transition: background 120ms ease;
+}
+
+.skillItem:last-child {
+  border-bottom: none;
+}
+
+.skillItem:hover {
+  background: var(--surface-2);
+}
+
+.skillIcon {
+  flex-shrink: 0;
+  font-size: 18px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.skillInfo {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.skillName {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillPath {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillActions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.deleteSkillBtn {
+  color: var(--danger) !important;
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--line)) !important;
+}
+
+.deleteSkillBtn:hover {
+  background: var(--danger-soft) !important;
+  border-color: var(--danger) !important;
+}
+
+.loadingHint {
+  text-align: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Skills popup in chat */
+.skillsPopup {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  max-height: 280px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.12);
+}
+
+.skillsPopup[hidden] {
+  display: none !important;
+}
+
+.skillsPopupHead {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.skillsPopupList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.skillsPopupItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: 13px/1.4 var(--font);
+}
+
+.skillsPopupItem:hover {
+  background: var(--primary-soft);
+}
+
+.skillsPopupItem:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.skillsPopupItemIcon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.skillsPopupItemInfo {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 1px;
+}
+
+.skillsPopupItemName {
+  font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillsPopupItemPath {
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skillsPopupLoading {
+  display: block;
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.skillsPopupEmpty {
+  display: block;
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
 }

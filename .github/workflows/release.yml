@@ -162,8 +162,32 @@ jobs:
 
       - name: Install Linux GUI Dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev || sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev
+          # Ubuntu 24.04 (noble) provides webkit2gtk-4.1; older runners may only have 4.0.
+          # Install common build deps first, then prefer 4.1 for Wails.
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential pkg-config \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev || true
+          if apt-cache show libwebkit2gtk-4.1-dev >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libwebkit2gtk-4.1-dev
+          fi
+          if apt-cache show libwebkit2gtk-4.0-dev >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libwebkit2gtk-4.0-dev || true
+          fi
+          # Optional tray indicator (name differs across Ubuntu versions).
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libappindicator3-dev || true
+          echo "pkg-config webkit modules:"
+          pkg-config --list-all | grep -E 'webkit|gtk' || true
+          if pkg-config --exists webkit2gtk-4.1; then
+            echo "Using webkit2gtk-4.1 ($(pkg-config --modversion webkit2gtk-4.1))"
+          elif pkg-config --exists webkit2gtk-4.0; then
+            echo "Using webkit2gtk-4.0 ($(pkg-config --modversion webkit2gtk-4.0))"
+          else
+            echo "Neither webkit2gtk-4.1 nor webkit2gtk-4.0 found via pkg-config" >&2
+            exit 1
+          fi
 
       - name: Build CLI
         env:
@@ -177,8 +201,15 @@ jobs:
         env:
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
         run: |
-          go build -tags "wailsgui,desktop,production" -trimpath -ldflags "-s -w" -o grok_switch_gui .
+          # Wails defaults to webkit2gtk-4.0; Ubuntu 24.04 needs the webkit2_41 tag.
+          TAGS="wailsgui,desktop,production"
+          if pkg-config --exists webkit2gtk-4.1; then
+            TAGS="${TAGS},webkit2_41"
+          fi
+          echo "Building GUI with -tags ${TAGS}"
+          go build -tags "${TAGS}" -trimpath -ldflags "-s -w" -o grok_switch_gui .
 
       - name: Package Linux build
         run: |

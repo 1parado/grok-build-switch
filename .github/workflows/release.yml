@@ -232,6 +232,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
+      # Required so `gh` can resolve the repository (no git context without checkout).
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -245,8 +249,10 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          set -euo pipefail
           if [ "${{ github.ref_type }}" = "tag" ]; then
             TAG_NAME="${RELEASE_TAG}"
           else
@@ -256,4 +262,11 @@ jobs:
           if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
             gh release create "${TAG_NAME}" --generate-notes --title "${TAG_NAME}"
           fi
-          gh release upload "${TAG_NAME}" ./dist/* --clobber
+          # Upload only files (merge-multiple flattens into ./dist).
+          shopt -s nullglob
+          files=(./dist/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No artifacts found under ./dist" >&2
+            exit 1
+          fi
+          gh release upload "${TAG_NAME}" "${files[@]}" --clobber

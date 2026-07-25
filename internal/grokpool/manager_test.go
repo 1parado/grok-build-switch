@@ -248,6 +248,90 @@ func TestBulkDisableAndDeleteOnlyInspectedAbnormalAccounts(t *testing.T) {
 	}
 }
 
+func TestBulkDeleteRemovesAbnormalSourceAuthFiles(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authDir := filepath.Join(t.TempDir(), "auths")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	manager.state.Settings.AuthDir = authDir
+	manager.state.Settings.WatchRecursive = true
+	if err := manager.saveLocked(); err != nil {
+		manager.mu.Unlock()
+		t.Fatal(err)
+	}
+	manager.mu.Unlock()
+
+	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	// Each file maps to one credential per access token. shared-mixed and
+	// shared-both each carry two credentials in the Grok CLI auth.json shape.
+	sources := map[string]string{
+		"abnormal1.json":            fmt.Sprintf(`{"type":"xai","access_token":%q,"expired":%q,"email":%q}`, "a1", expiry, "a1@x.com"),
+		"healthy.json":              fmt.Sprintf(`{"type":"xai","access_token":%q,"expired":%q,"email":%q}`, "h", expiry, "h@x.com"),
+		"shared-both-abnormal.json": fmt.Sprintf(`{"a":{"access_token":%q,"expired":%q,"email":%q},"b":{"access_token":%q,"expired":%q,"email":%q}}`, "sa", expiry, "sa@x.com", "sb", expiry, "sb@x.com"),
+		"shared-mixed.json":         fmt.Sprintf(`{"a":{"access_token":%q,"expired":%q,"email":%q},"b":{"access_token":%q,"expired":%q,"email":%q}}`, "ma", expiry, "ma@x.com", "mh", expiry, "mh@x.com"),
+	}
+	for name, body := range sources {
+		if err := os.WriteFile(filepath.Join(authDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := manager.ImportAuthDir(); err != nil {
+		t.Fatal(err)
+	}
+
+	abnormal := map[string]bool{"a1@x.com": true, "sa@x.com": true, "sb@x.com": true, "ma@x.com": true}
+	manager.mu.Lock()
+	for i := range manager.state.Accounts {
+		if abnormal[manager.state.Accounts[i].Email] {
+			manager.state.Accounts[i].Classification = "quota_exhausted"
+		} else {
+			manager.state.Accounts[i].Classification = "healthy"
+		}
+	}
+	if err := manager.saveLocked(); err != nil {
+		manager.mu.Unlock()
+		t.Fatal(err)
+	}
+	manager.mu.Unlock()
+
+	result, status, err := manager.BulkAction("delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Matched != 4 || result.Updated != 4 {
+		t.Fatalf("delete result = %#v", result)
+	}
+	if result.DeletedFiles != 2 {
+		t.Fatalf("expected 2 source files deleted, got %d (result=%#v)", result.DeletedFiles, result)
+	}
+	if len(status.Accounts) != 2 {
+		t.Fatalf("expected 2 remaining accounts, got %d", len(status.Accounts))
+	}
+	for _, account := range status.Accounts {
+		if abnormal[account.Email] {
+			t.Fatalf("abnormal account %q should have been deleted", account.Email)
+		}
+	}
+
+	removed := []string{"abnormal1.json", "shared-both-abnormal.json"}
+	kept := []string{"healthy.json", "shared-mixed.json"}
+	for _, name := range removed {
+		if _, err := os.Stat(filepath.Join(authDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("abnormal source file %s should be removed, stat err = %v", name, err)
+		}
+	}
+	for _, name := range kept {
+		if _, err := os.Stat(filepath.Join(authDir, name)); err != nil {
+			t.Fatalf("source file %s should remain, stat err = %v", name, err)
+		}
+	}
+}
+
 func TestProbeErrorTextIsBounded(t *testing.T) {
 	message := strings.Repeat("x", 1200)
 	parsed := extractProbeError(message)

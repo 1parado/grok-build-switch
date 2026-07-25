@@ -251,9 +251,7 @@ func requestDeviceCode(ctx context.Context, client *http.Client) (deviceCodeResp
 	if err != nil {
 		return deviceCodeResponse{}, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "grok-switch-cpamint/1.0")
+	setDeviceOAuthHeaders(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return deviceCodeResponse{}, fmt.Errorf("请求 device code 失败: %w", err)
@@ -266,22 +264,31 @@ func requestDeviceCode(ctx context.Context, client *http.Client) (deviceCodeResp
 	if resp.StatusCode != http.StatusOK {
 		return deviceCodeResponse{}, fmt.Errorf("device code 返回 %s: %s", resp.Status, compactBody(body))
 	}
+	if err := ensureJSONBody(resp.Status, body); err != nil {
+		return deviceCodeResponse{}, err
+	}
 	var payload struct {
 		DeviceCode              string `json:"device_code"`
 		UserCode                string `json:"user_code"`
 		VerificationURI         string `json:"verification_uri"`
 		VerificationURIComplete string `json:"verification_uri_complete"`
-		ExpiresIn               int    `json:"expires_in"`
-		Interval                int    `json:"interval"`
+		// Some deployments also emit verification_url (non-standard alias).
+		VerificationURL string `json:"verification_url"`
+		ExpiresIn       int    `json:"expires_in"`
+		Interval        int    `json:"interval"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return deviceCodeResponse{}, fmt.Errorf("解析 device code 响应: %w", err)
+		return deviceCodeResponse{}, fmt.Errorf("解析 device code 响应 HTTP %s: %w body=%s", resp.Status, err, compactBody(body))
 	}
 	if strings.TrimSpace(payload.DeviceCode) == "" || strings.TrimSpace(payload.UserCode) == "" {
 		return deviceCodeResponse{}, fmt.Errorf("device code 响应缺少字段")
 	}
-	vuri := firstNonEmpty(payload.VerificationURI, "https://accounts.x.ai/oauth2/device")
-	vcomplete := firstNonEmpty(payload.VerificationURIComplete, vuri+"?user_code="+payload.UserCode)
+	userCode := strings.TrimSpace(payload.UserCode)
+	vuri := firstNonEmpty(payload.VerificationURI, payload.VerificationURL, VerificationURIDefault)
+	vcomplete := firstNonEmpty(
+		payload.VerificationURIComplete,
+		vuri+"?user_code="+url.QueryEscape(userCode),
+	)
 	expiresIn := payload.ExpiresIn
 	if expiresIn <= 0 {
 		expiresIn = 1800
@@ -292,12 +299,39 @@ func requestDeviceCode(ctx context.Context, client *http.Client) (deviceCodeResp
 	}
 	return deviceCodeResponse{
 		DeviceCode:              strings.TrimSpace(payload.DeviceCode),
-		UserCode:                strings.TrimSpace(payload.UserCode),
+		UserCode:                userCode,
 		VerificationURI:         vuri,
 		VerificationURIComplete: vcomplete,
 		ExpiresIn:               expiresIn,
 		Interval:                interval,
 	}, nil
+}
+
+// setDeviceOAuthHeaders marks device/token POSTs as JSON form posts to auth.x.ai.
+func setDeviceOAuthHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", defaultClientHeaders["User-Agent"])
+}
+
+// ensureJSONBody rejects HTML SPA responses (common when hitting the verification
+// page URL instead of the device-code API).
+func ensureJSONBody(status string, body []byte) error {
+	trim := strings.TrimSpace(string(body))
+	if trim == "" {
+		return fmt.Errorf("空响应 HTTP %s", status)
+	}
+	prefixLen := 64
+	if len(trim) < prefixLen {
+		prefixLen = len(trim)
+	}
+	if strings.HasPrefix(trim, "<") || strings.Contains(strings.ToLower(trim[:prefixLen]), "<!doctype") {
+		return fmt.Errorf("期望 JSON 设备码响应，却收到 HTML（HTTP %s）。请确认 DeviceCodeURL 指向 auth.x.ai/oauth2/device/code 而非 accounts 验证页", status)
+	}
+	return nil
 }
 
 func pollDeviceToken(ctx context.Context, client *http.Client, device deviceCodeResponse) (tokenResult, error) {
@@ -319,9 +353,7 @@ func pollDeviceToken(ctx context.Context, client *http.Client, device deviceCode
 		if err != nil {
 			return tokenResult{}, err
 		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", "grok-switch-cpamint/1.0")
+		setDeviceOAuthHeaders(req)
 		resp, err := client.Do(req)
 		if err != nil {
 			select {

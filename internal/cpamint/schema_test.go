@@ -10,6 +10,29 @@ import (
 	"time"
 )
 
+func TestOAuthEndpointsSplitAPIAndUIHosts(t *testing.T) {
+	// API endpoints live on auth.x.ai (OIDC discovery).
+	if DeviceCodeURL != "https://auth.x.ai/oauth2/device/code" {
+		t.Fatalf("DeviceCodeURL = %q", DeviceCodeURL)
+	}
+	if TokenURL != "https://auth.x.ai/oauth2/token" {
+		t.Fatalf("TokenURL = %q", TokenURL)
+	}
+	// Human verification UI lives on accounts.x.ai (returned as verification_uri).
+	if !strings.HasPrefix(VerificationURIDefault, "https://accounts.x.ai/") {
+		t.Fatalf("VerificationURIDefault = %q", VerificationURIDefault)
+	}
+	if DeviceConsentURL != "https://accounts.x.ai/oauth2/device/consent" {
+		t.Fatalf("DeviceConsentURL = %q", DeviceConsentURL)
+	}
+	if Issuer != "https://auth.x.ai" {
+		t.Fatalf("Issuer = %q", Issuer)
+	}
+	if ClientID == "" || Scope == "" {
+		t.Fatal("client_id/scope must not be empty")
+	}
+}
+
 func TestBuildAndWriteAuthFile(t *testing.T) {
 	payload := base64.RawURLEncoding.EncodeToString([]byte(
 		`{"sub":"user-1","email":"a@example.com","exp":9999999999,"iat":9999990000}`,

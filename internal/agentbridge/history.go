@@ -24,6 +24,9 @@ type SessionSummary struct {
 	Model        string    `json:"model,omitempty"`
 	AgentName    string    `json:"agent_name,omitempty"`
 	MessageCount int       `json:"message_count"`
+	// CwdMissing is true when the recorded working directory no longer exists.
+	// Such sessions remain listed so the user can fix the path or delete them.
+	CwdMissing bool `json:"cwd_missing,omitempty"`
 }
 
 type HistoryMessage struct {
@@ -90,13 +93,15 @@ func (b *Bridge) ListStoredSessions(query string, limit int) ([]SessionSummary, 
 			if readErr != nil || summary.Info.ID == "" || summary.Info.Cwd == "" {
 				continue
 			}
-			if strings.TrimSpace(summary.GeneratedTitle) == "" && strings.TrimSpace(summary.SessionSummary) == "" {
-				continue
-			}
-			if info, statErr := os.Stat(summary.Info.Cwd); statErr != nil || !info.IsDir() {
+			if strings.TrimSpace(summary.GeneratedTitle) == "" &&
+				strings.TrimSpace(summary.SessionSummary) == "" &&
+				strings.TrimSpace(summary.CustomTitle) == "" {
 				continue
 			}
 			item := summary.toSessionSummary()
+			if info, statErr := os.Stat(summary.Info.Cwd); statErr != nil || !info.IsDir() {
+				item.CwdMissing = true
+			}
 			if query != "" && !strings.Contains(strings.ToLower(item.Title+" "+item.Cwd+" "+item.Model), query) {
 				continue
 			}
@@ -190,6 +195,41 @@ func (b *Bridge) RenameStoredSession(id, title string) error {
 	}
 	if err := os.WriteFile(sidecar, data, 0o600); err != nil {
 		return fmt.Errorf("写入会话标题失败: %w", err)
+	}
+	return nil
+}
+
+// DeleteStoredSession removes a Grok session directory under ~/.grok/sessions.
+// It does not stop a running Agent; callers should open a new session if the
+// deleted id is currently attached.
+func (b *Bridge) DeleteStoredSession(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsAny(id, `/\\`) {
+		return errors.New("会话 ID 无效")
+	}
+	dir, summary, err := b.findStoredSession(id)
+	if err != nil {
+		return err
+	}
+	// Safety: only delete paths that sit under the known sessions root and match
+	// the session id segment, never arbitrary filesystem paths.
+	root, err := filepath.Abs(filepath.Join(b.grokHome, "sessions"))
+	if err != nil {
+		return err
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(root, absDir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("会话路径不在安全范围内")
+	}
+	if filepath.Base(absDir) != summary.Info.ID && filepath.Base(absDir) != id {
+		return fmt.Errorf("会话目录与 ID 不匹配")
+	}
+	if err := os.RemoveAll(absDir); err != nil {
+		return fmt.Errorf("删除会话失败: %w", err)
 	}
 	return nil
 }

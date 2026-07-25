@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Vet
+        shell: pwsh
+        # Explicit package roots avoid walking unrelated local directories.
+        run: go vet ./internal/... .
+
+      - name: Test
+        shell: pwsh
+        run: |
+          go test ./internal/... .
+          # Wails GUI tray helpers are behind the wailsgui build tag.
+          go test -tags=wailsgui .
+
+      - name: Build (smoke)
+        shell: pwsh
+        run: |
+          go build -o "$env:RUNNER_TEMP\grok_switch_ci.exe" .
+          if (-not (Test-Path "$env:RUNNER_TEMP\grok_switch_ci.exe")) {
+            throw "CLI build did not produce an executable"
+          }

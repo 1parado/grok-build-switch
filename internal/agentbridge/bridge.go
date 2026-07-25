@@ -19,6 +19,7 @@ var (
 	ErrBusy               = errors.New("Grok Agent 正在处理上一条消息")
 	ErrNotRunning         = errors.New("Grok Agent 尚未启动")
 	ErrPermissionNotFound = errors.New("权限请求已失效")
+	ErrPlanNotFound       = errors.New("计划审批请求已失效")
 )
 
 const SessionLoadOverflowCode = "session_load_overflow"
@@ -33,9 +34,9 @@ type SessionLoadError struct {
 }
 
 func (e *SessionLoadError) Error() string {
-	message := "会话过大或恢复时通知过多，引擎上下文未能加载。已展示本地历史（只读）"
+	message := "会话过大或恢复时通知过多，引擎上下文未能完整加载。已展示本地历史"
 	if e.RecoveryErr == nil {
-		return message + "；Agent 已自动重启，可开启新对话"
+		return message + "；Agent 已自动重启，下一条消息将注入历史摘要以续聊"
 	}
 	return fmt.Sprintf("%s；Agent 自动重启失败: %v", message, e.RecoveryErr)
 }
@@ -71,6 +72,10 @@ type pendingPermission struct {
 	result  chan acp.PermissionOptionId
 }
 
+type pendingPlan struct {
+	result chan PlanDecision
+}
+
 type Bridge struct {
 	grokHome string
 	logPath  string
@@ -89,6 +94,9 @@ type Bridge struct {
 	sessionAutoApprove bool
 	busy               bool
 	model              string
+	userTurnCount      int
+	needsBootstrap     bool
+	bootstrapText      string
 	suppressUpdates    atomic.Bool
 	generation         uint64
 	cmd                *exec.Cmd
@@ -104,6 +112,8 @@ type Bridge struct {
 	subCounter  atomic.Uint64
 	permissions map[string]*pendingPermission
 	permCounter atomic.Uint64
+	plans       map[string]*pendingPlan
+	planCounter atomic.Uint64
 }
 
 func New(grokHome, logPath string) *Bridge {
@@ -118,6 +128,7 @@ func New(grokHome, logPath string) *Bridge {
 		defaultCwd:  defaultCwd,
 		subscribers: map[string]chan Event{},
 		permissions: map[string]*pendingPermission{},
+		plans:       map[string]*pendingPlan{},
 	}
 }
 
@@ -151,6 +162,8 @@ func (b *Bridge) Status() Status {
 		SessionAutoApprove: b.sessionAutoApprove,
 		Model:              b.model,
 		Error:              b.lastError,
+		NeedsBootstrap:     b.needsBootstrap,
+		UserTurnCount:      b.userTurnCount,
 	}
 	override := b.override
 	b.mu.RUnlock()
@@ -309,6 +322,12 @@ func (b *Bridge) startLocked(ctx context.Context, opts StartOptions) error {
 
 func (b *Bridge) recoverSessionLoadLocked(opts StartOptions, cause error) error {
 	fmt.Fprintf(os.Stderr, "grok_switch: session load failed session=%s: %v\n", opts.SessionID, cause)
+	var bootstrap string
+	var userTurns int
+	if history, histErr := b.StoredSessionHistory(opts.SessionID); histErr == nil {
+		bootstrap = BuildHistoryBootstrap(history.Messages)
+		userTurns = CountUserTurns(history.Messages)
+	}
 	b.stopLocked()
 	recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -318,6 +337,19 @@ func (b *Bridge) recoverSessionLoadLocked(opts StartOptions, cause error) error 
 	})
 	if recoveryErr != nil {
 		fmt.Fprintf(os.Stderr, "grok_switch: session load recovery failed session=%s: %v\n", opts.SessionID, recoveryErr)
+	} else {
+		// startLocked/newSession clears bootstrap; re-arm after a successful recovery.
+		b.mu.Lock()
+		if bootstrap != "" {
+			b.needsBootstrap = true
+			b.bootstrapText = bootstrap
+		}
+		b.userTurnCount = userTurns
+		b.mu.Unlock()
+		if bootstrap != "" {
+			fmt.Fprintf(os.Stderr, "grok_switch: history bootstrap armed session=%s turns=%d chars=%d\n", opts.SessionID, userTurns, len(bootstrap))
+		}
+		b.broadcastStatus()
 	}
 	return &SessionLoadError{Cause: cause, RecoveryErr: recoveryErr}
 }
@@ -352,6 +384,9 @@ func (b *Bridge) newSessionLocked(ctx context.Context, cwd string) error {
 	b.cwd = cwd
 	b.sessionID = string(response.SessionId)
 	b.sessionAutoApprove = false
+	b.userTurnCount = 0
+	b.needsBootstrap = false
+	b.bootstrapText = ""
 	if model := modelFromMeta(response.Meta); model != "" {
 		b.model = model
 	}
@@ -399,12 +434,19 @@ func (b *Bridge) loadSessionLocked(ctx context.Context, sessionID, cwd string) e
 			fmt.Fprintf(os.Stderr, "grok_switch: suppressed session replay notifications session=%s count=%d\n", sessionID, dropped)
 		}
 	}
+	userTurns := 0
+	if history, histErr := b.StoredSessionHistory(sessionID); histErr == nil {
+		userTurns = CountUserTurns(history.Messages)
+	}
 	b.mu.Lock()
 	b.busy = false
 	if err == nil {
 		b.cwd = cwd
 		b.sessionID = sessionID
 		b.sessionAutoApprove = false
+		b.userTurnCount = userTurns
+		b.needsBootstrap = false
+		b.bootstrapText = ""
 		b.state = "ready"
 		b.lastError = ""
 		b.model = summary.CurrentModelID
@@ -447,10 +489,6 @@ func modelFromMeta(meta map[string]any) string {
 
 func (b *Bridge) Prompt(text string, attachments []Attachment) error {
 	text = strings.TrimSpace(text)
-	blocks := buildPromptBlocks(text, attachments)
-	if len(blocks) == 0 {
-		return errors.New("消息不能为空")
-	}
 	b.mu.Lock()
 	if b.cmd == nil || b.conn == nil || b.sessionID == "" || b.processCtx == nil {
 		b.mu.Unlock()
@@ -460,11 +498,27 @@ func (b *Bridge) Prompt(text string, attachments []Attachment) error {
 		b.mu.Unlock()
 		return ErrBusy
 	}
+	agentText := text
+	if b.needsBootstrap && b.bootstrapText != "" {
+		if agentText == "" {
+			agentText = b.bootstrapText + "\n请根据以上历史摘要继续对话。"
+		} else {
+			agentText = b.bootstrapText + "\n【用户本条新消息】\n" + text
+		}
+		b.needsBootstrap = false
+		b.bootstrapText = ""
+	}
+	blocks := buildPromptBlocks(agentText, attachments)
+	if len(blocks) == 0 {
+		b.mu.Unlock()
+		return errors.New("消息不能为空")
+	}
 	turnCtx, turnCancel := context.WithCancel(b.processCtx)
 	b.busy = true
 	b.state = "busy"
 	b.lastError = ""
 	b.promptCancel = turnCancel
+	b.userTurnCount++
 	conn := b.conn
 	sessionID := b.sessionID
 	generation := b.generation
@@ -474,38 +528,115 @@ func (b *Bridge) Prompt(text string, attachments []Attachment) error {
 	return nil
 }
 
-// buildPromptBlocks turns the user's text + attachments into ACP content
-// blocks. Images become inline image blocks (base64); text files are folded
-// into the prompt as labelled snippets.
-func buildPromptBlocks(text string, attachments []Attachment) []acp.ContentBlock {
-	blocks := make([]acp.ContentBlock, 0, 1+len(attachments))
-	if text != "" {
-		blocks = append(blocks, acp.TextBlock(text))
+// ClearBootstrap discards a pending history bootstrap (user chose a fresh chat).
+func (b *Bridge) ClearBootstrap() {
+	b.mu.Lock()
+	b.needsBootstrap = false
+	b.bootstrapText = ""
+	b.mu.Unlock()
+	b.broadcastStatus()
+}
+
+// ArmBootstrapFromSession loads stored history and arms first-prompt bootstrap.
+func (b *Bridge) ArmBootstrapFromSession(sessionID string) error {
+	history, err := b.StoredSessionHistory(sessionID)
+	if err != nil {
+		return err
 	}
-	const textFileMax = 20000
-	for _, a := range attachments {
-		switch strings.ToLower(strings.TrimSpace(a.Kind)) {
-		case "image":
-			if a.Data != "" && a.MimeType != "" {
-				blocks = append(blocks, acp.ImageBlock(a.Data, a.MimeType))
-			}
-		case "text_file":
-			snippet := strings.TrimSpace(a.Text)
-			if snippet == "" {
-				continue
-			}
-			if len(snippet) > textFileMax {
-				snippet = snippet[:textFileMax] + "\n…（已截断，仅发送前 20000 字符）"
-			}
-			name := strings.TrimSpace(a.Name)
-			if name != "" {
-				blocks = append(blocks, acp.TextBlock(fmt.Sprintf("【附件：%s】\n%s", name, snippet)))
-			} else {
-				blocks = append(blocks, acp.TextBlock(snippet))
+	text := BuildHistoryBootstrap(history.Messages)
+	if text == "" {
+		return errors.New("历史为空，无法注入摘要")
+	}
+	b.mu.Lock()
+	b.needsBootstrap = true
+	b.bootstrapText = text
+	b.userTurnCount = CountUserTurns(history.Messages)
+	b.mu.Unlock()
+	b.broadcastStatus()
+	return nil
+}
+
+// RewindDropLastUser truncates agent context before the last user turn via
+// Grok extension _x.ai/rewind/execute. Soft-fails when the extension is missing.
+func (b *Bridge) RewindDropLastUser(ctx context.Context, restoreFiles bool) RewindResult {
+	b.mu.RLock()
+	conn := b.conn
+	sessionID := b.sessionID
+	turns := b.userTurnCount
+	busy := b.busy
+	b.mu.RUnlock()
+	if conn == nil || sessionID == "" {
+		return RewindResult{OK: false, Soft: true, Error: ErrNotRunning.Error(), UserTurnCount: turns}
+	}
+	if busy {
+		return RewindResult{OK: false, Soft: true, Error: ErrBusy.Error(), UserTurnCount: turns}
+	}
+	target := DropLastUserRewindIndex(turns)
+	result := b.rewindExecute(ctx, conn, sessionID, target, restoreFiles)
+	if !result.OK && turns > 1 {
+		// Retry with last user index (some CLI builds treat target as inclusive keep).
+		alt := turns - 1
+		if alt != target {
+			if altResult := b.rewindExecute(ctx, conn, sessionID, alt, restoreFiles); altResult.OK {
+				result = altResult
+				target = alt
 			}
 		}
 	}
-	return blocks
+	if result.OK {
+		b.mu.Lock()
+		if b.userTurnCount > 0 {
+			b.userTurnCount--
+		}
+		turns = b.userTurnCount
+		b.mu.Unlock()
+		result.UserTurnCount = turns
+		result.TargetIndex = target
+	} else {
+		result.UserTurnCount = turns
+		result.TargetIndex = target
+		result.Soft = true
+	}
+	return result
+}
+
+func (b *Bridge) rewindExecute(ctx context.Context, conn *acp.ClientSideConnection, sessionID string, target int, restoreFiles bool) RewindResult {
+	if target < 0 {
+		target = 0
+	}
+	params := map[string]any{
+		"sessionId":         sessionID,
+		"targetPromptIndex": target,
+		"restoreFiles":      restoreFiles,
+		"restore_files":     restoreFiles,
+	}
+	_, err := conn.CallExtension(ctx, "_x.ai/rewind/execute", params)
+	if err != nil {
+		return RewindResult{OK: false, Soft: true, Error: err.Error(), TargetIndex: target}
+	}
+	return RewindResult{OK: true, TargetIndex: target}
+}
+
+// RespondPlan resolves a pending exit_plan_mode gate.
+func (b *Bridge) RespondPlan(requestID string, decision PlanDecision) error {
+	outcome := strings.ToLower(strings.TrimSpace(decision.Outcome))
+	switch outcome {
+	case "approved", "cancelled", "abandoned":
+	default:
+		return fmt.Errorf("无效的计划决策: %s", decision.Outcome)
+	}
+	b.mu.RLock()
+	pending := b.plans[requestID]
+	b.mu.RUnlock()
+	if pending == nil {
+		return ErrPlanNotFound
+	}
+	select {
+	case pending.result <- PlanDecision{Outcome: outcome, Feedback: strings.TrimSpace(decision.Feedback)}:
+		return nil
+	default:
+		return ErrPlanNotFound
+	}
 }
 
 // CancelPrompt stops the in-flight turn via ACP session/cancel (context cancel).
@@ -632,6 +763,9 @@ func (b *Bridge) stopLocked() {
 		b.busy = false
 		b.sessionID = ""
 		b.lastError = ""
+		b.userTurnCount = 0
+		b.needsBootstrap = false
+		b.bootstrapText = ""
 		b.mu.Unlock()
 		b.broadcastStatus()
 		return
@@ -639,6 +773,10 @@ func (b *Bridge) stopLocked() {
 	b.state = "stopping"
 	b.busy = false
 	b.sessionAutoApprove = false
+	b.userTurnCount = 0
+	// Keep bootstrap text only if we're about to recover; stop clears it.
+	b.needsBootstrap = false
+	b.bootstrapText = ""
 	cancel := b.cancel
 	promptCancel := b.promptCancel
 	closeJob := b.closeJob

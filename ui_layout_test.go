@@ -86,6 +86,79 @@ func TestIndependentImageGenerationControlsHaveClientHandlers(t *testing.T) {
 	}
 }
 
+func TestChatEmptyStateHasGuidance(t *testing.T) {
+	htmlData, err := assets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`id="chatEmpty"`,
+		`id="chatEmptyTitle"`,
+		`id="chatEmptyDesc"`,
+		`id="chatEmptyStartBtn"`,
+		`id="chatEmptyOpenContextBtn"`,
+	} {
+		if !bytes.Contains(htmlData, []byte(marker)) {
+			t.Fatalf("chat empty marker %q not found in index.html", marker)
+		}
+	}
+	for _, marker := range []string{
+		"function renderChatEmptyState(",
+		"function historyUserPresentation(",
+		"sessionSwitchToken",
+		`/api/agent/session/delete`,
+		"cwd_missing",
+		"/api/agent/upload",
+		"/api/agent/rewind",
+		"/api/agent/projects",
+		"function rewindDropLastUser(",
+		"function buildSlashCatalog(",
+		"function showAgentPlan(",
+		"function mountHistoryRange(",
+		`mode: "prepend"`,
+		"function setToolPayloadLazy(",
+	} {
+		if !bytes.Contains(appData, []byte(marker)) {
+			t.Fatalf("chat fix marker %q not found in app.js", marker)
+		}
+	}
+	// Context usage estimator was removed as inaccurate noise.
+	if bytes.Contains(appData, []byte("function updateContextUsage(")) {
+		t.Fatal("updateContextUsage should be removed from app.js")
+	}
+	if bytes.Contains(htmlData, []byte("contextUsageBar")) {
+		t.Fatal("context usage UI should be removed from index.html")
+	}
+}
+
+func TestMermaidIsLazyLoaded(t *testing.T) {
+	htmlData, err := assets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Eager <script src="...mermaid..."> would pull ~3.5MB on every page load.
+	if bytes.Contains(htmlData, []byte(`src="/vendor/mermaid.min.js`)) {
+		t.Fatal("index.html must not eagerly load mermaid; app.js loads it on demand")
+	}
+	for _, marker := range []string{
+		`const MERMAID_SRC = "/vendor/mermaid.min.js`,
+		"function loadMermaid(",
+		"async function renderMermaidBlocks(",
+	} {
+		if !bytes.Contains(appData, []byte(marker)) {
+			t.Fatalf("mermaid lazy-load marker %q not found in app.js", marker)
+		}
+	}
+}
+
 func TestChatRendersStructuredMediaEvents(t *testing.T) {
 	appData, err := assets.ReadFile("ui/app.js")
 	if err != nil {
@@ -102,7 +175,8 @@ func TestChatRendersStructuredMediaEvents(t *testing.T) {
 		"function renderMessageMedia(",
 		"function normalizeStructuredMedia(",
 		"function extractMediaFromPayload(",
-		"structuredMedia.length ? structuredMedia",
+		"structuredMedia.length",
+		"extractMediaFromPayload(tool.raw_output",
 		"function isPlausibleMediaReference(",
 		`document.createElement("video")`,
 	} {
@@ -128,7 +202,7 @@ func TestRegistrarControlsHaveClientHandlers(t *testing.T) {
 	}
 	for _, id := range []string{
 		"registrarForm", "registrarSteps", "registrarAdvanced", "registrarCloudflareEssentials",
-		"registrarProxyUrl", "registrarCloudflareApiBase",
+		"registrarProxyUrl", "registrarProxyStrategy", "registrarEngine", "registrarCloudflareApiBase",
 		"probeRegistrarBtn", "startRegistrarBtn", "stopRegistrarBtn", "registrarLog",
 		"registrarChallengeStatus", "registrarResults",
 	} {
@@ -205,7 +279,7 @@ func TestChatComposerUsesConfiguredModelsAndReasoningDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{`class="composerControl composerModelControl"`, `class="composerControl composerStrengthControl"`} {
+	for _, marker := range []string{`id="composerModelSelect"`, `id="composerStrengthSelect"`, `composerSelectChip`, `composerFooterRow`} {
 		if !bytes.Contains(htmlData, []byte(marker)) {
 			t.Fatalf("composer control %q not found", marker)
 		}
@@ -225,9 +299,75 @@ func TestSelectedSkillPromptTextDoesNotRemainPopupFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{`const nameEnd = query.search(/\s/);`, `skillsPopupSkills.some`, `if (selected) return null;`} {
+	// After a completed `/skills name ` line, slash popup must close (null filter).
+	for _, marker := range []string{
+		`function slashPopupFilterQuery(`,
+		`/^\/skills\s+(\S+)\s+/i`,
+		`if (skillsMatch) return null;`,
+		`function buildSlashCatalog(`,
+	} {
 		if !bytes.Contains(appData, []byte(marker)) {
 			t.Fatalf("selected Skill query guard %q not found", marker)
+		}
+	}
+}
+
+func TestChatP0P1WorkbenchMarkers(t *testing.T) {
+	htmlData, err := assets.ReadFile("ui/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appData, err := assets.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{
+		"agentProjectList", "addProjectBtn", "planBar", "permissionSessionBtn",
+		"chatWorkspaceFileBtn", "agentSessionAutoApprove", "agentCwd",
+		"openLocationBtn", "composerProjectBtn", "composerAccessSelect",
+		"navHomeFromChatBtn", "agentSidebarTree", "agentSessionList",
+		"toggleOrphanSessionsBtn",
+	} {
+		if !bytes.Contains(htmlData, []byte(`id="`+id+`"`)) {
+			t.Fatalf("missing chat control %s", id)
+		}
+	}
+	for _, marker := range []string{
+		"function sessionsForProject(",
+		"function orphanSessions(",
+		"function orphanWorkspaceGroups(",
+		"function renderSidebarTree(",
+		"function activateProjectWorkspace(",
+		"function promoteWorkspaceToProject(",
+		"其他工作空间",
+	} {
+		if !bytes.Contains(appData, []byte(marker)) && !bytes.Contains(htmlData, []byte(marker)) {
+			t.Fatalf("missing project-scoped session helper %q", marker)
+		}
+	}
+	for _, endpoint := range []string{
+		"/api/agent/upload", "/api/agent/rewind", "/api/agent/projects",
+		"/api/agent/fs", "/api/agent/session/bootstrap",
+		"/api/agent/pick-directory",
+		"/api/agent/open-path",
+		`type: "plan_response"`,
+		"function pickWorkingDirectory(",
+		"function pickDirectoryPath(",
+		"function bindComposerFloatPad(",
+		"function updateComposerProjectLabel(",
+		"composerFooterRow",
+	} {
+		if !bytes.Contains(appData, []byte(endpoint)) && !bytes.Contains(htmlData, []byte(endpoint)) {
+			// float pad / labels are JS; footer class is HTML
+			if endpoint == "composerFooterRow" {
+				if !bytes.Contains(htmlData, []byte(endpoint)) {
+					t.Fatalf("missing client endpoint/marker %s", endpoint)
+				}
+				continue
+			}
+			if !bytes.Contains(appData, []byte(endpoint)) {
+				t.Fatalf("missing client endpoint/marker %s", endpoint)
+			}
 		}
 	}
 }

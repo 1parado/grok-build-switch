@@ -141,7 +141,8 @@ func TestServiceRunsAccountsAndWritesLedger(t *testing.T) {
 		if job.Status != StatusSucceeded || job.Succeeded != 2 || job.Completed != 2 {
 			t.Fatalf("finished job = %#v", job)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(20 * time.Second):
+		// Gate serializes browsers with a few seconds of stagger between accounts.
 		t.Fatal("registration job did not finish")
 	}
 	data, err := os.ReadFile(service.accountsPath)

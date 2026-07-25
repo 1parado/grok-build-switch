@@ -251,7 +251,11 @@ func wrapStage(stage string, err error) error {
 	msg := err.Error()
 	// context errors
 	if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "context canceled") {
-		return regErr(stage, "timeout_or_cancel", msg, "检查页面超时设置、代理连通性，或停止后重试", "")
+		hint := "检查页面超时设置、代理连通性，或停止后重试"
+		if stage == stageMint {
+			hint = "铸造 context 已与浏览器解耦；若仍出现取消，多半是任务被停止或铸造超时，而非 Chrome/CDP 断开"
+		}
+		return regErr(stage, "timeout_or_cancel", msg, hint, "")
 	}
 	return regErr(stage, "error", msg, hintForMessage(msg), "")
 }

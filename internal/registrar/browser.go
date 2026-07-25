@@ -17,9 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/storage"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
@@ -50,14 +52,24 @@ func registerAccount(ctx context.Context, config Config, mailbox Mailbox, authDi
 	// CreateEmailValidationCode is routinely blocked in headless/automation-heavy
 	// sessions. Prefer visible Chrome (matches the working DrissionPage path).
 	// "auto" also uses visible first; headless is only used when explicitly selected.
-	headless := false
-	switch config.BrowserMode {
-	case "headless":
-		headless = true
-	case "auto", "visible", "":
-		headless = false
+	headless := browserHeadless(config)
+	engine := normalizeRegisterEngine(config.RegisterEngine)
+	switch engine {
+	case "protocol_only":
+		log("注册引擎：protocol_only（协议邮箱验证 + 浏览器完成资料/Turnstile）")
+		return registerWithProtocol(ctx, config, mailbox, authDir, log)
+	case "protocol_prefer", "auto":
+		log("注册引擎：" + engine + "（优先协议，失败回退完整浏览器）")
+		outcome, err := registerWithProtocol(ctx, config, mailbox, authDir, log)
+		if err == nil {
+			return outcome, nil
+		}
+		log("协议路径失败，完整浏览器重试：" + err.Error())
+		return registerWithBrowser(ctx, config, mailbox, authDir, headless, log)
+	default:
+		log("注册引擎：browser")
+		return registerWithBrowser(ctx, config, mailbox, authDir, headless, log)
 	}
-	return registerWithBrowser(ctx, config, mailbox, authDir, headless, log)
 }
 
 func isCreateEmailBlocked(err error) bool {
@@ -66,6 +78,40 @@ func isCreateEmailBlocked(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "createemailvalidationcode") || strings.Contains(msg, "验证码接口")
+}
+
+// navigateSignupWithRetry opens the signup page, retrying transient proxy/network drops
+// that commonly appear when Chromium races a local Clash port.
+func navigateSignupWithRetry(ctx context.Context, proxy string, log func(string)) error {
+	const maxAttempts = 3
+	var last error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		last = chromedp.Run(ctx,
+			chromedp.Navigate(signupURL),
+			chromedp.WaitReady("body", chromedp.ByQuery),
+		)
+		if last == nil {
+			if attempt > 1 {
+				logStage(log, stageOpenSignup, fmt.Sprintf("第 %d 次打开成功", attempt))
+			}
+			return nil
+		}
+		if !isTransientNavError(last) {
+			return wrapStage(stageOpenSignup, last)
+		}
+		if attempt < maxAttempts {
+			logStage(log, stageOpenSignup, fmt.Sprintf("打开失败（%s），%d/%d 重试…", last.Error(), attempt, maxAttempts))
+			delay := time.Duration(attempt) * 2 * time.Second
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return wrapStage(stageOpenSignup, ctx.Err())
+			}
+			continue
+		}
+	}
+	hint := navigateHint(last, proxy, "")
+	return regErr(stageOpenSignup, "nav_connection_closed", last.Error(), hint, "")
 }
 
 func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox, authDir string, headless bool, log func(string)) (registrationOutcome, error) {
@@ -89,8 +135,8 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 	}
 
 	logStage(log, stageOpenSignup, "正在打开 "+signupURL)
-	if err := chromedp.Run(ctx, chromedp.Navigate(signupURL), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
-		return registrationOutcome{}, wrapStage(stageOpenSignup, err)
+	if err := navigateSignupWithRetry(ctx, config.ProxyURL, log); err != nil {
+		return registrationOutcome{}, err
 	}
 	// Managed Challenge / Turnstile: actively probe with trusted CDP clicks + human motion.
 	if err := waitForChallengeClear(ctx, session, 90*time.Second, log); err != nil {
@@ -175,7 +221,7 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 	// Some flows already have SSO after email verify (no profile step).
 	if earlySSO, ssoErr := waitForSSOCookie(ctx, 10*time.Second); ssoErr == nil && earlySSO != "" {
 		logStage(log, stageSSO, "邮箱验证后已拿到 SSO，跳过资料页")
-		return finalizeRegistration(ctx, session, config, mailbox, earlySSO, "", authDir, log)
+		return finalizeRegistration(parent, session, config, mailbox, earlySSO, "", authDir, log)
 	}
 
 	given, family, password, err := randomProfile()
@@ -197,7 +243,7 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 		}
 		return registrationOutcome{}, regErr(stageSSO, "sso_timeout", err.Error(), hint, snap.Summary())
 	}
-	return finalizeRegistration(ctx, session, config, mailbox, sso, password, authDir, log)
+	return finalizeRegistration(parent, session, config, mailbox, sso, password, authDir, log)
 }
 
 func errWithDetail(err error, detail string) error {
@@ -261,13 +307,31 @@ func enrichProfileError(ctx context.Context, session *browserSession, err error)
 // finalizeRegistration mints CPA tokens from the SSO cookie and writes the auth
 // file. Shared by the skip-profile path (SSO already present after verify) and
 // the normal path (SSO obtained after profile submission).
-func finalizeRegistration(ctx context.Context, session *browserSession, config Config, mailbox Mailbox, sso, password, authDir string, log func(string)) (registrationOutcome, error) {
+//
+// parent must be the job context (not the browser/CDP context). Minting uses an
+// independent timeout so Chrome close or CDP disconnect cannot cancel the
+// pure-HTTP device flow after SSO has already been obtained.
+func finalizeRegistration(parent context.Context, session *browserSession, config Config, mailbox Mailbox, sso, password, authDir string, log func(string)) (registrationOutcome, error) {
 	logStage(log, stageSSO, "已获取 SSO")
-	logStage(log, stageMint, "开始 CPA 铸造")
-	tokens, method, err := mintFromSSO(ctx, session, sso, config.ProxyURL, config.PreferProtocolMint, config.ProtocolOnly, log)
+	mintCtx, cancel := mintContext(parent)
+	defer cancel()
+	logStage(log, stageMint, "开始 CPA 铸造（独立于浏览器生命周期）")
+	if proxy := strings.TrimSpace(config.ProxyURL); proxy != "" {
+		logStage(log, stageMint, "铸造代理 "+RedactProxy(proxy))
+	} else {
+		logStage(log, stageMint, "铸造未配置代理（直连）")
+	}
+	tokens, method, err := mintFromSSO(mintCtx, session, sso, config.ProxyURL, config.PreferProtocolMint, config.ProtocolOnly, log)
 	if err != nil {
-		return registrationOutcome{}, regErr(stageMint, "mint_failed", err.Error(),
-			"协议铸造失败时可关闭「协议失败不回退」以走浏览器授权", "")
+		hint := "请保持注册浏览器可见，并确认 device/consent 页的真实「允许」操作"
+		if parent != nil && parent.Err() != nil {
+			hint = "注册任务已取消或整体超时"
+		} else if mintCtx.Err() == context.DeadlineExceeded {
+			hint = "铸造超时：检查授权页是否点到「允许」，以及代理是否稳定"
+		} else if isDeviceAuthDenied(err) {
+			hint = "授权服务器已明确拒绝该账号/device grant；本次已直接停止，不再重试或提交备用表单"
+		}
+		return registrationOutcome{}, regErr(stageMint, "mint_failed", err.Error(), hint, "")
 	}
 	authPath, err := writeCPAAuth(authDir, mailbox.Address(), tokens)
 	if err != nil {
@@ -452,11 +516,36 @@ func startBrowser(parent context.Context, config Config, headless bool) (*browse
 		return nil, fmt.Errorf("等待浏览器调试端口: %w", err)
 	}
 
-	allocator, cancelAllocator := chromedp.NewRemoteAllocator(parent, wsURL)
-	browserCtx, cancelBrowser := chromedp.NewContext(allocator)
+	// Attach to Chrome's existing startup page. RemoteAllocator always sets
+	// first=false, so bare NewContext + first Run would CreateTarget("about:blank")
+	// and leave the original blank tab open — users see two pages every time.
+	existingTarget, err := waitFirstPageTargetID(port, 10*time.Second)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		_ = os.RemoveAll(profile)
+		return nil, fmt.Errorf("等待浏览器初始标签: %w", err)
+	}
+
+	// Use Background for the allocator so intermediate parent cancellations
+	// (or short-lived call contexts) do not tear down Chrome mid-Turnstile.
+	// Job stop still kills the browser via session.Close() / cancel.
+	allocatorCtx, cancelAllocator := context.WithCancel(context.Background())
+	if parent != nil {
+		go func() {
+			select {
+			case <-parent.Done():
+				cancelAllocator()
+			case <-allocatorCtx.Done():
+			}
+		}()
+	}
+	allocator, cancelRemote := chromedp.NewRemoteAllocator(allocatorCtx, wsURL)
+	browserCtx, cancelBrowser := chromedp.NewContext(allocator, chromedp.WithTargetID(target.ID(existingTarget)))
 	session := &browserSession{cmd: cmd, profile: profile}
 	cancel := func() {
 		cancelBrowser()
+		cancelRemote()
 		cancelAllocator()
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
@@ -474,6 +563,11 @@ func startBrowser(parent context.Context, config Config, headless bool) (*browse
 		// does nothing. Bypass CSP for this tab so their handlers run normally.
 		page.Enable(),
 		page.SetBypassCSP(true),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// Drop any extra page targets (extensions / second blank tabs).
+			_ = closeExtraPageTargets(ctx)
+			return nil
+		}),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			chromedp.ListenTarget(ctx, func(ev interface{}) {
 				switch e := ev.(type) {
@@ -560,6 +654,90 @@ func waitDebuggerURL(port int, timeout time.Duration) (string, error) {
 		lastErr = fmt.Errorf("超时")
 	}
 	return "", lastErr
+}
+
+// waitFirstPageTargetID returns Chrome's first page target id via the DevTools
+// HTTP list API. Used so RemoteAllocator attaches instead of creating a second tab.
+func waitFirstPageTargetID(port int, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d/json/list", port)
+	var lastErr error
+	client := &http.Client{Timeout: 2 * time.Second}
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil {
+			return "", err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(150 * time.Millisecond)
+			continue
+		}
+		var targets []struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+			URL  string `json:"url"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&targets)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			time.Sleep(150 * time.Millisecond)
+			continue
+		}
+		// Prefer a normal blank/new-tab page; skip chrome-extension:// backgrounds.
+		var fallback string
+		for _, t := range targets {
+			if t.Type != "page" || strings.TrimSpace(t.ID) == "" {
+				continue
+			}
+			u := strings.ToLower(strings.TrimSpace(t.URL))
+			if strings.HasPrefix(u, "chrome-extension://") || strings.HasPrefix(u, "devtools://") {
+				continue
+			}
+			if u == "" || u == "about:blank" || strings.HasPrefix(u, "chrome://") {
+				return t.ID, nil
+			}
+			if fallback == "" {
+				fallback = t.ID
+			}
+		}
+		if fallback != "" {
+			return fallback, nil
+		}
+		lastErr = fmt.Errorf("调试端点暂无 page target")
+		time.Sleep(150 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("超时")
+	}
+	return "", lastErr
+}
+
+// closeExtraPageTargets closes every page target except the one currently attached.
+// Safe no-op when only one page exists.
+func closeExtraPageTargets(ctx context.Context) error {
+	c := chromedp.FromContext(ctx)
+	if c == nil || c.Browser == nil || c.Target == nil {
+		return nil
+	}
+	keep := c.Target.TargetID
+	browserExec := cdp.WithExecutor(ctx, c.Browser)
+	infos, err := target.GetTargets().Do(browserExec)
+	if err != nil {
+		return err
+	}
+	for _, info := range infos {
+		if info == nil || info.Type != "page" {
+			continue
+		}
+		if info.TargetID == keep || info.TargetID == "" {
+			continue
+		}
+		_ = target.CloseTarget(info.TargetID).Do(browserExec)
+	}
+	return nil
 }
 
 func chromiumProxyServer(raw string) string {
@@ -899,7 +1077,7 @@ func fillAndSubmitCode(ctx context.Context, code string) error {
 func fillProfileAndSubmit(ctx context.Context, given, family, password string) error {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return profileCtxErr(ctx, "资料页开始前")
 	case <-time.After(2 * time.Second):
 	}
 
@@ -914,8 +1092,9 @@ func fillProfileAndSubmit(ctx context.Context, given, family, password string) e
 			var filled string
 			if err := chromedp.Run(ctx, chromedp.Evaluate(fmt.Sprintf(fillProfileOnlyScript, string(values)), &filled)); err != nil {
 				if ctx.Err() != nil {
-					return ctx.Err()
+					return profileCtxErr(ctx, "填写资料")
 				}
+				// Transient CDP eval blip — keep waiting for profile form.
 				filled = "not-ready"
 			}
 			switch {
@@ -930,7 +1109,7 @@ func fillProfileAndSubmit(ctx context.Context, given, family, password string) e
 				}
 				select {
 				case <-ctx.Done():
-					return ctx.Err()
+					return profileCtxErr(ctx, "等待 Turnstile")
 				case <-time.After(800 * time.Millisecond):
 				}
 				continue
@@ -939,7 +1118,7 @@ func fillProfileAndSubmit(ctx context.Context, given, family, password string) e
 			case filled == "fill-failed", filled == "not-ready":
 				select {
 				case <-ctx.Done():
-					return ctx.Err()
+					return profileCtxErr(ctx, "等待资料表单")
 				case <-time.After(500 * time.Millisecond):
 				}
 				continue
@@ -949,7 +1128,7 @@ func fillProfileAndSubmit(ctx context.Context, given, family, password string) e
 		var submitState string
 		if err := chromedp.Run(ctx, chromedp.Evaluate(submitProfileScript, &submitState)); err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return profileCtxErr(ctx, "提交资料")
 			}
 			submitState = "no-submit-button"
 		}
@@ -963,7 +1142,7 @@ func fillProfileAndSubmit(ctx context.Context, given, family, password string) e
 			}
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return profileCtxErr(ctx, "等待 Turnstile 提交")
 			case <-time.After(800 * time.Millisecond):
 			}
 			continue
@@ -974,11 +1153,28 @@ func fillProfileAndSubmit(ctx context.Context, given, family, password string) e
 		waitCFSince = time.Time{}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return profileCtxErr(ctx, "资料页循环")
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 	return &browserChallengeError{message: "最终注册页资料填写失败（Turnstile 未通过或资料页未提交）"}
+}
+
+// profileCtxErr turns opaque context.Canceled into a diagnosable profile-stage error.
+func profileCtxErr(ctx context.Context, step string) error {
+	if ctx == nil {
+		return fmt.Errorf("%s：context 为空", step)
+	}
+	err := ctx.Err()
+	if err == nil {
+		return fmt.Errorf("%s：未知中断", step)
+	}
+	if err == context.DeadlineExceeded {
+		return fmt.Errorf("%s：页面超时（Turnstile/资料页未在时限内完成）: %w", step, err)
+	}
+	// context.Canceled usually means Chrome/CDP target died or job stopped —
+	// not a proxy failure. Callers should not cool the only local proxy for this.
+	return fmt.Errorf("%s：浏览器会话中断（CDP/标签页关闭或任务取消）: %w", step, err)
 }
 
 // retryTurnstileToken mirrors getTurnstileToken + token inject from the Python registrar.

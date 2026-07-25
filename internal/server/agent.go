@@ -33,11 +33,17 @@ type AgentService interface {
 	Unsubscribe(string)
 	RespondPermission(string, bool) error
 	RespondPermissionEx(string, bool, bool) error
+	RespondPermissionOption(string, string, bool) error
+	RespondPlan(string, agentbridge.PlanDecision) error
+	RewindDropLastUser(context.Context, bool) agentbridge.RewindResult
+	ClearBootstrap()
+	ArmBootstrapFromSession(string) error
 	SetSessionAutoApprove(bool)
 	SetSessionConfig(context.Context, string, string) error
 	ListStoredSessions(string, int) ([]agentbridge.SessionSummary, error)
 	StoredSessionHistory(string) (agentbridge.SessionHistory, error)
 	RenameStoredSession(string, string) error
+	DeleteStoredSession(string) error
 }
 
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +424,37 @@ func (s *Server) handleAgentRename(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleAgentDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var request struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := decodeAgentJSON(r, &request); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.SessionID) == "" {
+		writeError(w, errors.New("会话 ID 不能为空"), http.StatusBadRequest)
+		return
+	}
+	if err := s.Agent.DeleteStoredSession(request.SessionID); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeError(w, err, status)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
 type agentSocketMessage struct {
 	Type        string                   `json:"type"`
 	Text        string                   `json:"text,omitempty"`
@@ -426,6 +463,9 @@ type agentSocketMessage struct {
 	RequestID   string                   `json:"request_id,omitempty"`
 	Allow       bool                     `json:"allow,omitempty"`
 	Remember    bool                     `json:"remember,omitempty"`
+	OptionID    string                   `json:"option_id,omitempty"`
+	Outcome     string                   `json:"outcome,omitempty"`
+	Feedback    string                   `json:"feedback,omitempty"`
 	Attachments []agentbridge.Attachment `json:"attachments,omitempty"`
 }
 
@@ -447,7 +487,8 @@ func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	conn.SetReadLimit(64 << 10)
+	// Path-only attachments keep payloads small; 256 KiB covers multi-file metadata.
+	conn.SetReadLimit(256 << 10)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -504,7 +545,15 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 		case "cancel":
 			err = s.Agent.CancelPrompt()
 		case "permission_response":
-			err = s.Agent.RespondPermissionEx(message.RequestID, message.Allow, message.Remember)
+			if strings.TrimSpace(message.OptionID) != "" {
+				err = s.Agent.RespondPermissionOption(message.RequestID, message.OptionID, message.Remember)
+			} else {
+				err = s.Agent.RespondPermissionEx(message.RequestID, message.Allow, message.Remember)
+			}
+		case "plan_response":
+			err = s.Agent.RespondPlan(message.RequestID, agentbridge.PlanDecision{
+				Outcome: message.Outcome, Feedback: message.Feedback,
+			})
 		case "set_session_auto_approve":
 			s.Agent.SetSessionAutoApprove(message.Allow || message.Remember)
 			// Status broadcast is emitted by SetSessionAutoApprove.
@@ -565,6 +614,8 @@ func writeSessionLoadError(w http.ResponseWriter, err error, status agentbridge.
 	if errors.As(err, &loadErr) {
 		restarted = loadErr.Recovered()
 	}
+	// When recovery created a fresh session with bootstrap armed, the UI may continue chatting.
+	bootstrapReady := restarted && status.NeedsBootstrap && status.State == "ready"
 	writeJSONStatus(w, struct {
 		Error           string             `json:"error"`
 		Code            string             `json:"code"`
@@ -572,16 +623,109 @@ func writeSessionLoadError(w http.ResponseWriter, err error, status agentbridge.
 		Recoverable     bool               `json:"recoverable"`
 		EngineLoaded    bool               `json:"engine_loaded"`
 		AgentRestarted  bool               `json:"agent_restarted"`
+		NeedsBootstrap  bool               `json:"needs_bootstrap"`
 		Status          agentbridge.Status `json:"status"`
 	}{
 		Error:           err.Error(),
 		Code:            agentbridge.SessionLoadOverflowCode,
-		ReadonlyHistory: true,
+		ReadonlyHistory: !bootstrapReady,
 		Recoverable:     true,
 		EngineLoaded:    false,
 		AgentRestarted:  restarted,
+		NeedsBootstrap:  status.NeedsBootstrap,
 		Status:          status,
 	}, http.StatusConflict)
+}
+
+func (s *Server) handleAgentRewind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		DropLastUser bool `json:"drop_last_user"`
+		RestoreFiles bool `json:"restore_files"`
+	}
+	if err := decodeAgentJSON(r, &req); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	if !req.DropLastUser {
+		writeError(w, errors.New("目前仅支持 drop_last_user"), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	result := s.Agent.RewindDropLastUser(ctx, req.RestoreFiles)
+	writeJSON(w, result)
+}
+
+func (s *Server) handleAgentPlan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		RequestID string `json:"request_id"`
+		Outcome   string `json:"outcome"`
+		Feedback  string `json:"feedback"`
+	}
+	if err := decodeAgentJSON(r, &req); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	if err := s.Agent.RespondPlan(req.RequestID, agentbridge.PlanDecision{
+		Outcome: req.Outcome, Feedback: req.Feedback,
+	}); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, agentbridge.ErrPlanNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, err, status)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAgentBootstrap(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Clear     bool   `json:"clear"`
+	}
+	if err := decodeAgentJSON(r, &req); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	if req.Clear {
+		s.Agent.ClearBootstrap()
+		writeJSON(w, s.Agent.Status())
+		return
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		writeError(w, errors.New("session_id 不能为空"), http.StatusBadRequest)
+		return
+	}
+	if err := s.Agent.ArmBootstrapFromSession(req.SessionID); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, s.Agent.Status())
 }
 
 func agentWebSocketOriginAllowed(r *http.Request) bool {

@@ -337,6 +337,9 @@ func (m *Manager) Delete(id string) (Status, error) {
 	if err := os.Remove(m.accountPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Status{}, err
 	}
+	// Best-effort: also remove the originating CPA auth file when it only
+	// contained this account. Failures don't unwind the pool deletion.
+	m.deleteSourceFilesForIDs(map[string]bool{id: true})
 	m.signalWake()
 	return m.Status(), nil
 }
@@ -400,9 +403,71 @@ func (m *Manager) BulkAction(action string) (BulkResult, Status, error) {
 				result.Failed = append(result.Failed, id+": "+err.Error())
 			}
 		}
+		idSet := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			idSet[id] = true
+		}
+		fileFailed, deletedFiles := m.deleteSourceFilesForIDs(idSet)
+		result.Failed = append(result.Failed, fileFailed...)
+		result.DeletedFiles = deletedFiles
 	}
 	m.signalWake()
 	return result, m.Status(), nil
+}
+
+// deleteSourceFilesForIDs removes the originating CPA auth JSON files from the
+// configured auth directory when every credential in a file belongs to the
+// deletion set. A file that still hosts at least one credential outside the set
+// is left untouched (so a shared multi-credential file is only removed once all
+// of its accounts are being deleted). Accounts imported from uploads or custom
+// directories have no source file in the auth directory, so nothing is removed
+// for them. Returns per-file failures and the count of files actually removed.
+func (m *Manager) deleteSourceFilesForIDs(idSet map[string]bool) (failed []string, deleted int) {
+	m.mu.Lock()
+	dir := m.resolvedAuthDirLocked()
+	recursive := m.state.Settings.WatchRecursive
+	m.mu.Unlock()
+	if dir == "" {
+		return nil, 0
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, 0
+	}
+	pathFiles, _, err := collectAuthJSONByPath(dir, recursive)
+	if err != nil {
+		return nil, 0
+	}
+	var dropped []string
+	for path, file := range pathFiles {
+		credentials, perr := grokauth.ParseCredentials([]byte(file.Content))
+		if perr != nil || len(credentials) == 0 {
+			continue
+		}
+		allAbnormal := true
+		for _, credential := range credentials {
+			if !idSet[credentialID(credential)] {
+				allAbnormal = false
+				break
+			}
+		}
+		if !allAbnormal {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failed = append(failed, filepath.Base(path)+": "+err.Error())
+			continue
+		}
+		deleted++
+		dropped = append(dropped, path)
+	}
+	if len(dropped) > 0 {
+		m.mu.Lock()
+		for _, p := range dropped {
+			delete(m.watchHashes, p)
+		}
+		m.mu.Unlock()
+	}
+	return failed, deleted
 }
 
 func (m *Manager) Authorized(r *http.Request) bool {

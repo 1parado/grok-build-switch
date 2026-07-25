@@ -115,7 +115,14 @@ func (s *Service) Start() (Job, error) {
 		s.mu.Unlock()
 		return Job{}, fmt.Errorf("环境检测未通过: %s", failedChecks(probe))
 	}
-	provider, err := newMailProvider(config, s.usedEmails())
+	// Mail provider uses the primary proxy (or direct) for mailbox HTTP APIs.
+	mailConfig := config
+	if pool := NewProxyPool(config); pool.Len() > 0 {
+		mailConfig.ProxyURL = pool.Primary()
+	} else {
+		mailConfig.ProxyURL = ""
+	}
+	provider, err := newMailProvider(mailConfig, s.usedEmails())
 	if err != nil {
 		s.mu.Unlock()
 		return Job{}, err
@@ -159,7 +166,8 @@ func (s *Service) Start() (Job, error) {
 	job := cloneJob(live.job)
 	s.mu.Unlock()
 
-	s.log(id, fmt.Sprintf("启动内置注册任务：数量=%d，并发=%d，邮箱=%s", config.Count, config.Workers, config.EmailProvider))
+	s.log(id, fmt.Sprintf("启动内置注册任务：数量=%d，并发=%d，邮箱=%s，引擎=%s",
+		config.Count, config.Workers, config.EmailProvider, config.RegisterEngine))
 	go s.run(ctx, live, config, provider)
 	return job, nil
 }
@@ -231,6 +239,25 @@ func (s *Service) SetImportResult(id string, imported, updated int, importErr er
 }
 
 func (s *Service) run(ctx context.Context, live *liveJob, config Config, provider MailProvider) {
+	pool := NewProxyPool(config)
+	gate := newBrowserGate(config, pool)
+	if pool.Len() > 0 {
+		s.log(live.job.ID, fmt.Sprintf("代理池：%d 条，策略=%s，冷却=%ds，引擎=%s",
+			pool.Len(), config.ProxyStrategy, config.ProxyCooldownSeconds, config.RegisterEngine))
+	} else {
+		s.log(live.job.ID, fmt.Sprintf("代理：直连，引擎=%s", config.RegisterEngine))
+	}
+	s.log(live.job.ID, gate.Describe()+"（单代理/直连时强制串行，避免 ERR_CONNECTION_CLOSED）")
+	if config.Workers > gate.Limit() {
+		reason := "单代理/直连时强制串行，避免多开 Chrome 打爆本地 Clash（EOF / ERR_CONNECTION_CLOSED）"
+		if pool != nil && pool.Len() > 1 {
+			reason = "代理条数限制了同时浏览器数"
+		}
+		s.log(live.job.ID, fmt.Sprintf(
+			"配置并发=%d，实际浏览器同时打开≤%d（%s；要真·多线程请配置 ≥%d 条不同代理）",
+			config.Workers, gate.Limit(), reason, config.Workers,
+		))
+	}
 	tasks := make(chan int)
 	var wg sync.WaitGroup
 	workers := config.Workers
@@ -246,7 +273,7 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 				if ctx.Err() != nil {
 					return
 				}
-				s.runOne(ctx, live.job.ID, config, provider, workerID, index)
+				s.runOne(ctx, live.job.ID, config, provider, pool, gate, workerID, index)
 			}
 		}()
 	}
@@ -267,7 +294,7 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 	s.finish(live, ctx.Err())
 }
 
-func (s *Service) runOne(ctx context.Context, jobID string, config Config, provider MailProvider, worker, index int) {
+func (s *Service) runOne(ctx context.Context, jobID string, config Config, provider MailProvider, pool *ProxyPool, gate *browserGate, worker, index int) {
 	mailbox, err := provider.Allocate(ctx)
 	if err != nil {
 		s.completeAccount(jobID, AccountResult{Status: "failed", Error: err.Error()})
@@ -281,13 +308,46 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 	log := func(message string) {
 		s.log(jobID, fmt.Sprintf("[W%d %d/%d %s] %s", worker, index, config.Count, email, message))
 	}
-	log("开始注册")
-	outcome, err := s.runAccount(ctx, config, mailbox, s.resolvedAuthDir(), log)
+
+	// Serialize browser sessions (especially when all share one local proxy).
+	log("等待浏览器名额…")
+	if err := gate.Acquire(ctx); err != nil {
+		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: "任务已取消"})
+		return
+	}
+	defer gate.Release()
+
+	// Per-account proxy from the pool (sticky by index when strategy=sticky).
+	accountConfig := config
+	proxy := ""
+	if pool != nil {
+		proxy = pool.Pick(index - 1)
+	}
+	accountConfig.ProxyURL = proxy
+	if proxy != "" {
+		log("开始注册 · 代理 " + RedactProxy(proxy))
+	} else {
+		log("开始注册 · 直连")
+	}
+
+	outcome, err := s.runAccount(ctx, accountConfig, mailbox, s.resolvedAuthDir(), log)
 	if err != nil {
+		if pool != nil && proxy != "" && shouldCoolProxy(proxy, pool, err) {
+			pool.ReportFailure(proxy)
+			log("代理标记冷却：" + RedactProxy(proxy))
+		} else if proxy != "" && isTransientNavError(err) {
+			log("网络瞬时失败，未冷却代理（单代理/本地代理）")
+		}
 		failMsg := err.Error()
+		if isTransientNavError(err) {
+			failMsg = failMsg + " | " + navigateHint(err, proxy, gate.Describe())
+		}
 		log("失败：" + failMsg)
 		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: failMsg})
 		return
+	}
+	if pool != nil && proxy != "" {
+		pool.ReportSuccess(proxy)
 	}
 	if err := s.appendAccount(outcome); err != nil {
 		failMsg := "账号已注册，但账本写入失败：" + err.Error()

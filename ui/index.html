@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=43">
+  <link rel="stylesheet" href="/style.css?v=49">
 </head>
 <body>
   <div class="shell">
@@ -254,21 +254,45 @@
     <main id="viewChat" class="view chatView" hidden>
       <section class="nativeChatShell" aria-label="Grok Build AI 工作台">
         <aside id="sessionSidebar" class="sessionSidebar" aria-label="历史会话">
-          <div class="nativePaneHead">
-            <div>
-              <span class="nativeEyebrow">GROK VAULT</span>
-              <strong>对话库</strong>
+          <div class="sidebarBrandRow">
+            <div class="sidebarBrandLeft">
+              <img src="/icon.svg" alt="" class="sidebarBrandIcon" width="20" height="20">
+              <span class="sidebarBrandName">Grok</span>
             </div>
-            <button type="button" id="closeSessionSidebarBtn" class="nativeIconBtn" aria-label="隐藏会话列表">×</button>
+            <div class="sidebarBrandActions">
+              <button type="button" id="sidebarSearchFocusBtn" class="chromeBtn" aria-label="搜索会话" title="搜索">⌕</button>
+              <button type="button" id="closeSessionSidebarBtn" class="chromeBtn" aria-label="隐藏会话列表" title="隐藏侧栏">☰</button>
+            </div>
           </div>
-          <button type="button" id="agentNewSessionBtn" class="newChatBtn">新对话</button>
-          <label class="sessionSearchWrap">
+          <button type="button" id="agentNewSessionBtn" class="navNewBtn">
+            <span class="navNewIcon" aria-hidden="true">✎</span>
+            新建会话
+          </button>
+          <label class="sessionSearchWrap" id="sessionSearchWrap">
             <span aria-hidden="true">⌕</span>
             <input id="agentSessionSearch" type="search" placeholder="搜索对话、目录、模型" autocomplete="off">
           </label>
-          <div class="sessionSectionLabel"><span>最近</span><span id="agentSessionCount">0</span></div>
-          <div id="agentSessionList" class="agentSessionList">
-            <p class="sessionListEmpty">正在读取会话…</p>
+          <div class="agentSidebarTree" id="agentSidebarTree">
+            <div class="sessionSectionLabel treeSectionHead">
+              <span>项目</span>
+              <button type="button" id="addProjectBtn" class="sessionSectionAction" title="添加项目（工作空间）">＋</button>
+            </div>
+            <div id="agentProjectList" class="agentProjectList" aria-label="项目与会话">
+              <p class="sessionListEmpty">暂无项目，点击 ＋ 添加工作目录</p>
+            </div>
+            <div class="sessionSectionLabel treeSectionHead" id="orphanSessionsHead">
+              <button type="button" id="toggleOrphanSessionsBtn" class="treeSectionToggle" aria-expanded="true">
+                <span class="treeChevron" aria-hidden="true">▾</span>
+                <span>其他工作空间</span>
+              </button>
+              <span id="agentSessionCount" class="treeSectionCount">0</span>
+            </div>
+            <div id="agentSessionList" class="agentSessionList agentOrphanSessionList" aria-label="其他工作空间">
+              <p class="sessionListEmpty">无未登记工作空间</p>
+            </div>
+          </div>
+          <div class="sidebarFooter">
+            <button type="button" id="navHomeFromChatBtn" class="sidebarFooterBtn">← 返回供应商</button>
           </div>
         </aside>
 
@@ -281,17 +305,24 @@
             <button type="button" id="openSessionSidebarBtn" class="nativeIconBtn" aria-label="切换会话列表">☰</button>
             <div class="conversationIdentity">
               <strong id="activeChatTitle">新对话</strong>
-              <span id="activeChatPath">尚未选择工作目录</span>
+              <span id="activeChatPath" class="activeChatPath" hidden>尚未选择工作目录</span>
             </div>
             <div class="conversationSignals">
-              <span id="agentModelBadge" class="modelBadge">MODEL —</span>
-              <span id="agentStatusBadge" class="agentStatusBadge" data-state="idle">
+              <span id="agentStatusBadge" class="agentStatusBadge" data-state="idle" title="Agent 状态">
                 <span class="statusDot" aria-hidden="true"></span>
                 <span id="agentStatusText">未启动</span>
               </span>
+              <div class="openLocationSplit">
+                <button type="button" id="openLocationBtn" class="openLocationBtn" title="在资源管理器中打开当前工作目录">
+                  <span class="openLocationIcon" aria-hidden="true">↗</span>
+                  <span id="openLocationLabel">打开位置</span>
+                </button>
+                <button type="button" id="pickCwdTopBtn" class="openLocationCaret" title="选择工作目录" aria-label="选择工作目录">▾</button>
+              </div>
+              <span id="agentModelBadge" class="modelBadge" hidden>MODEL —</span>
               <button type="button" id="openChatThemeBtn" class="nativeIconBtn themeToggle"
                 aria-label="设置聊天背景" aria-haspopup="dialog" title="聊天背景">◐</button>
-              <button type="button" id="openContextRailBtn" class="nativeIconBtn railToggle" aria-label="打开会话信息">···</button>
+              <button type="button" id="openContextRailBtn" class="nativeIconBtn railToggle" aria-label="打开会话信息" title="会话信息">···</button>
             </div>
           </header>
 
@@ -310,8 +341,14 @@
           <button type="button" id="chatJumpBottomBtn" class="chatJumpBottomBtn" hidden title="回到最新 · Esc 之外" aria-label="回到最新">↓ 最新</button>
 
           <div id="chatMessages" class="chatMessages" role="log" aria-live="polite">
-            <div id="chatEmpty" class="chatEmpty">
+            <div id="chatEmpty" class="chatEmpty" data-state="welcome">
               <img src="/icon.svg" alt="" class="chatEmptyMark chatEmptyIcon">
+              <strong id="chatEmptyTitle">开始对话</strong>
+              <span id="chatEmptyDesc">在右侧填写工作目录并启动 Agent，或从左侧打开历史会话。</span>
+              <div id="chatEmptyActions" class="chatEmptyActions">
+                <button type="button" id="chatEmptyStartBtn" class="btn sm primary">启动 Agent</button>
+                <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>
+              </div>
             </div>
           </div>
 
@@ -320,61 +357,112 @@
             <button type="button" id="agentReadonlyNewBtn" class="btn sm" hidden>开启新对话</button>
           </div>
 
+          <div id="planBar" class="planBar" hidden>
+            <div class="planBarHead">
+              <span class="permissionLabel">执行计划</span>
+              <strong id="planSummary">等待确认</strong>
+            </div>
+            <pre id="planBody" class="planBody"></pre>
+            <div class="planActions">
+              <button type="button" id="planDismissBtn" class="btn sm">忽略</button>
+              <button type="button" id="planReviseBtn" class="btn sm">请求修改</button>
+              <button type="button" id="planApproveBtn" class="btn sm primary">批准并执行</button>
+            </div>
+          </div>
+
           <div id="permissionBar" class="permissionBar" hidden>
             <div class="permissionCopy">
               <span class="permissionLabel">工具权限</span>
               <strong id="permissionSummary">等待确认</strong>
               <code id="permissionDetail"></code>
-              <label class="permissionRememberCheck">
-                <input type="checkbox" id="permissionRemember"> 本会话记住（后续工具自动允许）
-              </label>
             </div>
             <div class="permissionActions">
               <button type="button" id="permissionRejectBtn" class="btn danger">拒绝</button>
+              <button type="button" id="permissionSessionBtn" class="btn">本会话允许</button>
               <button type="button" id="permissionAllowBtn" class="btn primary">允许一次</button>
             </div>
           </div>
 
-          <form id="chatComposer" class="chatComposer">
-            <div id="chatAttachments" class="chatAttachments" hidden></div>
-            <div id="composerToolbar" class="composerToolbar">
-              <div class="composerToolbarLeft">
-                <label class="composerControl composerModelControl">
-                  <span class="composerControlLabel">模型</span>
-                  <select id="composerModelSelect" class="composerModelSelect" title="模型" disabled>
-                    <option value="">加载配置…</option>
-                  </select>
-                </label>
-                <label class="composerControl composerStrengthControl">
-                  <span class="composerControlLabel">推理</span>
-                  <select id="composerStrengthSelect" class="composerStrengthSelect" title="推理强度" disabled>
-                    <option value="">加载配置…</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-            <div class="composerInputWrap">
-              <textarea id="chatInput" rows="2" placeholder="询问代码、规划任务或继续这段对话…  输入 /skills 插入 Skill" aria-label="消息" disabled></textarea>
-              <span class="composerHint" id="composerHint">Enter 发送 · Shift + Enter 换行 · /skills 浏览技能</span>
-              <div id="skillsPopup" class="skillsPopup" hidden role="listbox" aria-label="可用 Skills">
-                <div class="skillsPopupHead">
-                  <div class="skillsPopupHeadLeft">
-                    <strong>Skills</strong>
-                    <span class="skillsPopupKbd muted tiny">↑↓ 选择 · Enter 插入 · Esc 关闭</span>
+          <form id="chatComposer" class="chatComposer composerCard composerDock" autocomplete="off">
+            <div class="composerDockAura" aria-hidden="true"></div>
+            <div class="composerDockShell">
+              <div id="chatAttachments" class="chatAttachments" hidden></div>
+
+              <div class="composerStage">
+                <div class="composerInputWrap">
+                  <div class="composerFieldGlow" aria-hidden="true"></div>
+                  <textarea id="chatInput" rows="2" placeholder="随心输入…  输入 / 打开命令与 Skills" aria-label="消息" disabled></textarea>
+                  <div id="skillsPopup" class="skillsPopup slashPopup" hidden role="listbox" aria-label="斜杠命令与 Skills">
+                    <div class="skillsPopupHead">
+                      <div class="skillsPopupHeadLeft">
+                        <strong id="slashPopupTitle">命令 / Skills</strong>
+                        <span class="skillsPopupKbd muted tiny">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
+                      </div>
+                      <span id="skillsPopupCount" class="skillsPopupBadge">0</span>
+                    </div>
+                    <div id="skillsPopupList" class="skillsPopupList"></div>
+                    <div class="skillsPopupFoot">
+                      <span class="muted tiny">内置 <code>/plan</code> <code>/compact</code> <code>/new</code> · Skills 插入为 <code>/skills 名</code></span>
+                    </div>
                   </div>
-                  <span id="skillsPopupCount" class="skillsPopupBadge">0</span>
-                </div>
-                <div id="skillsPopupList" class="skillsPopupList"></div>
-                <div class="skillsPopupFoot">
-                  <span class="muted tiny">插入为 <code>/skills 技能名</code>，可继续输入说明</span>
+                  <div id="workspaceFilePopup" class="skillsPopup" hidden role="listbox" aria-label="工作区文件">
+                    <div class="skillsPopupHead">
+                      <div class="skillsPopupHeadLeft">
+                        <strong>工作区文件</strong>
+                        <span class="skillsPopupKbd muted tiny">点击插入 @路径</span>
+                      </div>
+                      <button type="button" id="workspaceFileCloseBtn" class="nativeIconBtn" aria-label="关闭">×</button>
+                    </div>
+                    <label class="sessionSearchWrap workspaceFileSearch">
+                      <span aria-hidden="true">⌕</span>
+                      <input id="workspaceFileSearch" type="search" placeholder="筛选文件名…" autocomplete="off">
+                    </label>
+                    <div id="workspaceFileList" class="skillsPopupList"></div>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div class="composerActions">
-              <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
-              <button type="button" id="chatAttachBtn" class="chatAttachBtn" aria-label="添加附件 / 截图" title="添加图片或文本附件 · 也可直接粘贴图片">＋</button>
-              <button type="button" id="chatStopBtn" class="stopChatBtn" aria-label="停止生成" hidden title="停止生成">■</button>
-              <button type="submit" id="chatSendBtn" class="sendChatBtn" aria-label="发送" disabled>↑</button>
+
+              <!-- Status line sits ABOVE the chip row so long copy never covers 访问方式 / send. -->
+              <div id="composerStatusRow" class="composerStatusRow" hidden>
+                <span class="composerHint" id="composerHint"></span>
+              </div>
+              <div id="composerToolbar" class="composerFooterRow">
+                <div class="composerFooterLeft">
+                  <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
+                  <button type="button" id="chatAttachBtn" class="composerPlusBtn" aria-label="添加附件" title="添加附件">＋</button>
+                  <button type="button" id="chatWorkspaceFileBtn" class="composerMiniChip" aria-label="引用工作区文件" title="@ 引用文件">@</button>
+                  <button type="button" id="composerProjectBtn" class="composerMiniChip composerProjectChip" title="当前项目 / 选择目录">
+                    <span class="composerProjectIcon" aria-hidden="true">📁</span>
+                    <span id="composerProjectLabel">选择项目</span>
+                  </button>
+                  <label class="composerMiniChip composerSelectChip" data-chip="model" title="模型">
+                    <select id="composerModelSelect" class="composerModelSelect" disabled>
+                      <option value="">模型…</option>
+                    </select>
+                  </label>
+                  <label class="composerMiniChip composerSelectChip" data-chip="reason" title="推理强度">
+                    <select id="composerStrengthSelect" class="composerStrengthSelect" disabled>
+                      <option value="">强度…</option>
+                    </select>
+                  </label>
+                  <label class="composerMiniChip composerSelectChip composerAccessChip" data-chip="access" title="工具权限：每次确认 / 本会话自动 / 完全访问">
+                    <span class="composerAccessWarn" aria-hidden="true">⚠</span>
+                    <select id="composerAccessSelect" class="composerAccessSelect" aria-label="访问方式">
+                      <option value="ask">每次确认</option>
+                      <option value="session">本会话自动</option>
+                      <option value="yolo">完全访问</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="composerFooterRight">
+                  <button type="button" id="chatStopBtn" class="stopChatBtn composerActionBtn" aria-label="停止生成" hidden title="停止生成">
+                    <span class="composerStopIcon" aria-hidden="true"></span>
+                  </button>
+                  <button type="submit" id="chatSendBtn" class="sendChatBtn composerActionBtn composerSendBtn" aria-label="发送" disabled>
+                    <span class="composerSendIcon" aria-hidden="true"></span>
+                  </button>
+                </div>
+              </div>
             </div>
           </form>
         </section>
@@ -392,27 +480,23 @@
             <button type="button" id="closeContextRailBtn" class="nativeIconBtn railClose" aria-label="关闭会话信息">×</button>
           </div>
 
+          <!-- cwd/project live in left rail + composer chips; keep hidden field for JS state -->
+          <input id="agentCwd" type="hidden" value="" autocomplete="off" list="recentProjectPaths">
+          <datalist id="recentProjectPaths"></datalist>
+
           <div class="contextSection">
             <span class="contextLabel">当前模型</span>
             <strong id="contextModel">—</strong>
           </div>
           <div class="contextSection">
-            <span class="contextLabel">工作目录</span>
-            <label class="field chatCwdField">
-              <input id="agentCwd" class="mono" autocomplete="off" placeholder="E:\\projects\\my-app">
-            </label>
-          </div>
-          <div class="contextSection">
             <span class="contextLabel">会话 ID</span>
             <code id="contextSessionId">—</code>
           </div>
-          <div class="contextSection contextUsageSection">
-            <div class="contextSectionHead"><span class="contextLabel">上下文用量</span><span id="contextUsageNote" class="muted tiny">估算</span></div>
-            <div id="contextUsageBar" class="contextUsageBar"><span id="contextUsageFill" class="contextUsageFill"></span></div>
-            <span id="contextUsageText" class="muted tiny">尚未发送消息</span>
-          </div>
-          <label class="check autoApproveCheck" title="自动允许 Grok Build 执行工具">
-            <input type="checkbox" id="agentAlwaysApprove"> 自动批准工具
+          <label class="check autoApproveCheck" title="自动允许 Grok Build 执行工具（进程级 YOLO）">
+            <input type="checkbox" id="agentAlwaysApprove"> 自动批准工具（YOLO）
+          </label>
+          <label class="check autoApproveCheck" title="本会话自动允许工具，无需重启进程">
+            <input type="checkbox" id="agentSessionAutoApprove"> 本会话自动批准
           </label>
           <div class="contextActions">
             <button type="button" id="agentStartBtn" class="btn primary">启动 Agent</button>
@@ -600,16 +684,17 @@
         </div>
 
         <ol class="registrarSteps" id="registrarSteps">
-          <li><strong>准备环境</strong>：本机安装 Chrome 或 Edge；开启可访问外网的代理（如 Clash / 系统代理）。</li>
-          <li><strong>填写两项</strong>：下方填写<strong>网络代理</strong>与<strong>临时邮箱 API Base</strong>（自备 cloudflare_temp_email 一类服务地址）。</li>
+          <li><strong>准备环境</strong>：本机安装 Chrome 或 Edge；开启可访问外网的代理（如 Clash，端口与下方一致）。</li>
+          <li><strong>填写两项</strong>：下方填写<strong>网络代理</strong>与<strong>临时邮箱 API Base</strong>。单代理时浏览器会<strong>自动串行</strong>（避免多开抢同一端口导致 CONNECTION_CLOSED）。</li>
           <li><strong>开始注册</strong>：点「开始注册」；弹出浏览器若出现人机验证请手动勾选。完成后自动进入号池。</li>
         </ol>
 
         <form id="registrarForm" class="registrarForm">
           <div class="registrarEssentials registrarWide">
-            <label class="field registrarProviderWide">网络代理
-              <input id="registrarProxyUrl" class="mono" placeholder="例如 http://127.0.0.1:7897" autocomplete="off">
+            <label class="field registrarProviderWide">网络代理（支持多行代理池）
+              <textarea id="registrarProxyUrl" class="mono" rows="3" spellcheck="false" placeholder="一行一个，例如：&#10;http://127.0.0.1:7897&#10;http://user:pass@1.2.3.4:8080&#10;host:port:user:pass"></textarea>
             </label>
+            <p class="muted tiny registrarHint">留空=直连。多条时按下方「代理策略」轮换；失败的代理会短暂冷却。</p>
             <div id="registrarCloudflareEssentials" class="registrarEssentialsGrid">
               <label class="field registrarProviderWide">临时邮箱 API Base
                 <input id="registrarCloudflareApiBase" class="mono" placeholder="https://你的-临时邮箱-API 地址" autocomplete="off">
@@ -623,8 +708,26 @@
           </div>
 
           <details class="registrarAdvanced registrarWide" id="registrarAdvanced">
-            <summary>高级选项（浏览器、邮箱类型、认证与接口路径等）</summary>
+            <summary>高级选项（注册引擎、代理策略、浏览器、邮箱类型等）</summary>
             <div class="registrarAdvancedBody">
+              <label class="field">注册引擎
+                <select id="registrarEngine">
+                  <option value="browser">浏览器全流程（默认）</option>
+                  <option value="protocol_prefer">协议优先（邮箱走 gRPC-web，失败回退浏览器）</option>
+                  <option value="protocol_only">协议邮箱 + 浏览器资料（不整页回退）</option>
+                  <option value="auto">自动（同协议优先）</option>
+                </select>
+              </label>
+              <label class="field">代理策略
+                <select id="registrarProxyStrategy">
+                  <option value="round_robin">轮询 round_robin</option>
+                  <option value="random">随机 random</option>
+                  <option value="sticky">按序号粘性 sticky</option>
+                </select>
+              </label>
+              <label class="field">代理冷却（秒）
+                <input id="registrarProxyCooldown" type="number" min="30" max="3600" value="120">
+              </label>
               <label class="field">浏览器模式
                 <select id="registrarBrowserMode">
                   <option value="visible">可见浏览器（推荐）</option>
@@ -922,7 +1025,7 @@
   <script src="/vendor/highlight.min.js?v=11.11.1"></script>
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
-  <script src="/vendor/mermaid.min.js?v=11.16.0"></script>
-  <script src="/app.js?v=48"></script>
+  <!-- mermaid (~3.5MB) is lazy-loaded by app.js only when a diagram is present -->
+  <script src="/app.js?v=57"></script>
 </body>
 </html>

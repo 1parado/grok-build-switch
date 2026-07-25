@@ -20,13 +20,24 @@ const state = {
   activeAgentSession: null,
   agentEngineState: "none",
   agentFallbackSessionReady: false,
+  agentNeedsBootstrap: false,
   agentPermission: null,
+  agentPlan: null,
   lastUserMessage: "",
   chatStickToBottom: true,
   agentAutoRestoring: false,
   pendingAttachments: [],
+  projects: [],
+  activeProjectId: "",
+  /** projectId -> expanded (default true when missing) */
+  expandedProjects: {},
+  /** orphan workspace pathKey -> expanded (default true) */
+  expandedOrphanWorkspaces: {},
+  orphanSessionsOpen: true,
   update: null,
   updateHidden: false,
+  // Monotonic token so out-of-order session switches discard stale UI updates.
+  sessionSwitchToken: 0,
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -47,8 +58,10 @@ let agentActiveAssistant = null;
 let agentActiveThought = null;
 let agentRetryNotice = null;
 let agentSessionSearchTimer = null;
+const MERMAID_SRC = "/vendor/mermaid.min.js?v=11.16.0";
 let mermaidReady = false;
 let mermaidRenderID = 0;
+let mermaidLoadPromise = null;
 let chatLayoutResizeTimer = null;
 let lastAssistantMessageEl = null;
 let composerConfigLoaded = false;
@@ -65,7 +78,12 @@ const chatNodes = []; // ordered list of { id, article, el } for navigation jump
 
 const HISTORY_PAGE_SIZE = 60; // messages rendered per incremental window
 let pendingHistory = [];     // full message list for the current restored session
-let historyCap = HISTORY_PAGE_SIZE; // how many tail messages are currently rendered
+// Inclusive start / exclusive end of the slice currently mounted in the DOM.
+let historyRenderedStart = 0;
+let historyRenderedEnd = 0;
+// When set, history mount helpers append into this fragment/element instead of #chatMessages.
+let historyMountTarget = null;
+let historyMountSilent = false; // suppress scroll / last-assistant tracking while mounting
 let findMatches = [];        // articles matching the current find query
 let findIndex = -1;
 const agentTools = new Map();
@@ -426,10 +444,17 @@ function imageGenerationOf(profile) {
 }
 
 async function api(path, options = {}) {
+  const { headers: extraHeaders, ...rest } = options || {};
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
+    headers: { "Content-Type": "application/json", ...(extraHeaders || {}) },
+    ...rest,
   });
+  if (rest.signal?.aborted) {
+    const abortError = new Error("请求已取消");
+    abortError.name = "AbortError";
+    abortError.code = "aborted";
+    throw abortError;
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const error = new Error(data.error || res.statusText || "请求失败");
@@ -439,6 +464,10 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+function isAbortError(err) {
+  return !!err && (err.name === "AbortError" || err.code === "aborted");
 }
 
 function toast(message, type = "info") {
@@ -904,6 +933,8 @@ async function openAgentView() {
   const [status] = await Promise.all([
     api("/api/agent/status"),
     loadAgentSessions(),
+    loadAgentProjects().catch(() => {}),
+    loadSkillsForPopup().catch(() => {}),
   ]);
   state.agentStatus = status;
   const last = readLastChatContext();
@@ -915,18 +946,25 @@ async function openAgentView() {
     $("agentAlwaysApprove").checked = last.alwaysApprove;
   }
   renderAgentStatus(status);
+  renderSidebarTree();
   updateConversationIdentity();
   applyStoredChatPanelWidths();
   bindChatScrollTracking();
   updateChatJumpBottomBtn();
   bindChatExtras();
+  bindChatEmptyActions();
+  renderChatEmptyState(status);
   if (window.matchMedia("(min-width: 821px)").matches) {
     const shell = $("viewChat")?.querySelector(".nativeChatShell");
     shell?.classList.toggle("sidebarCollapsed", localStorage.getItem("gs_chat_sidebar_hidden") === "1");
+    // Right context rail defaults collapsed (Grok App style); open via ··· only.
     if (window.matchMedia("(min-width: 1181px)").matches) {
-      shell?.classList.toggle("contextCollapsed", localStorage.getItem("gs_chat_context_hidden") === "1");
+      shell?.classList.add("contextCollapsed");
     }
   }
+  bindComposerFloatPad();
+  syncComposerAccessSelect();
+  updateComposerProjectLabel();
   connectAgentSocket();
   await restoreLastChatContext(status, last);
 }
@@ -1001,66 +1039,370 @@ async function restoreLastChatContext(status, last = readLastChatContext()) {
 async function loadAgentSessions(query = $("agentSessionSearch")?.value || "") {
   const sessions = await api(`/api/agent/sessions?limit=100&query=${encodeURIComponent(query.trim())}`);
   state.agentSessions = Array.isArray(sessions) ? sessions : [];
-  renderAgentSessionList();
+  renderSidebarTree();
   return state.agentSessions;
 }
 
+/** Normalize filesystem paths for project ↔ session matching (Windows + Unicode). */
+function normalizePathKey(path) {
+  let p = String(path || "").trim();
+  if (!p) return "";
+  // Strip Win32 long-path / extended prefixes.
+  p = p.replace(/^\\\\\?\\UNC\\/i, "//").replace(/^\\\\\?\\/i, "");
+  p = p.replace(/\\/g, "/");
+  // Collapse duplicate slashes except leading // for UNC.
+  p = p.replace(/([^:]\/)\/+/g, "$1");
+  p = p.replace(/\/+$/, "");
+  return p.toLowerCase();
+}
+
+function projectPathKeys() {
+  const keys = new Map();
+  for (const project of state.projects || []) {
+    const key = normalizePathKey(project.path);
+    if (key) keys.set(key, project);
+  }
+  return keys;
+}
+
+/** Sessions whose cwd equals the project's workspace path. */
+function sessionsForProject(project) {
+  const key = normalizePathKey(project?.path);
+  if (!key) return [];
+  return (state.agentSessions || []).filter((session) => normalizePathKey(session.cwd) === key);
+}
+
+/** Sessions not belonging to any registered project workspace. */
+function orphanSessions() {
+  const keys = projectPathKeys();
+  return (state.agentSessions || []).filter((session) => {
+    const key = normalizePathKey(session.cwd);
+    return !key || !keys.has(key);
+  });
+}
+
+/**
+ * Group orphan sessions by workspace cwd (same shape as projects, but unregistered).
+ * Returns [{ key, path, name, missing, sessions }] sorted by latest session activity.
+ */
+function orphanWorkspaceGroups() {
+  const groups = new Map();
+  for (const session of orphanSessions()) {
+    const path = String(session.cwd || "").trim();
+    const key = normalizePathKey(path) || "__none__";
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        path,
+        name: path ? workspaceFolderName(path) : "无工作目录",
+        missing: !!session.cwd_missing,
+        sessions: [],
+      };
+      groups.set(key, group);
+    }
+    if (session.cwd_missing) group.missing = true;
+    group.sessions.push(session);
+  }
+  const list = Array.from(groups.values());
+  for (const group of list) {
+    group.sessions.sort((a, b) => {
+      const ta = new Date(a.updated_at || a.created_at || 0).getTime();
+      const tb = new Date(b.updated_at || b.created_at || 0).getTime();
+      return tb - ta;
+    });
+  }
+  list.sort((a, b) => {
+    const ta = new Date(a.sessions[0]?.updated_at || 0).getTime();
+    const tb = new Date(b.sessions[0]?.updated_at || 0).getTime();
+    return tb - ta;
+  });
+  return list;
+}
+
+function workspaceFolderName(path) {
+  const parts = String(path || "").replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] || path || "工作空间";
+}
+
+function isProjectExpanded(projectId) {
+  if (!projectId) return true;
+  // Default expanded (grok-app style); only collapse when user toggles off.
+  if (Object.prototype.hasOwnProperty.call(state.expandedProjects, projectId)) {
+    return !!state.expandedProjects[projectId];
+  }
+  return true;
+}
+
+function setProjectExpanded(projectId, open) {
+  if (!projectId) return;
+  state.expandedProjects = { ...state.expandedProjects, [projectId]: !!open };
+}
+
+function isOrphanWorkspaceExpanded(key) {
+  if (!key) return true;
+  if (Object.prototype.hasOwnProperty.call(state.expandedOrphanWorkspaces, key)) {
+    return !!state.expandedOrphanWorkspaces[key];
+  }
+  return true;
+}
+
+function setOrphanWorkspaceExpanded(key, open) {
+  if (!key) return;
+  state.expandedOrphanWorkspaces = { ...state.expandedOrphanWorkspaces, [key]: !!open };
+}
+
+function renderSidebarTree() {
+  renderAgentProjects();
+  renderAgentSessionList();
+}
+
+function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
+  const button = document.createElement("div");
+  const missing = !!session.cwd_missing;
+  button.className = `sessionItem${nested ? " sessionItemNested" : ""}${session.id === state.activeAgentSession?.id ? " active" : ""}${missing ? " cwdMissing" : ""}`;
+  button.role = "button";
+  button.tabIndex = 0;
+  button.dataset.sessionId = session.id;
+  if (missing) button.title = "工作目录已失效，打开后请在会话信息中修正路径";
+  else if (session.cwd) button.title = session.cwd;
+
+  const title = document.createElement("span");
+  title.className = "sessionItemTitle";
+  title.textContent = session.title || "未命名会话";
+
+  const meta = document.createElement("span");
+  meta.className = "sessionItemMeta";
+  const metaParts = [formatSessionTime(session.updated_at), session.model];
+  if (missing) metaParts.unshift("目录失效");
+  meta.textContent = metaParts.filter(Boolean).join(" · ");
+
+  const actions = document.createElement("div");
+  actions.className = "sessionItemActions";
+  const renameBtn = document.createElement("button");
+  renameBtn.type = "button";
+  renameBtn.className = "sessionActionBtn sessionRenameBtn";
+  renameBtn.title = "重命名会话";
+  renameBtn.setAttribute("aria-label", `重命名会话 ${session.title || ""}`);
+  renameBtn.textContent = "✎";
+  renameBtn.onclick = (event) => {
+    event.stopPropagation();
+    startRenameSession(session);
+  };
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "sessionActionBtn sessionDeleteBtn";
+  deleteBtn.title = "删除会话";
+  deleteBtn.setAttribute("aria-label", `删除会话 ${session.title || ""}`);
+  deleteBtn.textContent = "×";
+  deleteBtn.onclick = (event) => {
+    event.stopPropagation();
+    deleteAgentSession(session).catch((err) => toast(err.message || String(err), "error"));
+  };
+  actions.append(renameBtn, deleteBtn);
+
+  button.append(title, meta);
+  if (showPath) {
+    const path = document.createElement("span");
+    path.className = "sessionItemPath";
+    path.textContent = session.cwd || "";
+    button.append(path);
+  }
+  button.append(actions);
+
+  const activate = async () => {
+    try {
+      button.setAttribute("aria-busy", "true");
+      button.classList.add("busy");
+      await resumeAgentSession(session);
+    } catch (err) {
+      if (!isAbortError(err)) toast(err.message || String(err), "error");
+    } finally {
+      button.removeAttribute("aria-busy");
+      button.classList.remove("busy");
+    }
+  };
+  button.onclick = activate;
+  button.onkeydown = (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      activate();
+    }
+  };
+  return button;
+}
+
+/**
+ * Unregistered workspaces: sessions grouped under their cwd, same tree shape as projects.
+ * Section label: 其他工作空间.
+ */
 function renderAgentSessionList() {
   const list = $("agentSessionList");
   if (!list) return;
   list.innerHTML = "";
-  if ($("agentSessionCount")) $("agentSessionCount").textContent = String(state.agentSessions.length);
-  if (!state.agentSessions.length) {
-    list.innerHTML = `<p class="sessionListEmpty">没有匹配的历史会话</p>`;
+  const groups = orphanWorkspaceGroups();
+  const totalSessions = groups.reduce((n, g) => n + g.sessions.length, 0);
+  if ($("agentSessionCount")) $("agentSessionCount").textContent = String(totalSessions);
+  const head = $("orphanSessionsHead");
+  const toggle = $("toggleOrphanSessionsBtn");
+  // Hide the whole block when every session already sits under a registered project.
+  if (head) head.hidden = totalSessions === 0;
+  if (!totalSessions) {
+    list.hidden = true;
     return;
   }
-  for (const session of state.agentSessions) {
-    const button = document.createElement("div");
-    button.className = `sessionItem${session.id === state.activeAgentSession?.id ? " active" : ""}`;
-    button.role = "button";
-    button.tabIndex = 0;
-    button.dataset.sessionId = session.id;
-    const title = document.createElement("span");
-    title.className = "sessionItemTitle";
-    title.textContent = session.title || "未命名会话";
-    const meta = document.createElement("span");
-    meta.className = "sessionItemMeta";
-    meta.textContent = [formatSessionTime(session.updated_at), session.model].filter(Boolean).join(" · ");
-    const path = document.createElement("span");
-    path.className = "sessionItemPath";
-    path.textContent = session.cwd || "";
-    const renameBtn = document.createElement("button");
-    renameBtn.type = "button";
-    renameBtn.className = "sessionRenameBtn";
-    renameBtn.title = "重命名会话";
-    renameBtn.setAttribute("aria-label", `重命名会话 ${session.title || ""}`);
-    renameBtn.textContent = "✎";
-    renameBtn.onclick = (event) => {
-      event.stopPropagation();
-      startRenameSession(session);
+  if (toggle) toggle.setAttribute("aria-expanded", state.orphanSessionsOpen ? "true" : "false");
+  const chevron = toggle?.querySelector(".treeChevron");
+  if (chevron) chevron.textContent = state.orphanSessionsOpen ? "▾" : "▸";
+
+  if (!state.orphanSessionsOpen) {
+    list.hidden = true;
+    return;
+  }
+  list.hidden = false;
+
+  const activePath = normalizePathKey($("agentCwd")?.value || state.activeAgentSession?.cwd || "");
+
+  for (const group of groups) {
+    const expanded = isOrphanWorkspaceExpanded(group.key);
+    const isActive = !!group.path && normalizePathKey(group.path) === activePath;
+
+    const folder = document.createElement("div");
+    folder.className = `projectFolder orphanWorkspaceFolder${isActive ? " is-active" : ""}${group.missing ? " is-missing" : ""}${expanded ? " is-expanded" : ""}`;
+    folder.dataset.workspaceKey = group.key;
+
+    const row = document.createElement("div");
+    row.className = "projectItem";
+    row.role = "button";
+    row.tabIndex = 0;
+    row.setAttribute("aria-expanded", expanded ? "true" : "false");
+    row.title = group.path || "无工作目录";
+
+    const rowChevron = document.createElement("span");
+    rowChevron.className = "projectItemChevron";
+    rowChevron.setAttribute("aria-hidden", "true");
+    rowChevron.textContent = expanded ? "▾" : "▸";
+
+    const body = document.createElement("span");
+    body.className = "projectItemBody";
+    const name = document.createElement("span");
+    name.className = "projectItemName";
+    name.textContent = group.name;
+    if (group.missing) {
+      const badge = document.createElement("span");
+      badge.className = "projectItemBadge";
+      badge.textContent = "目录失效";
+      name.append(" ", badge);
+    }
+    body.append(name);
+    if (group.path) {
+      const pathEl = document.createElement("span");
+      pathEl.className = "projectItemPath mono";
+      pathEl.textContent = group.path;
+      body.append(pathEl);
+    }
+
+    const count = document.createElement("span");
+    count.className = "projectItemCount";
+    count.textContent = String(group.sessions.length);
+    count.title = `${group.sessions.length} 个会话`;
+
+    const actions = document.createElement("div");
+    actions.className = "projectItemActions";
+
+    if (group.path && !group.missing) {
+      const newBtn = document.createElement("button");
+      newBtn.type = "button";
+      newBtn.className = "sessionActionBtn projectNewSessionBtn";
+      newBtn.title = "在此工作空间下新建会话";
+      newBtn.setAttribute("aria-label", `在 ${group.name} 下新建会话`);
+      newBtn.textContent = "✎";
+      newBtn.onclick = (event) => {
+        event.stopPropagation();
+        if ($("agentCwd")) $("agentCwd").value = group.path;
+        setOrphanWorkspaceExpanded(group.key, true);
+        run(() => newAgentSession(), { busyLabel: "创建中…" }).catch((err) => {
+          if (!isAbortError(err)) toast(err.message || String(err), "error");
+        });
+      };
+      actions.append(newBtn);
+
+      const addProjBtn = document.createElement("button");
+      addProjBtn.type = "button";
+      addProjBtn.className = "sessionActionBtn projectPromoteBtn";
+      addProjBtn.title = "添加为项目";
+      addProjBtn.setAttribute("aria-label", `将 ${group.name} 添加为项目`);
+      addProjBtn.textContent = "＋";
+      addProjBtn.onclick = (event) => {
+        event.stopPropagation();
+        promoteWorkspaceToProject(group.path).catch((err) => toast(err.message || String(err), "error"));
+      };
+      actions.append(addProjBtn);
+    }
+
+    row.append(rowChevron, body, count, actions);
+
+    const toggleExpand = () => {
+      setOrphanWorkspaceExpanded(group.key, !isOrphanWorkspaceExpanded(group.key));
+      renderSidebarTree();
     };
-    button.append(title, meta, path, renameBtn);
-    const activate = async () => {
-      try {
-        button.setAttribute("aria-busy", "true");
-        button.classList.add("busy");
-        await resumeAgentSession(session);
-      } catch (err) {
-        toast(err.message || String(err), "error");
-      } finally {
-        button.removeAttribute("aria-busy");
-        button.classList.remove("busy");
+    row.onclick = (event) => {
+      if (event.detail > 1 && group.path) {
+        activateOrphanWorkspace(group).catch((err) => toast(err.message || String(err), "error"));
+        return;
       }
+      toggleExpand();
     };
-    button.onclick = activate;
-    button.onkeydown = (event) => {
+    row.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        activate();
+        toggleExpand();
       }
     };
-    list.append(button);
+
+    folder.append(row);
+
+    if (expanded) {
+      const children = document.createElement("div");
+      children.className = "projectSessionList";
+      for (const session of group.sessions) {
+        children.append(buildSessionItemEl(session, { nested: true, showPath: false }));
+      }
+      folder.append(children);
+    }
+
+    list.append(folder);
   }
+}
+
+async function activateOrphanWorkspace(group) {
+  if (!group?.path) {
+    toast("该组会话没有有效工作目录", "error");
+    return false;
+  }
+  if ($("agentCwd")) $("agentCwd").value = group.path;
+  state.activeProjectId = "";
+  setOrphanWorkspaceExpanded(group.key, true);
+  updateConversationIdentity();
+  toast(`已切换工作空间：${group.name}`, "info");
+  return true;
+}
+
+/** Register an orphan cwd as a first-class project and move its sessions under 项目. */
+async function promoteWorkspaceToProject(path) {
+  const cwd = String(path || "").trim();
+  if (!cwd) throw new Error("无效工作目录");
+  const item = await api("/api/agent/projects", {
+    method: "POST",
+    body: JSON.stringify({ path: cwd, trusted: true }),
+  });
+  await loadAgentProjects();
+  if (item?.id) {
+    await openProjectById(item.id);
+    setProjectExpanded(item.id, true);
+  }
+  renderSidebarTree();
+  toast(`已添加项目：${workspaceFolderName(cwd)}`, "success");
 }
 
 function formatSessionTime(value) {
@@ -1091,27 +1433,101 @@ async function startRenameSession(session) {
       updateConversationIdentity();
       persistLastChatContext({ title: session.title });
     }
-    renderAgentSessionList();
+    renderSidebarTree();
     toast(title ? `已重命名为「${title}」` : "已恢复默认会话名", "success");
   } catch (err) {
     toast(err.message || String(err), "error");
   }
 }
 
+async function deleteAgentSession(session) {
+  if (!session?.id) return;
+  const label = session.title || session.id;
+  if (!confirm(`删除会话「${label}」？\n本地历史将被移除，且不可恢复。`)) return;
+  await api("/api/agent/session/delete", {
+    method: "POST",
+    body: JSON.stringify({ session_id: session.id }),
+  });
+  state.agentSessions = state.agentSessions.filter((item) => item.id !== session.id);
+  if (state.activeAgentSession?.id === session.id) {
+    state.sessionSwitchToken += 1;
+    if (state.sessionSwitchAbort) {
+      try { state.sessionSwitchAbort.abort(); } catch { /* ignore */ }
+      state.sessionSwitchAbort = null;
+    }
+    state.activeAgentSession = null;
+    clearAgentTranscript(true);
+    setAgentEngineState("none");
+    updateConversationIdentity();
+    persistLastChatContext({ sessionId: "", title: "" });
+    renderChatEmptyState();
+    if (agentIsRunning()) {
+      toast("本地记录已删除。Agent 仍在运行，建议点「新对话」避免继续旧上下文", "info");
+    } else {
+      toast("会话已删除", "success");
+    }
+  } else {
+    toast("会话已删除", "success");
+  }
+  renderSidebarTree();
+}
+
 async function resumeAgentSession(session) {
-  const history = await api(`/api/agent/sessions/${encodeURIComponent(session.id)}`);
-  state.activeAgentSession = history.session || session;
-  if ($("agentCwd")) $("agentCwd").value = state.activeAgentSession.cwd || "";
+  if (!session?.id) return false;
+  const token = ++state.sessionSwitchToken;
+  if (state.sessionSwitchAbort) {
+    try { state.sessionSwitchAbort.abort(); } catch { /* ignore */ }
+  }
+  const controller = new AbortController();
+  state.sessionSwitchAbort = controller;
+  const stillCurrent = () => token === state.sessionSwitchToken;
+
+  // Prefer a user-corrected path from the context rail when the stored cwd is gone.
+  const cwdInput = ($("agentCwd")?.value || "").trim();
+  let cwd = cwdInput || session.cwd || "";
+  if (session.cwd_missing) {
+    if (!cwd || cwd === session.cwd) {
+      if ($("agentCwd")) $("agentCwd").value = session.cwd || "";
+      toggleContextRail(true);
+      toast("该会话的工作目录已失效，请在右侧修正路径后再打开", "error");
+      return false;
+    }
+  }
+
+  let history;
+  try {
+    history = await api(`/api/agent/sessions/${encodeURIComponent(session.id)}`, { signal: controller.signal });
+  } catch (err) {
+    if (isAbortError(err) || !stillCurrent()) return false;
+    throw err;
+  }
+  if (!stillCurrent()) return false;
+
+  state.activeAgentSession = {
+    ...(history.session || session),
+    cwd: cwd || history.session?.cwd || session.cwd || "",
+    cwd_missing: !!session.cwd_missing,
+  };
+  if ($("agentCwd") && state.activeAgentSession.cwd) {
+    $("agentCwd").value = state.activeAgentSession.cwd;
+  }
+  // Align active project with this session's workspace when possible.
+  const matchedProject = projectPathKeys().get(normalizePathKey(state.activeAgentSession.cwd));
+  if (matchedProject) {
+    state.activeProjectId = matchedProject.id;
+    setProjectExpanded(matchedProject.id, true);
+  }
   clearAgentTranscript(false);
   renderStoredHistory(history.messages || []);
   setAgentEngineState("loading", "正在恢复引擎上下文…");
   updateConversationIdentity();
-  renderAgentSessionList();
   connectAgentSocket();
+
   let status;
   try {
     status = await api("/api/agent/session/load", {
       method: "POST",
+      signal: controller.signal,
       body: JSON.stringify({
         cwd: state.activeAgentSession.cwd,
         session_id: state.activeAgentSession.id,
@@ -1119,6 +1535,7 @@ async function resumeAgentSession(session) {
       }),
     });
   } catch (err) {
+    if (isAbortError(err) || !stillCurrent()) return false;
     if (handleSessionLoadFallback(err)) {
       closeNativeChatPanels();
       scrollChatToBottom();
@@ -1126,11 +1543,14 @@ async function resumeAgentSession(session) {
     }
     setAgentEngineState("readonly", "仅显示本地历史，引擎上下文恢复失败。请开启新对话后再发送消息。");
     const latestStatus = await api("/api/agent/status").catch(() => state.agentStatus);
-    if (latestStatus) renderAgentStatus(latestStatus);
+    if (stillCurrent() && latestStatus) renderAgentStatus(latestStatus);
     throw err;
   }
+  if (!stillCurrent()) return false;
+
   setAgentEngineState("attached");
   state.agentStatus = status;
+  if (state.activeAgentSession) state.activeAgentSession.cwd_missing = false;
   renderAgentStatus({ ...status, model: status.model || state.activeAgentSession.model });
   persistLastChatContext({
     sessionId: state.activeAgentSession.id,
@@ -1146,14 +1566,15 @@ async function resumeAgentSession(session) {
 
 function setAgentEngineState(mode, message = "") {
   state.agentEngineState = mode;
-  if (mode !== "readonly") state.agentFallbackSessionReady = false;
+  if (mode !== "readonly" && mode !== "bootstrap") state.agentFallbackSessionReady = false;
+  if (mode !== "bootstrap") state.agentNeedsBootstrap = false;
   const banner = $("agentEngineBanner");
   if (!banner) return;
-  const visible = mode === "loading" || mode === "readonly";
+  const visible = mode === "loading" || mode === "readonly" || mode === "bootstrap";
   banner.hidden = !visible;
   banner.dataset.state = mode;
   if ($("agentEngineBannerText")) $("agentEngineBannerText").textContent = message;
-  if ($("agentReadonlyNewBtn")) $("agentReadonlyNewBtn").hidden = mode !== "readonly";
+  if ($("agentReadonlyNewBtn")) $("agentReadonlyNewBtn").hidden = mode !== "readonly" && mode !== "bootstrap";
 }
 
 function handleSessionLoadFallback(err) {
@@ -1162,6 +1583,21 @@ function handleSessionLoadFallback(err) {
   if (status) {
     state.agentStatus = status;
     renderAgentStatus(status);
+  }
+  const bootstrapReady = !!(err.data?.needs_bootstrap || status?.needs_bootstrap) &&
+    !!err.data?.agent_restarted && status?.state === "ready" && !!status?.session_id;
+  if (bootstrapReady) {
+    state.agentNeedsBootstrap = true;
+    state.agentFallbackSessionReady = true;
+    if (state.activeAgentSession && status.session_id) {
+      // Engine is a fresh session; keep UI history but track new engine id for sends.
+      state.activeAgentSession.engine_session_id = status.session_id;
+    }
+    setAgentEngineState("bootstrap",
+      "引擎上下文未能完整加载。已展示本地历史；下一条消息将自动注入历史摘要以续聊。也可开启全新对话。");
+    renderAgentStatus(status || state.agentStatus);
+    toast("会话过大，已启用历史摘要续聊", "info");
+    return true;
   }
   const message = err.data?.agent_restarted
     ? "仅显示本地历史：会话过大或恢复通知过多，引擎上下文未挂载。Agent 已恢复，可开启新对话。"
@@ -1176,9 +1612,102 @@ function handleSessionLoadFallback(err) {
 function updateConversationIdentity() {
   const session = state.activeAgentSession;
   if ($("activeChatTitle")) $("activeChatTitle").textContent = session?.title || "新对话";
-  if ($("activeChatPath")) $("activeChatPath").textContent = session?.cwd || state.agentStatus?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
+  const cwd = session?.cwd || state.agentStatus?.cwd || $("agentCwd")?.value || "";
+  if ($("activeChatPath")) $("activeChatPath").textContent = cwd || "尚未选择工作目录";
   if ($("contextSessionId")) $("contextSessionId").textContent = session?.id || state.agentStatus?.session_id || "—";
-  renderAgentSessionList();
+  // Keep active project in sync with current workspace path.
+  const matched = projectPathKeys().get(normalizePathKey(cwd));
+  state.activeProjectId = matched?.id || "";
+  updateComposerProjectLabel();
+  renderSidebarTree();
+}
+
+function currentWorkingDirectory() {
+  return ($("agentCwd")?.value || state.activeAgentSession?.cwd || state.agentStatus?.cwd || "").trim();
+}
+
+function projectNameForPath(path) {
+  const key = String(path || "").replace(/\\/g, "/").toLowerCase();
+  if (!key) return "";
+  const match = (state.projects || []).find((p) => String(p.path || "").replace(/\\/g, "/").toLowerCase() === key);
+  if (match?.name) return match.name;
+  const parts = key.split("/").filter(Boolean);
+  return parts[parts.length - 1] || "";
+}
+
+function updateComposerProjectLabel() {
+  const cwd = currentWorkingDirectory();
+  const name = projectNameForPath(cwd) || (cwd ? cwd.split(/[/\\]/).filter(Boolean).pop() : "");
+  if ($("composerProjectLabel")) $("composerProjectLabel").textContent = name || "选择项目";
+  if ($("openLocationLabel")) {
+    $("openLocationLabel").textContent = "打开位置";
+    $("openLocationBtn")?.setAttribute("title", cwd ? `打开：${cwd}` : "请先选择工作目录");
+  }
+}
+
+function syncComposerAccessSelect() {
+  const sel = $("composerAccessSelect");
+  if (!sel) return;
+  const yolo = !!$("agentAlwaysApprove")?.checked;
+  const session = !!$("agentSessionAutoApprove")?.checked;
+  if (yolo) sel.value = "yolo";
+  else if (session) sel.value = "session";
+  else sel.value = "ask";
+  sel.classList.toggle("is-elevated", sel.value !== "ask");
+}
+
+function applyComposerAccessSelect() {
+  const mode = $("composerAccessSelect")?.value || "ask";
+  const yoloBox = $("agentAlwaysApprove");
+  const sessionBox = $("agentSessionAutoApprove");
+  if (yoloBox) yoloBox.checked = mode === "yolo";
+  if (sessionBox) {
+    const enabled = mode === "session" || mode === "yolo";
+    sessionBox.checked = enabled;
+    if (agentSocket && agentSocket.readyState === WebSocket.OPEN) {
+      agentSocket.send(JSON.stringify({ type: "set_session_auto_approve", allow: enabled, remember: enabled }));
+    }
+  }
+  // No bottom toast here — it used to cover the 访问方式 chip. Mode is already
+  // visible on the access select; YOLO still needs a restart (shown via title).
+  const accessChip = $("composerAccessSelect")?.closest(".composerAccessChip");
+  if (accessChip) {
+    accessChip.title = mode === "yolo"
+      ? "完全访问（YOLO）：下次启动 Agent 后生效"
+      : mode === "session"
+        ? "本会话自动批准工具调用"
+        : "每次工具调用需确认";
+  }
+  syncComposerAccessSelect();
+}
+
+async function openWorkingDirectoryInExplorer() {
+  const path = currentWorkingDirectory();
+  if (!path) {
+    await pickWorkingDirectory();
+    return;
+  }
+  await api("/api/agent/open-path", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+  toast(`已打开：${path}`, "info");
+}
+
+function bindComposerFloatPad() {
+  const composer = $("chatComposer");
+  const pane = $("viewChat")?.querySelector(".conversationPane");
+  if (!composer || !pane || composer.dataset.floatPadBound === "1") return;
+  composer.dataset.floatPadBound = "1";
+  const apply = () => {
+    const h = Math.ceil(composer.getBoundingClientRect().height || 140);
+    pane.style.setProperty("--composer-float-pad", `${Math.max(120, h + 8)}px`);
+  };
+  apply();
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(apply).observe(composer);
+  }
+  window.addEventListener("resize", apply);
 }
 
 function setNativePanel(name, open) {
@@ -1353,16 +1882,26 @@ function renderAgentStatus(status) {
     $("agentAlwaysApprove").disabled = running;
     if (typeof status.always_approve === "boolean") $("agentAlwaysApprove").checked = status.always_approve;
   }
+  if ($("agentSessionAutoApprove")) {
+    $("agentSessionAutoApprove").disabled = !running || stateName === "stopping";
+    if (typeof status.session_auto_approve === "boolean") {
+      $("agentSessionAutoApprove").checked = status.session_auto_approve;
+    }
+  }
+  syncComposerAccessSelect();
+  updateComposerProjectLabel();
+  if (status.needs_bootstrap) state.agentNeedsBootstrap = true;
   const loading = state.agentEngineState === "loading";
-  const composerReady = stateName === "ready" && !loading;
+  const composerReady = (stateName === "ready" && !loading) || state.agentEngineState === "bootstrap";
   if ($("chatInput")) {
     $("chatInput").disabled = !composerReady || busy;
     $("chatInput").placeholder = busy
       ? "正在生成…可点击停止"
       : composerReady
-        ? "询问代码、规划任务或继续这段对话…"
+        ? "随心输入…  输入 / 打开命令与 Skills"
         : "启动 Agent 后即可发送消息";
   }
+  if ($("composerAccessSelect")) $("composerAccessSelect").disabled = !composerReady && !running;
   if ($("chatSendBtn")) {
     $("chatSendBtn").hidden = busy;
     const hasContent = !!$("chatInput")?.value.trim() || state.pendingAttachments.length > 0;
@@ -1375,21 +1914,31 @@ function renderAgentStatus(status) {
     $("chatStopBtn").hidden = !busy;
     $("chatStopBtn").disabled = !busy;
   }
+  // Status line is ABOVE the chip row (never beside 访问方式 / send).
+  // Idle keyboard tips stay on the textarea title so chips are never covered.
   const hint = $("composerHint");
-  if (hint) {
-    hint.classList.toggle("composerBusyHint", busy);
-    if (busy) hint.textContent = "正在生成回复…点击 ■ 停止 · Esc 也可停止";
-    else if (status.session_auto_approve) hint.textContent = "本会话已自动允许工具 · Enter 发送 · Shift + Enter 换行";
-    else hint.textContent = "Enter 发送 · Shift + Enter 换行";
+  const statusRow = $("composerStatusRow");
+  const input = $("chatInput");
+  if (input) {
+    const accessTip = status.session_auto_approve || $("agentAlwaysApprove")?.checked
+      ? "工具：本会话自动允许 · "
+      : "";
+    input.title = busy
+      ? "正在生成… Esc 或点击停止"
+      : `${accessTip}Enter 发送 · Shift+Enter 换行`;
   }
-  refreshMessageActionButtons();
-  if (!status.available && status.error) {
-    const empty = $("chatEmpty");
-    if (empty) {
-      empty.querySelector("strong").textContent = "未找到 Grok Build";
-      empty.querySelector("span").textContent = status.error;
+  if (hint && statusRow) {
+    hint.classList.toggle("composerBusyHint", busy);
+    if (busy) {
+      hint.textContent = "正在生成…点击停止 · Esc 也可停止";
+      statusRow.hidden = false;
+    } else {
+      hint.textContent = "";
+      statusRow.hidden = true;
     }
   }
+  refreshMessageActionButtons();
+  renderChatEmptyState(status);
 }
 
 function connectAgentSocket() {
@@ -1450,6 +1999,10 @@ function handleAgentEvent(event) {
     case "permission_request":
       showAgentPermission(event.permission);
       break;
+    case "plan":
+    case "plan_request":
+      showAgentPlan(event.plan, event.type === "plan_request");
+      break;
     case "retry_state":
       renderAgentRetry(event.retry);
       break;
@@ -1458,10 +2011,14 @@ function handleAgentEvent(event) {
       agentActiveAssistant = null;
       agentActiveThought = null;
       agentRetryNotice = null;
+      if (state.agentNeedsBootstrap) {
+        state.agentNeedsBootstrap = false;
+        if (state.agentEngineState === "bootstrap") setAgentEngineState("attached");
+      }
       if (event.stop_reason === "cancelled") {
         appendAgentNotice("已停止生成");
       }
-      renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "" });
+      renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "", needs_bootstrap: false });
       rebuildChatNodesFromDom();
       loadAgentSessions().catch(() => {});
       break;
@@ -1476,9 +2033,7 @@ function handleAgentEvent(event) {
 function clearAgentTranscript(showEmpty = true) {
   const messages = $("chatMessages");
   if (!messages) return;
-  messages.innerHTML = showEmpty
-    ? `<div id="chatEmpty" class="chatEmpty"><img src="/icon.svg" alt="" class="chatEmptyMark chatEmptyIcon"></div>`
-    : "";
+  messages.innerHTML = showEmpty ? chatEmptyMarkup() : "";
   agentTools.clear();
   if ($("toolActivityCount")) $("toolActivityCount").textContent = "0";
   if ($("toolActivityList")) $("toolActivityList").innerHTML = "<span>暂无工具活动</span>";
@@ -1487,13 +2042,96 @@ function clearAgentTranscript(showEmpty = true) {
   agentRetryNotice = null;
   lastAssistantMessageEl = null;
   state.agentPermission = null;
+  state.agentPlan = null;
   state.lastUserMessage = "";
   state.chatStickToBottom = true;
   resetChatNodes();
   clearChatAttachments();
   if ($("permissionBar")) $("permissionBar").hidden = true;
-  updateContextUsage();
+  if ($("planBar")) $("planBar").hidden = true;
+  historyRenderedStart = 0;
+  historyRenderedEnd = 0;
+  pendingHistory = [];
   updateChatJumpBottomBtn();
+  if (showEmpty) {
+    bindChatEmptyActions();
+    renderChatEmptyState();
+  }
+}
+
+function chatEmptyMarkup() {
+  return `<div id="chatEmpty" class="chatEmpty" data-state="welcome">
+    <img src="/icon.svg" alt="" class="chatEmptyMark chatEmptyIcon">
+    <strong id="chatEmptyTitle">开始对话</strong>
+    <span id="chatEmptyDesc">从左侧添加项目（工作空间），在项目下新建或打开会话。</span>
+    <div id="chatEmptyActions" class="chatEmptyActions">
+      <button type="button" id="chatEmptyStartBtn" class="btn sm primary">启动 Agent</button>
+      <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>
+    </div>
+  </div>`;
+}
+
+function bindChatEmptyActions() {
+  $("chatEmptyStartBtn")?.addEventListener("click", () => {
+    run(startAgent, { button: $("chatEmptyStartBtn"), busyLabel: "连接中…" }).catch(() => {});
+  });
+  $("chatEmptyOpenContextBtn")?.addEventListener("click", () => toggleContextRail(true));
+  $("chatEmptyRetryBtn")?.addEventListener("click", () => {
+    run(async () => {
+      const status = await api("/api/agent/status");
+      renderAgentStatus(status);
+      if (!status.available) throw new Error(status.error || "仍未检测到 Grok Build");
+      return status;
+    }, { button: $("chatEmptyRetryBtn"), busyLabel: "检测中…", success: "已检测到 Grok Build" }).catch(() => {});
+  });
+}
+
+function renderChatEmptyState(status = state.agentStatus) {
+  const empty = $("chatEmpty");
+  if (!empty || !empty.isConnected) return;
+  const title = empty.querySelector("#chatEmptyTitle") || empty.querySelector("strong");
+  const desc = empty.querySelector("#chatEmptyDesc") || empty.querySelector("span");
+  const actions = empty.querySelector("#chatEmptyActions");
+  if (!title || !desc) return;
+
+  if (status && status.available === false) {
+    empty.dataset.state = "missing";
+    title.textContent = "未找到 Grok Build";
+    desc.textContent = status.error || "本机未检测到 grok 可执行文件。请先安装并登录 Grok CLI，然后重试。";
+    if (actions) {
+      actions.innerHTML = `
+        <button type="button" id="chatEmptyRetryBtn" class="btn sm primary">重新检测</button>
+        <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>`;
+      bindChatEmptyActions();
+    }
+    return;
+  }
+
+  if (status && (status.state === "dead" || status.error) && !agentIsRunning(status)) {
+    empty.dataset.state = "error";
+    title.textContent = "Agent 未就绪";
+    desc.textContent = status.error || "连接异常，请检查工作目录后重新启动 Agent。";
+    if (actions) {
+      actions.innerHTML = `
+        <button type="button" id="chatEmptyStartBtn" class="btn sm primary">启动 Agent</button>
+        <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>`;
+      bindChatEmptyActions();
+    }
+    return;
+  }
+
+  empty.dataset.state = "welcome";
+  title.textContent = "开始对话";
+  const cwd = ($("agentCwd")?.value || status?.cwd || "").trim();
+  desc.textContent = cwd
+    ? `工作目录：${cwd}。启动 Agent 后即可发送消息，或从左侧打开历史会话。`
+    : "点击顶部「打开位置」旁的 ▾ 选择工作目录，或点输入框旁项目 chip · 再启动 Agent。";
+  if (actions && !actions.querySelector("#chatEmptyStartBtn")) {
+    actions.innerHTML = `
+      <button type="button" id="chatEmptyStartBtn" class="btn sm primary">启动 Agent</button>
+      <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>`;
+    bindChatEmptyActions();
+  }
 }
 
 function removeChatEmpty() {
@@ -1684,77 +2322,192 @@ function setActiveChatNode(id) {
   }
 }
 
-// --- 长历史增量加载 ---
-function renderStoredHistory(messages) {
-  pendingHistory = Array.isArray(messages) ? messages.slice() : [];
-  historyCap = HISTORY_PAGE_SIZE;
-  renderHistoryWindow();
+// --- 长历史增量加载（初始渲染尾窗；加载更早时真正 prepend，保持滚动锚点） ---
+function chatMessagesRoot() {
+  return historyMountTarget || $("chatMessages");
 }
 
-function renderHistoryWindow() {
+function renderStoredHistory(messages) {
+  pendingHistory = Array.isArray(messages) ? messages.slice() : [];
+  const total = pendingHistory.length;
+  historyRenderedStart = Math.max(0, total - HISTORY_PAGE_SIZE);
+  historyRenderedEnd = total;
+  mountHistoryRange(historyRenderedStart, historyRenderedEnd, { mode: "replace" });
+}
+
+/**
+ * Mount [start, end) of pendingHistory.
+ * mode "replace": clear transcript and append the range.
+ * mode "prepend": insert the range after the load-more sentinel without rebuilding newer messages.
+ */
+function mountHistoryRange(start, end, { mode = "replace" } = {}) {
   const messages = $("chatMessages");
   if (!messages) return;
-  // Keep the user's reading position stable when prepending older messages.
-  const wasLoadingMore = state._loadingMoreHistory;
-  state.chatStickToBottom = !wasLoadingMore;
-  messages.innerHTML = "";
-  agentTools.clear();
-  if ($("toolActivityCount")) $("toolActivityCount").textContent = "0";
-  if ($("toolActivityList")) $("toolActivityList").innerHTML = "<span>暂无工具活动</span>";
-  agentActiveAssistant = null;
-  agentActiveThought = null;
-  agentRetryNotice = null;
-  lastAssistantMessageEl = null;
-  resetChatNodes();
+  start = Math.max(0, start);
+  end = Math.max(start, Math.min(end, pendingHistory.length));
 
-  const total = pendingHistory.length;
-  const start = Math.max(0, total - historyCap);
-  const slice = pendingHistory.slice(start);
-  for (const message of slice) {
-    appendHistoryMessage(message);
-  }
-  agentActiveAssistant = null;
-  agentActiveThought = null;
-  // rebuild nodes from DOM so indices reflect the visible (possibly capped) window
-  rebuildChatNodesFromDom();
-  ensureHistorySentinel(start, total);
+  if (mode === "replace") {
+    state.chatStickToBottom = true;
+    messages.innerHTML = "";
+    agentTools.clear();
+    if ($("toolActivityCount")) $("toolActivityCount").textContent = "0";
+    if ($("toolActivityList")) $("toolActivityList").innerHTML = "<span>暂无工具活动</span>";
+    agentActiveAssistant = null;
+    agentActiveThought = null;
+    agentRetryNotice = null;
+    lastAssistantMessageEl = null;
+    resetChatNodes();
 
-  // Track the last user message for regenerate / edit flows.
-  let lastUserText = "";
-  for (let i = pendingHistory.length - 1; i >= 0; i--) {
-    if (pendingHistory[i].role === "user") { lastUserText = pendingHistory[i].content || ""; break; }
-  }
-  state.lastUserMessage = lastUserText;
-  refreshMessageActionButtons();
-
-  if (wasLoadingMore) {
-    messages.scrollTop = 0; // show the newly prepended older messages
-    state._loadingMoreHistory = false;
-  } else {
+    historyMountSilent = true;
+    historyMountTarget = null;
+    try {
+      for (let i = start; i < end; i++) {
+        appendHistoryMessage(pendingHistory[i]);
+      }
+    } finally {
+      historyMountSilent = false;
+      historyMountTarget = null;
+    }
+    agentActiveAssistant = null;
+    agentActiveThought = null;
+    lastAssistantMessageEl = messages.querySelector(".chatMessage.assistant:last-of-type");
+    rebuildChatNodesFromDom();
+    ensureHistorySentinel(start, pendingHistory.length);
+    syncLastUserMessageFromHistory();
+    refreshMessageActionButtons();
     forceScrollChatToBottom();
+    return;
   }
-  updateContextUsage();
+
+  // prepend older window
+  if (start >= historyRenderedStart || end !== historyRenderedStart) return;
+  const prevHeight = messages.scrollHeight;
+  const prevTop = messages.scrollTop;
+  state.chatStickToBottom = false;
+
+  const fragment = document.createDocumentFragment();
+  historyMountSilent = true;
+  historyMountTarget = fragment;
+  // History tools/thoughts in older pages must not steal the "active" stream handles.
+  const savedThought = agentActiveThought;
+  const savedAssistant = agentActiveAssistant;
+  agentActiveThought = null;
+  agentActiveAssistant = null;
+  try {
+    for (let i = start; i < end; i++) {
+      appendHistoryMessage(pendingHistory[i]);
+    }
+  } finally {
+    historyMountSilent = false;
+    historyMountTarget = null;
+    agentActiveThought = savedThought;
+    agentActiveAssistant = savedAssistant;
+  }
+
+  ensureHistorySentinel(start, pendingHistory.length);
+  const sentinel = messages.querySelector("#chatHistorySentinel");
+  // Capture nodes before insert — DocumentFragment empties when moved into the tree.
+  const mountedNodes = [...fragment.childNodes];
+  if (sentinel) {
+    // Older messages sit right after the sentinel, before already-rendered content.
+    sentinel.after(fragment);
+  } else {
+    messages.prepend(fragment);
+  }
+  // Mermaid needs a connected tree; re-run on just-prepended markdown bodies.
+  for (const node of mountedNodes) {
+    const body = node.querySelector?.(".chatMessageText.markdownBody");
+    if (body) renderMermaidBlocks(body).catch(() => {});
+  }
+
+  historyRenderedStart = start;
+  // Keep scroll position glued to the content the user was looking at.
+  messages.scrollTop = prevTop + (messages.scrollHeight - prevHeight);
+  lastAssistantMessageEl = messages.querySelector(".chatMessage.assistant:last-of-type");
+  rebuildChatNodesFromDom();
+  ensureHistorySentinel(historyRenderedStart, pendingHistory.length);
+  refreshMessageActionButtons();
 }
 
 function appendHistoryMessage(message) {
+  const sessionID = state.activeAgentSession?.id || "";
   switch (message.role) {
-    case "user":
-      appendChatMessage("user", message.content || "", "", true, null, message.media || [], state.activeAgentSession?.id || "");
+    case "user": {
+      const { text, attachments, media } = historyUserPresentation(message);
+      appendChatMessage("user", text, "", true, attachments, media, sessionID);
       break;
+    }
     case "assistant":
-      appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true, null, message.media || [], state.activeAgentSession?.id || "");
+      appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true, null, message.media || [], sessionID);
       break;
     case "thought":
       appendThoughtChunk(message.content || "");
       agentActiveThought = null;
       break;
     case "tool":
-      renderAgentTool(message.tool || {}, false, state.activeAgentSession?.id || "");
+      renderAgentTool(message.tool || {}, false, sessionID);
       break;
     case "tool_result":
-      renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", media: message.media || [], status: "completed" }, true, state.activeAgentSession?.id || "");
+      renderAgentTool({ ...(message.tool || {}), raw_output: message.content || "", media: message.media || [], status: "completed" }, true, sessionID);
       break;
   }
+}
+
+function syncLastUserMessageFromHistory() {
+  let lastUserText = "";
+  for (let i = pendingHistory.length - 1; i >= 0; i--) {
+    if (pendingHistory[i].role === "user") {
+      lastUserText = pendingHistory[i].content || "";
+      break;
+    }
+  }
+  state.lastUserMessage = lastUserText;
+}
+
+/** Rebuild user bubble attachments/media from stored history payloads. */
+function historyUserPresentation(message) {
+  const mediaIn = Array.isArray(message.media) ? message.media : [];
+  const attachments = [];
+  const media = [];
+  for (const item of mediaIn) {
+    if (!item || typeof item !== "object") continue;
+    const mime = String(item.mime_type || item.mimeType || "").trim();
+    const uri = String(item.uri || item.url || "").trim();
+    const name = String(item.name || item.title || "").trim();
+    const kind = String(item.kind || item.type || "").toLowerCase() || inferMediaKind("", mime, uri);
+    const rawData = typeof item.data === "string" ? item.data.replace(/\s+/g, "") : "";
+    if ((kind === "image" || mime.startsWith("image/")) && rawData) {
+      const mimeType = mime || "image/png";
+      attachments.push({
+        kind: "image",
+        data: rawData,
+        dataUrl: `data:${mimeType};base64,${rawData}`,
+        mimeType,
+        name: name || "image",
+      });
+      continue;
+    }
+    if (kind === "resource" && name && !uri && !rawData) {
+      attachments.push({ kind: "text_file", name, text: "", truncated: false });
+      continue;
+    }
+    media.push(item);
+  }
+
+  let text = message.content || "";
+  // Text-file attachments are folded into the prompt as 【附件：name】snippets.
+  // Recover chips for display without double-showing the full body when empty name-only.
+  const fileMarker = /【附件：([^\n】]+)】/g;
+  let match;
+  const seen = new Set(attachments.map((item) => item.name));
+  while ((match = fileMarker.exec(text)) !== null) {
+    const fileName = match[1].trim();
+    if (fileName && !seen.has(fileName)) {
+      seen.add(fileName);
+      attachments.push({ kind: "text_file", name: fileName, text: "", truncated: false });
+    }
+  }
+  return { text, attachments: attachments.length ? attachments : null, media };
 }
 
 function ensureHistorySentinel(start, total) {
@@ -1771,20 +2524,37 @@ function ensureHistorySentinel(start, total) {
     sentinel.type = "button";
     sentinel.id = "chatHistorySentinel";
     sentinel.className = "chatHistorySentinel";
-    messages.prepend(sentinel);
     sentinel.onclick = () => loadOlderHistory();
+    messages.prepend(sentinel);
+  } else if (sentinel !== messages.firstChild) {
+    messages.prepend(sentinel);
   }
-  sentinel.textContent = `↑ 加载更早 ${start} 条会话`;
-  if (sentinel !== messages.firstChild) messages.prepend(sentinel);
+  const remaining = start;
+  sentinel.disabled = false;
+  sentinel.textContent = remaining > HISTORY_PAGE_SIZE
+    ? `↑ 加载更早 ${HISTORY_PAGE_SIZE} 条（还剩 ${remaining}）`
+    : `↑ 加载更早 ${remaining} 条会话`;
 }
 
 function loadOlderHistory() {
-  if (!pendingHistory.length) return;
-  const renderedStart = Math.max(0, pendingHistory.length - historyCap);
-  if (renderedStart <= 0) return;
-  state._loadingMoreHistory = true;
-  historyCap += HISTORY_PAGE_SIZE;
-  renderHistoryWindow();
+  if (!pendingHistory.length || historyRenderedStart <= 0) return;
+  const messages = $("chatMessages");
+  const sentinel = messages?.querySelector("#chatHistorySentinel");
+  if (sentinel) {
+    sentinel.disabled = true;
+    sentinel.textContent = "加载中…";
+  }
+  // Yield so the button can paint "加载中…", then prepend without wiping newer DOM.
+  requestAnimationFrame(() => {
+    const newStart = Math.max(0, historyRenderedStart - HISTORY_PAGE_SIZE);
+    const oldStart = historyRenderedStart;
+    try {
+      mountHistoryRange(newStart, oldStart, { mode: "prepend" });
+    } catch (err) {
+      toast(err.message || String(err), "error");
+      ensureHistorySentinel(historyRenderedStart, pendingHistory.length);
+    }
+  });
 }
 
 // --- 用户消息编辑 + 重新发送（截断该消息之后的 UI 内容） ---
@@ -1814,9 +2584,13 @@ function enterUserEditMode(article) {
   sendBtn.type = "button";
   sendBtn.className = "btn sm primary";
   sendBtn.textContent = "重新发送";
+  sendBtn.title = "仅截断下方界面气泡；引擎仍保留原对话上下文";
   sendBtn.onclick = () => resendEditedUserMessage(article, textarea.value).catch((err) => toast(err.message || String(err), "error"));
+  const note = document.createElement("p");
+  note.className = "chatEditNote";
+  note.textContent = "说明：只会截断下方界面内容并追加新一轮消息，引擎上下文不会真正回退。";
   actions.append(cancelBtn, sendBtn);
-  body.replaceChildren(textarea, actions);
+  body.replaceChildren(textarea, note, actions);
   textarea.focus();
   textarea.selectionStart = textarea.value.length;
   textarea.addEventListener("keydown", (event) => {
@@ -1866,42 +2640,29 @@ async function resendEditedUserMessage(article, rawText) {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
-  updateContextUsage();
+  const rewind = await rewindDropLastUser();
   const _mSend = $("composerModelSelect")?.value || "";
   const _rawSSend = $("composerStrengthSelect")?.value || "";
   const _sSend = _rawSSend === "auto" ? "" : _rawSSend;
   agentSocket.send(JSON.stringify({ type: "user_message", text, model: _mSend, strength: _sSend }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
+  if (rewind?.ok) {
+    appendAgentNotice("已回退引擎上下文并重新发送");
+  } else {
+    appendAgentNotice(`已重新发送（引擎 rewind 未成功${rewind?.error ? "：" + rewind.error : ""}，可能仍保留旧上下文）`);
+  }
   forceScrollChatToBottom();
 }
 
-// --- 上下文用量估算（按字符数 / 4 粗估 token） ---
-function updateContextUsage() {
-  const text = $("contextUsageText");
-  const fill = $("contextUsageFill");
-  const bar = $("contextUsageBar");
-  if (!text || !fill) return;
-  const messages = $("chatMessages");
-  let chars = 0;
-  let count = 0;
-  if (messages) {
-    messages.querySelectorAll(".chatMessage[data-role='user'], .chatMessage[data-role='assistant']").forEach((article) => {
-      chars += (article._rawText || "").length;
-      count += 1;
+async function rewindDropLastUser() {
+  try {
+    return await api("/api/agent/rewind", {
+      method: "POST",
+      body: JSON.stringify({ drop_last_user: true, restore_files: false }),
     });
+  } catch (err) {
+    return { ok: false, soft: true, error: err.message || String(err) };
   }
-  const tokens = Math.max(0, Math.round(chars / 4));
-  const CONTEXT_GUESS = 200000; // rough modern context window ceiling for the bar
-  const ratio = Math.min(1, tokens / CONTEXT_GUESS);
-  fill.style.width = `${(ratio * 100).toFixed(1)}%`;
-  fill.classList.toggle("warn", ratio >= 0.7 && ratio < 0.9);
-  fill.classList.toggle("danger", ratio >= 0.9);
-  if (count === 0) {
-    text.textContent = "尚未发送消息";
-  } else {
-    text.textContent = `≈ ${tokens.toLocaleString()} tokens · ${count} 条消息（估算，非精确）`;
-  }
-  if (bar) bar.title = `字符 ${chars.toLocaleString()} · 估算 token ${tokens.toLocaleString()}`;
 }
 
 // --- 会话内查找条 ---
@@ -1982,6 +2743,20 @@ function bindChatExtras() {
   if (chatExtrasBound) return;
   chatExtrasBound = true;
   $("chatJumpBottomBtn")?.addEventListener("click", () => forceScrollChatToBottom());
+  const composer = $("chatComposer");
+  if (composer) {
+    composer.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      composer.classList.add("is-dragover");
+    });
+    composer.addEventListener("dragleave", () => composer.classList.remove("is-dragover"));
+    composer.addEventListener("drop", (event) => {
+      event.preventDefault();
+      composer.classList.remove("is-dragover");
+      const files = event.dataTransfer?.files;
+      if (files?.length) handleChatFiles(files);
+    });
+  }
   $("chatFindClose")?.addEventListener("click", closeChatFindBar);
   $("chatFindNext")?.addEventListener("click", () => cycleChatFind(1));
   $("chatFindPrev")?.addEventListener("click", () => cycleChatFind(-1));
@@ -2029,15 +2804,17 @@ function createChatMessage(role, text, model = "", final = false, attachments = 
       regenBtn.className = "messageActionBtn";
       regenBtn.dataset.action = "regenerate";
       regenBtn.textContent = "重新生成";
+      regenBtn.title = "删除本条界面气泡并重发上一轮用户消息；引擎仍保留上一轮回复上下文";
       regenBtn.onclick = () => regenerateLastAssistant(article).catch((err) => toast(err.message || String(err), "error"));
       actions.append(regenBtn);
-      lastAssistantMessageEl = article;
+      if (!historyMountSilent) lastAssistantMessageEl = article;
     } else {
       const editBtn = document.createElement("button");
       editBtn.type = "button";
       editBtn.className = "messageActionBtn";
       editBtn.dataset.action = "edit";
       editBtn.textContent = "编辑";
+      editBtn.title = "截断下方界面气泡并重发；引擎上下文不会真正回退";
       editBtn.onclick = () => enterUserEditMode(article);
       actions.append(editBtn);
     }
@@ -2055,17 +2832,16 @@ function createChatMessage(role, text, model = "", final = false, attachments = 
 }
 
 function appendChatMessage(role, text, model = "", final = false, attachments = null, media = null, sessionID = "") {
-  removeChatEmpty();
+  if (!historyMountSilent) removeChatEmpty();
   const article = createChatMessage(role, text, model, final, attachments, media, sessionID);
-  $("chatMessages").append(article);
+  chatMessagesRoot().append(article);
   renderMessageMarkdown(article, final);
   if (role === "user" && Array.isArray(attachments) && attachments.length) {
     renderMessageAttachments(article, attachments);
   }
   if (Array.isArray(media) && media.length) renderMessageMedia(article, media, sessionID);
-  if (role === "user") addChatNodeFor(article);
-  updateContextUsage();
-  scrollChatToBottom();
+  if (role === "user" && !historyMountSilent) addChatNodeFor(article);
+  if (!historyMountSilent) scrollChatToBottom();
   return article;
 }
 
@@ -2092,14 +2868,7 @@ function appendAssistantChunk(text, sessionID = "") {
   if (sessionID) agentActiveAssistant.dataset.sessionId = sessionID;
   agentActiveAssistant._rawText = (agentActiveAssistant._rawText || "") + text;
   scheduleMessageMarkdown(agentActiveAssistant);
-  scheduleContextUsageUpdate();
   scrollChatToBottom();
-}
-
-let contextUsageTimer = null;
-function scheduleContextUsageUpdate() {
-  clearTimeout(contextUsageTimer);
-  contextUsageTimer = setTimeout(updateContextUsage, 300);
 }
 
 function scheduleMessageMarkdown(article) {
@@ -2115,7 +2884,6 @@ function finalizeAssistantMessage() {
   renderMessageMarkdown(agentActiveAssistant, true);
   lastAssistantMessageEl = agentActiveAssistant;
   refreshMessageActionButtons();
-  updateContextUsage();
 }
 
 async function renderMessageMarkdown(article, final = false) {
@@ -2280,31 +3048,97 @@ function renderMathBlocks(root) {
   }
 }
 
-async function renderMermaidBlocks(root) {
-  const mermaidAPI = window.mermaid;
-  if (!mermaidAPI?.render) return;
-  if (!mermaidReady) {
-    mermaidAPI.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "base",
-      themeVariables: {
-        background: "#ecebe7",
-        primaryColor: "#dedaf7",
-        primaryTextColor: "#202023",
-        primaryBorderColor: "#665bb2",
-        lineColor: "#54545b",
-        secondaryColor: "#dce7df",
-        tertiaryColor: "#f2e3ca",
-        fontFamily: "Aptos, Segoe UI, sans-serif",
-      },
-      flowchart: { htmlLabels: true },
-    });
-    mermaidReady = true;
+/** Dynamically load the ~3.5MB Mermaid bundle once, only when a diagram is needed. */
+function loadMermaid() {
+  if (window.mermaid?.render) {
+    return Promise.resolve(window.mermaid);
   }
+  if (mermaidLoadPromise) {
+    return mermaidLoadPromise;
+  }
+  mermaidLoadPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector("script[data-gs-mermaid]");
+    if (existing) {
+      const settle = () => {
+        if (window.mermaid?.render) resolve(window.mermaid);
+        else reject(new Error("Mermaid loaded but API unavailable"));
+      };
+      if (window.mermaid?.render) {
+        settle();
+        return;
+      }
+      existing.addEventListener("load", settle, { once: true });
+      existing.addEventListener("error", () => {
+        mermaidLoadPromise = null;
+        reject(new Error("Mermaid script failed to load"));
+      }, { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = MERMAID_SRC;
+    script.async = true;
+    script.dataset.gsMermaid = "1";
+    script.onload = () => {
+      if (window.mermaid?.render) resolve(window.mermaid);
+      else {
+        mermaidLoadPromise = null;
+        reject(new Error("Mermaid loaded but API unavailable"));
+      }
+    };
+    script.onerror = () => {
+      mermaidLoadPromise = null;
+      reject(new Error("Mermaid script failed to load"));
+    };
+    document.head.appendChild(script);
+  });
+  return mermaidLoadPromise;
+}
+
+function ensureMermaidInitialized(mermaidAPI) {
+  if (mermaidReady) return;
+  mermaidAPI.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: "base",
+    themeVariables: {
+      background: "#ecebe7",
+      primaryColor: "#dedaf7",
+      primaryTextColor: "#202023",
+      primaryBorderColor: "#665bb2",
+      lineColor: "#54545b",
+      secondaryColor: "#dce7df",
+      tertiaryColor: "#f2e3ca",
+      fontFamily: "Aptos, Segoe UI, sans-serif",
+    },
+    flowchart: { htmlLabels: true },
+  });
+  mermaidReady = true;
+}
+
+async function renderMermaidBlocks(root) {
   const blocks = [...root.querySelectorAll("pre > code.language-mermaid")];
+  if (!blocks.length) return;
+
+  let mermaidAPI;
+  try {
+    mermaidAPI = await loadMermaid();
+  } catch (err) {
+    for (const code of blocks) {
+      const pre = code.parentElement;
+      if (!pre) continue;
+      const container = document.createElement("div");
+      container.className = "mermaidDiagram mermaidError";
+      container.textContent = `Mermaid 库加载失败\n${err.message || err}`;
+      pre.replaceWith(container);
+    }
+    return;
+  }
+
+  ensureMermaidInitialized(mermaidAPI);
+
   for (const code of blocks) {
     const pre = code.parentElement;
+    if (!pre || !pre.isConnected) continue;
     const container = document.createElement("div");
     container.className = "mermaidDiagram";
     pre.replaceWith(container);
@@ -2366,55 +3200,96 @@ function markAgentRetryRecovered() {
 
 function appendThoughtChunk(text) {
   if (!text) return;
-  removeChatEmpty();
+  if (!historyMountSilent) removeChatEmpty();
   if (!agentActiveThought || !agentActiveThought.isConnected) {
     const details = document.createElement("details");
     details.className = "agentThought";
+    // Keep thoughts collapsed by default — large reasoning blocks dominate history.
+    details.open = false;
     const summary = document.createElement("summary");
     summary.textContent = "思考过程";
     const body = document.createElement("pre");
     details.append(summary, body);
-    $("chatMessages").append(details);
+    chatMessagesRoot().append(details);
     agentActiveThought = details;
   }
   agentActiveThought.querySelector("pre").textContent += text;
-  scrollChatToBottom();
+  if (!historyMountSilent) scrollChatToBottom();
+}
+
+function bindToolPayloadLazyLoad(details) {
+  if (!details || details.dataset.lazyBound === "1") return;
+  details.dataset.lazyBound = "1";
+  details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    const pre = details.querySelector("pre.agentToolDetail");
+    if (!pre || details.dataset.payloadReady === "1") return;
+    pre.textContent = details._toolPayload || "（无内容）";
+    pre.classList.remove("agentToolDetailPlaceholder");
+    details.dataset.payloadReady = "1";
+  });
+}
+
+function setToolPayloadLazy(details, payload) {
+  const pre = details.querySelector("pre.agentToolDetail");
+  if (!pre) return;
+  const formatted = payload == null ? "" : formatAgentPayload(payload);
+  details._toolPayload = formatted;
+  // Never auto-expand. While closed, keep a short placeholder so long histories
+  // do not pay for multi-KB tool text in the layout until the user opens them.
+  if (details.open) {
+    pre.textContent = formatted || "（无内容）";
+    pre.classList.remove("agentToolDetailPlaceholder");
+    details.dataset.payloadReady = "1";
+  } else {
+    pre.textContent = formatted ? "点击展开查看输入/输出" : "（无内容）";
+    pre.classList.add("agentToolDetailPlaceholder");
+    details.dataset.payloadReady = "0";
+  }
+  pre.hidden = false;
+  bindToolPayloadLazyLoad(details);
 }
 
 function renderAgentTool(tool, isUpdate, sessionID = "") {
-  removeChatEmpty();
+  if (!historyMountSilent) removeChatEmpty();
   const id = tool.id || `tool-${agentTools.size + 1}`;
   let details = agentTools.get(id);
   if (!details) {
     details = document.createElement("details");
     details.className = "agentTool";
-    details.innerHTML = `<summary><span class="agentToolSummaryMain"><span class="agentToolTitle"></span><span class="agentToolStatus"></span></span></summary><pre class="agentToolDetail"></pre>`;
-    $("chatMessages").append(details);
+    details.open = false;
+    details.innerHTML = `<summary><span class="agentToolSummaryMain"><span class="agentToolTitle"></span><span class="agentToolStatus"></span></span></summary><pre class="agentToolDetail agentToolDetailPlaceholder"></pre>`;
+    chatMessagesRoot().append(details);
     agentTools.set(id, details);
+    bindToolPayloadLazyLoad(details);
   }
+  // Always force collapsed during history mount / streaming updates unless user opened it.
+  if (!details.dataset.userOpened) details.open = false;
+  details.addEventListener("toggle", () => {
+    if (details.open) details.dataset.userOpened = "1";
+  }, { once: true });
+
   const title = tool.title || details.querySelector(".agentToolTitle").textContent || "工具调用";
   const status = tool.status || details.dataset.status || (isUpdate ? "更新" : "等待");
   details.dataset.status = status;
   details.querySelector(".agentToolTitle").textContent = title;
   details.querySelector(".agentToolStatus").textContent = agentToolStatusLabel(status);
   const payload = tool.raw_output ?? tool.raw_input;
-  const pre = details.querySelector("pre.agentToolDetail");
-  if (payload != null && pre) {
-    pre.textContent = formatAgentPayload(payload);
-    pre.hidden = false;
-  } else if (pre && !pre.textContent) {
-    pre.textContent = "展开查看输入/输出";
-  }
-  // Keep collapsed by default; only auto-open failures lightly via status color.
-  renderToolActivity(tool, id, title, status);
+  if (payload != null) setToolPayloadLazy(details, payload);
+  else if (!details._toolPayload) setToolPayloadLazy(details, null);
+
+  if (!historyMountSilent) renderToolActivity(tool, id, title, status);
   const toolHint = `${tool.kind || ""} ${title}`;
   const structuredMedia = Array.isArray(tool.media) ? tool.media.map((item) => ({
     ...item,
     kind: inferMediaKind(item.kind === "resource" ? toolHint : item.kind, item.mime_type || item.mimeType || "", item.uri || item.url || ""),
   })) : [];
-  const media = structuredMedia.length ? structuredMedia : extractMediaFromPayload(tool.raw_output, toolHint);
+  // Avoid scanning huge raw_output for URLs while mounting long history; structured media still shows.
+  const media = structuredMedia.length
+    ? structuredMedia
+    : (historyMountSilent ? [] : extractMediaFromPayload(tool.raw_output, toolHint));
   if (media.length) appendAssistantMedia(media, sessionID);
-  scrollChatToBottom();
+  if (!historyMountSilent) scrollChatToBottom();
 }
 
 function appendAssistantMedia(media, sessionID = "") {
@@ -2425,8 +3300,7 @@ function appendAssistantMedia(media, sessionID = "") {
   }
   if (sessionID) agentActiveAssistant.dataset.sessionId = sessionID;
   renderMessageMedia(agentActiveAssistant, media, sessionID);
-  updateContextUsage();
-  scrollChatToBottom();
+  if (!historyMountSilent) scrollChatToBottom();
 }
 
 function renderToolActivity(tool, id, title, status) {
@@ -2471,39 +3345,96 @@ function showAgentPermission(permission) {
   state.agentPermission = permission;
   $("permissionSummary").textContent = permission.summary || permission.tool?.title || "工具执行请求";
   $("permissionDetail").textContent = permission.tool?.raw_input == null ? "" : formatAgentPayload(permission.tool.raw_input);
-  if ($("permissionRemember")) $("permissionRemember").checked = false;
+  const options = Array.isArray(permission.options) ? permission.options : [];
+  const once = options.find((o) => /allow.?once|allow_once/i.test(o.kind || "") || /一次|once/i.test(o.name || ""));
+  const always = options.find((o) => /allow.?always|allow_always|session/i.test(o.kind || "") || /会话|always|session/i.test(o.name || ""));
+  const reject = options.find((o) => /reject/i.test(o.kind || "") || /拒绝|deny|reject/i.test(o.name || ""));
   if ($("permissionAllowBtn")) {
-    $("permissionAllowBtn").textContent = "允许一次";
+    $("permissionAllowBtn").dataset.optionId = once?.id || "";
+    $("permissionAllowBtn").textContent = once?.name || "允许一次";
+  }
+  if ($("permissionSessionBtn")) {
+    $("permissionSessionBtn").dataset.optionId = always?.id || "";
+    $("permissionSessionBtn").textContent = always?.name || "本会话允许";
+    $("permissionSessionBtn").hidden = !always && options.length > 0 && !options.some((o) => /always/i.test(o.kind || ""));
+  }
+  if ($("permissionRejectBtn")) {
+    $("permissionRejectBtn").dataset.optionId = reject?.id || "";
   }
   $("permissionBar").hidden = false;
   scrollChatToBottom(true);
 }
 
-function syncPermissionAllowLabel() {
-  const remember = !!$("permissionRemember")?.checked;
-  if ($("permissionAllowBtn")) {
-    $("permissionAllowBtn").textContent = remember ? "允许并记住" : "允许一次";
+function showAgentPlan(plan, waiting) {
+  if (!plan) return;
+  state.agentPlan = { ...plan, waiting: waiting || plan.waiting };
+  if ($("planSummary")) $("planSummary").textContent = waiting ? "需要确认执行计划" : "计划更新";
+  if ($("planBody")) {
+    if (plan.body) {
+      $("planBody").textContent = plan.body;
+    } else if (Array.isArray(plan.entries) && plan.entries.length) {
+      $("planBody").textContent = plan.entries.map((e, i) =>
+        `${i + 1}. ${e.content || ""}${e.status ? ` [${e.status}]` : ""}`).join("\n");
+    } else {
+      $("planBody").textContent = "（无计划正文）";
+    }
   }
+  const showActions = !!(plan.request_id && (waiting || plan.waiting));
+  ["planApproveBtn", "planReviseBtn", "planDismissBtn"].forEach((id) => {
+    if ($(id)) $(id).hidden = !showActions;
+  });
+  if ($("planBar")) $("planBar").hidden = false;
+  scrollChatToBottom(true);
 }
 
-function respondAgentPermission(allow) {
+function respondAgentPlan(outcome) {
+  const plan = state.agentPlan;
+  if (!plan?.request_id) {
+    if ($("planBar")) $("planBar").hidden = true;
+    return;
+  }
+  let feedback = "";
+  if (outcome === "cancelled") {
+    feedback = prompt("请说明希望如何修改计划（可留空）", "") || "";
+  }
+  if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
+    toast("对话连接已断开，请稍后重试", "error");
+    return;
+  }
+  agentSocket.send(JSON.stringify({
+    type: "plan_response",
+    request_id: plan.request_id,
+    outcome,
+    feedback,
+  }));
+  state.agentPlan = null;
+  if ($("planBar")) $("planBar").hidden = true;
+  appendAgentNotice(outcome === "approved" ? "已批准计划" : outcome === "cancelled" ? "已请求修改计划" : "已忽略计划");
+}
+
+function respondAgentPermission(allow, sessionScope = false) {
   const permission = state.agentPermission;
   if (!permission) return;
   if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
     toast("对话连接已断开，请稍后重试", "error");
     return;
   }
-  const remember = allow && !!$("permissionRemember")?.checked;
+  const optionId = allow
+    ? (sessionScope ? ($("permissionSessionBtn")?.dataset.optionId || "") : ($("permissionAllowBtn")?.dataset.optionId || ""))
+    : ($("permissionRejectBtn")?.dataset.optionId || "");
+  const remember = allow && sessionScope;
   agentSocket.send(JSON.stringify({
     type: "permission_response",
     request_id: permission.request_id,
     allow,
     remember,
+    option_id: optionId || undefined,
   }));
   state.agentPermission = null;
   $("permissionBar").hidden = true;
   if (allow && remember) {
     renderAgentStatus({ ...state.agentStatus, session_auto_approve: true });
+    if ($("agentSessionAutoApprove")) $("agentSessionAutoApprove").checked = true;
     appendAgentNotice("已允许，并在本会话自动批准后续工具");
   } else {
     appendAgentNotice(allow ? "已允许本次工具执行" : "已拒绝本次工具执行");
@@ -2551,9 +3482,31 @@ async function startAgent() {
   return true;
 }
 
-async function newAgentSession() {
-  const cwd = $("agentCwd").value.trim();
-  if (!cwd) throw new Error("请提供工作目录");
+/**
+ * Create a new chat under the current workspace (agentCwd).
+ * Prefer an active project path; if none, require a selected directory.
+ */
+async function newAgentSession(projectOrNull) {
+  // Optional project: set cwd first so the session belongs to that workspace.
+  if (projectOrNull && projectOrNull.path) {
+    const activated = await activateProjectWorkspace(projectOrNull, { createSession: false });
+    if (!activated) return false;
+  }
+  const cwd = $("agentCwd")?.value.trim() || "";
+  if (!cwd) {
+    throw new Error("请先选择或添加一个项目（工作空间）");
+  }
+  const matched = projectPathKeys().get(normalizePathKey(cwd));
+  if (matched && !matched.trusted) {
+    if (!confirm(`项目「${matched.name}」尚未信任，创建会话前需要信任该目录。继续？`)) {
+      return false;
+    }
+    await api("/api/agent/projects/trust", { method: "POST", body: JSON.stringify({ id: matched.id }) });
+    matched.trusted = true;
+    await loadAgentProjects();
+  }
+  if (matched) setProjectExpanded(matched.id, true);
+
   state.activeAgentSession = null;
   let status;
   if (!agentIsRunning()) {
@@ -2578,6 +3531,43 @@ async function newAgentSession() {
   });
   closeNativeChatPanels();
   loadAgentSessions().catch(() => {});
+  return true;
+}
+
+/** Switch agentCwd to a project workspace (trust + open bookkeeping). */
+async function activateProjectWorkspace(project, { createSession = false } = {}) {
+  if (!project?.id) return false;
+  if (project.path_ok === false) {
+    const fixed = await relocateProjectPath(project);
+    if (!fixed) return false;
+    project = (state.projects || []).find((p) => p.id === project.id) || project;
+  }
+  if (!project.trusted) {
+    if (!confirm(`首次打开项目「${project.name}」需要信任该目录，以允许 Agent 读写。继续？`)) return false;
+    await api("/api/agent/projects/trust", { method: "POST", body: JSON.stringify({ id: project.id }) });
+    project.trusted = true;
+  }
+  try {
+    await api("/api/agent/projects/open", { method: "POST", body: JSON.stringify({ id: project.id }) });
+  } catch (err) {
+    // Path became invalid (e.g. old garbled Chinese path) — offer re-pick.
+    const msg = err?.message || String(err || "");
+    if (/路径不可用|不是有效目录|重新选择/i.test(msg)) {
+      const fixed = await relocateProjectPath(project);
+      if (!fixed) return false;
+      project = (state.projects || []).find((p) => p.id === project.id) || project;
+    } else {
+      // open may fail on race; path still usable for local cwd
+    }
+  }
+  if ($("agentCwd")) $("agentCwd").value = project.path;
+  state.activeProjectId = project.id;
+  setProjectExpanded(project.id, true);
+  updateComposerProjectLabel();
+  if (createSession) {
+    return newAgentSession(project);
+  }
+  renderSidebarTree();
   return true;
 }
 
@@ -2620,7 +3610,6 @@ async function regenerateLastAssistant(article = lastAssistantMessageEl) {
     connectAgentSocket();
     return;
   }
-  // Drop the last assistant bubble for a clean regen UX (agent still has prior context).
   if (article?.isConnected && article.dataset.role === "assistant") {
     article.remove();
   }
@@ -2628,46 +3617,49 @@ async function regenerateLastAssistant(article = lastAssistantMessageEl) {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
+  const rewind = await rewindDropLastUser();
   const _mSend = $("composerModelSelect")?.value || "";
   const _rawSSend = $("composerStrengthSelect")?.value || "";
   const _sSend = _rawSSend === "auto" ? "" : _rawSSend;
   agentSocket.send(JSON.stringify({ type: "user_message", text, model: _mSend, strength: _sSend }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
-  appendAgentNotice("正在重新生成…");
+  if (rewind?.ok) {
+    appendAgentNotice("正在重新生成…（已回退引擎上一轮）");
+  } else {
+    appendAgentNotice(`正在重新生成…（rewind 未成功${rewind?.error ? "：" + rewind.error : ""}）`);
+  }
   forceScrollChatToBottom();
 }
 
-// --- 附件 / 截图上传 ---
+// --- 附件 / 截图上传（走 HTTP 落盘，WS 只传 path） ---
 const TEXT_FILE_MAX = 1_000_000;     // 1 MB cap for text attachments
 const IMAGE_FILE_MAX = 16_000_000;   // 16 MB cap for image attachments
 
-function readImageFile(file) {
-  return new Promise((resolve, reject) => {
-    if (file.size > IMAGE_FILE_MAX) { reject(new Error(`图片过大（${(file.size / 1_000_000).toFixed(1)} MB），上限 16 MB`)); return; }
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("读取图片失败"));
-    reader.onload = () => {
-      const dataUrl = String(reader.result || "");
-      const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/s);
-      if (!match) { reject(new Error("图片格式无法解析")); return; }
-      resolve({ kind: "image", data: match[2], dataUrl, mimeType: match[1], name: file.name || "image" });
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function readTextFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("读取文件失败"));
-    reader.onload = () => {
-      let text = String(reader.result || "");
-      const truncated = file.size > TEXT_FILE_MAX;
-      if (truncated) text = text.slice(0, TEXT_FILE_MAX) + "\n…（文件过大，已截断为前 1 MB）";
-      resolve({ kind: "text_file", name: file.name || "file.txt", text, truncated });
-    };
-    reader.readAsText(file.slice(0, TEXT_FILE_MAX + 65536), "utf-8");
-  });
+async function uploadChatFile(file, kindHint = "") {
+  const isImage = (kindHint || file.type || "").startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(file.name || "");
+  if (isImage && file.size > IMAGE_FILE_MAX) {
+    throw new Error(`图片过大（${(file.size / 1_000_000).toFixed(1)} MB），上限 16 MB`);
+  }
+  if (!isImage && file.size > TEXT_FILE_MAX) {
+    throw new Error(`文件过大（${(file.size / 1_000_000).toFixed(1)} MB），上限 1 MB`);
+  }
+  const form = new FormData();
+  form.append("file", file, file.name || (isImage ? "image.png" : "file.txt"));
+  form.append("kind", isImage ? "image" : "text_file");
+  if (file.type) form.append("mime_type", file.type);
+  if (state.agentStatus?.session_id) form.append("session_id", state.agentStatus.session_id);
+  const response = await fetch("/api/agent/upload", { method: "POST", body: form, credentials: "same-origin" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `上传失败 HTTP ${response.status}`);
+  const previewUrl = isImage ? URL.createObjectURL(file) : "";
+  return {
+    kind: data.kind || (isImage ? "image" : "text_file"),
+    name: data.name || file.name || "file",
+    path: data.path,
+    mimeType: data.mime_type || file.type || "",
+    previewUrl,
+    dataUrl: previewUrl,
+  };
 }
 
 async function handleChatFiles(fileList) {
@@ -2675,15 +3667,21 @@ async function handleChatFiles(fileList) {
   if (!files.length) return;
   for (const file of files) {
     try {
-      if (file.type.startsWith("image/")) {
-        state.pendingAttachments.push(await readImageFile(file));
-      } else {
-        state.pendingAttachments.push(await readTextFile(file));
-      }
+      state.pendingAttachments.push(await uploadChatFile(file));
     } catch (err) {
       toast(`${file.name || "附件"}：${err.message || String(err)}`, "error");
     }
   }
+  renderChatAttachments();
+  updateChatComposerState();
+}
+
+function addPathAttachment(path, name = "") {
+  path = String(path || "").trim();
+  if (!path) return;
+  const base = name || path.replace(/^.*[\\/]/, "") || path;
+  if (state.pendingAttachments.some((a) => a.path === path)) return;
+  state.pendingAttachments.push({ kind: "path", name: base, path });
   renderChatAttachments();
   updateChatComposerState();
 }
@@ -2730,7 +3728,8 @@ function clearChatAttachments() {
 }
 
 function renderMessageAttachments(article, attachments) {
-  if (!article?.isConnected || !Array.isArray(attachments) || !attachments.length) return;
+  // Do not require isConnected — history prepend mounts into a DocumentFragment first.
+  if (!article || !Array.isArray(attachments) || !attachments.length) return;
   const wrap = document.createElement("div");
   wrap.className = "chatMessageAttachments";
   for (const att of attachments) {
@@ -2752,7 +3751,8 @@ function renderMessageAttachments(article, attachments) {
 }
 
 function renderMessageMedia(article, mediaItems, sessionID = "") {
-  if (!article?.isConnected || !Array.isArray(mediaItems) || !mediaItems.length) return;
+  // Do not require isConnected — history prepend mounts into a DocumentFragment first.
+  if (!article || !Array.isArray(mediaItems) || !mediaItems.length) return;
   sessionID = sessionID || article.dataset.sessionId || state.activeAgentSession?.id || state.agentStatus?.session_id || "";
   let wrap = [...article.children].find((child) => child.classList?.contains("chatMessageMedia"));
   if (!wrap) {
@@ -2970,6 +3970,15 @@ function mediaReferenceIdentity(value, kind) {
 
 function buildOutboundAttachments() {
   return state.pendingAttachments.map((att) => {
+    if (att.path) {
+      return {
+        kind: att.kind || "path",
+        name: att.name || "",
+        path: att.path,
+        mime_type: att.mimeType || att.mime_type || "",
+      };
+    }
+    // Legacy tiny inline fallback (should be rare after upload path).
     if (att.kind === "image") {
       return { kind: "image", data: att.data || "", mime_type: att.mimeType || "", name: att.name || "" };
     }
@@ -2993,7 +4002,10 @@ async function sendAgentMessage() {
     toast("正在生成回复，请先停止或等待完成", "error");
     return;
   }
-  if (state.agentEngineState === "readonly") {
+  if (state.agentEngineState === "bootstrap") {
+    // Keep local history; engine already has a fresh session with bootstrap armed.
+    setAgentEngineState("attached");
+  } else if (state.agentEngineState === "readonly") {
     if (!confirm("当前仅显示本地历史，原会话上下文没有恢复。发送这条消息将开启新对话，是否继续？")) return;
     const status = state.agentStatus;
     if (state.agentFallbackSessionReady && status?.state === "ready" && status?.session_id) {
@@ -3039,7 +4051,6 @@ async function sendAgentMessage() {
   agentRetryNotice = null;
   $("chatInput").value = "";
   clearChatAttachments();
-  updateContextUsage();
   forceScrollChatToBottom();
   const _m = $("composerModelSelect")?.value || "";
   const _rawS = $("composerStrengthSelect")?.value || "";
@@ -3114,6 +4125,28 @@ function hostOf(url) {
   }
 }
 
+// 中转站地址：去掉 base_url 末尾的 /v1，即为可访问的中转站首页
+function stationUrlOf(url) {
+  if (!url) return "";
+  const raw = String(url).trim();
+  try {
+    const u = new URL(raw);
+    if (u.pathname.endsWith("/v1")) u.pathname = u.pathname.slice(0, -3);
+    if (u.pathname === "/") u.pathname = "";
+    return u.toString();
+  } catch {
+    return raw.replace(/\/v1\/?$/i, "").replace(/\/+$/, "");
+  }
+}
+
+// 渲染卡片 / 列表上的供应商地址超链接（指向去掉 /v1 的中转站）
+function providerLinkHtml(baseUrl) {
+  if (!baseUrl) return "—";
+  const station = stationUrlOf(baseUrl);
+  if (!station) return escapeHtml(hostOf(baseUrl));
+  return `<a class="providerLink" href="${escapeAttr(station)}" target="_blank" rel="noopener noreferrer">${escapeHtml(station)}</a>`;
+}
+
 function renderProfiles() {
   applyLayoutUI();
   $("profiles").innerHTML = "";
@@ -3138,7 +4171,7 @@ function renderProfiles() {
 				<button type="button" class="dragHandle" draggable="true" data-action="drag" title="拖动排序" aria-label="拖动 ${escapeHtml(profile.name)} 排序">↕</button>
 				<div class="providerInfo">
 					<h3 class="providerName">${escapeHtml(profile.name)}</h3>
-					<p class="providerUrl">${official ? "grok.com / auth.json" : escapeHtml(profile.base_url || hostOf(profile.base_url))}</p>
+					<p class="providerUrl">${official ? "grok.com / auth.json" : providerLinkHtml(profile.base_url)}</p>
 					<p class="providerMeta">${meta}</p>
 				</div>
 				<div class="providerFlags">
@@ -3366,6 +4399,9 @@ function registrarConfigFromForm() {
     browser_path: $("registrarBrowserPath").value.trim(),
     browser_mode: $("registrarBrowserMode").value,
     proxy_url: $("registrarProxyUrl").value.trim(),
+    proxy_strategy: $("registrarProxyStrategy")?.value || "round_robin",
+    proxy_cooldown_seconds: Number($("registrarProxyCooldown")?.value || 120),
+    register_engine: $("registrarEngine")?.value || "browser",
     email_provider: provider,
     default_domains: (provider === "cloudflare" ? $("registrarCloudflareDomains").value : $("registrarDefaultDomains").value).trim(),
     cloudmail_url: $("registrarCloudmailUrl").value.trim(),
@@ -3395,6 +4431,9 @@ function renderRegistrar(stateData) {
     if ($("registrarBrowserPath")) $("registrarBrowserPath").value = config.browser_path || "";
     if ($("registrarBrowserMode")) $("registrarBrowserMode").value = config.browser_mode || "visible";
     if ($("registrarProxyUrl")) $("registrarProxyUrl").value = config.proxy_url || "";
+    if ($("registrarProxyStrategy")) $("registrarProxyStrategy").value = config.proxy_strategy || "round_robin";
+    if ($("registrarProxyCooldown")) $("registrarProxyCooldown").value = config.proxy_cooldown_seconds || 120;
+    if ($("registrarEngine")) $("registrarEngine").value = config.register_engine || "browser";
     if ($("registrarEmailProvider")) $("registrarEmailProvider").value = config.email_provider || "cloudflare";
     if ($("registrarDefaultDomains")) $("registrarDefaultDomains").value = config.default_domains || "";
     if ($("registrarCloudmailUrl")) $("registrarCloudmailUrl").value = config.cloudmail_url || "";
@@ -4484,22 +5523,67 @@ $("reapplyBtn").onclick = () => {
 $("openConfigFromDriftBtn").onclick = () => showView("settings");
 
 $("agentStartBtn").onclick = () => run(startAgent, { button: $("agentStartBtn"), busyLabel: "连接中…" });
-$("agentNewSessionBtn").onclick = () => run(newAgentSession, { button: $("agentNewSessionBtn"), busyLabel: "创建中…" });
+$("agentNewSessionBtn").onclick = () => run(async () => {
+  // Prefer active project workspace; otherwise current cwd; else guide user to add a project.
+  const active = (state.projects || []).find((p) => p.id === state.activeProjectId);
+  if (active) return newAgentSession(active);
+  const cwd = $("agentCwd")?.value.trim();
+  if (!cwd) {
+    toast("请先添加或选择一个项目，会话会创建在该工作空间下", "info");
+    await addProjectFromPrompt();
+    const next = (state.projects || []).find((p) => p.id === state.activeProjectId);
+    if (next) return newAgentSession(next);
+    return false;
+  }
+  return newAgentSession();
+}, { button: $("agentNewSessionBtn"), busyLabel: "创建中…" });
 $("agentStopBtn").onclick = () => run(stopAgent, { button: $("agentStopBtn"), busyLabel: "停止中…" });
 $("agentSessionSearch").oninput = () => {
   clearTimeout(agentSessionSearchTimer);
   agentSessionSearchTimer = setTimeout(() => loadAgentSessions().catch((err) => toast(err.message, "error")), 180);
 };
+$("toggleOrphanSessionsBtn")?.addEventListener("click", () => {
+  state.orphanSessionsOpen = !state.orphanSessionsOpen;
+  renderAgentSessionList();
+});
 $("openSessionSidebarBtn").onclick = () => toggleSessionSidebar();
 $("closeSessionSidebarBtn").onclick = () => toggleSessionSidebar(false);
 $("openContextRailBtn").onclick = () => toggleContextRail();
 $("closeContextRailBtn").onclick = () => toggleContextRail(false);
 $("nativeChatScrim").onclick = closeNativeChatPanels;
+$("navHomeFromChatBtn")?.addEventListener("click", () => showView("home"));
+$("sidebarSearchFocusBtn")?.addEventListener("click", () => {
+  const input = $("agentSessionSearch");
+  if (!input) return;
+  input.focus();
+  input.select?.();
+});
+$("openLocationBtn")?.addEventListener("click", () => openWorkingDirectoryInExplorer().catch((err) => toast(err.message, "error")));
+$("pickCwdTopBtn")?.addEventListener("click", () => pickWorkingDirectory().catch((err) => toast(err.message, "error")));
+$("composerProjectBtn")?.addEventListener("click", () => pickWorkingDirectory().catch((err) => toast(err.message, "error")));
+$("composerAccessSelect")?.addEventListener("change", () => applyComposerAccessSelect());
 bindChatPanelResizer("left");
 bindChatPanelResizer("right");
-$("agentCwd").oninput = updateConversationIdentity;
-$("permissionAllowBtn").onclick = () => respondAgentPermission(true);
-$("permissionRejectBtn").onclick = () => respondAgentPermission(false);
+// agentCwd is a hidden state field; updates go through pickWorkingDirectory / openProjectById.
+$("permissionAllowBtn").onclick = () => respondAgentPermission(true, false);
+$("permissionSessionBtn") && ($("permissionSessionBtn").onclick = () => respondAgentPermission(true, true));
+$("permissionRejectBtn").onclick = () => respondAgentPermission(false, false);
+$("planApproveBtn") && ($("planApproveBtn").onclick = () => respondAgentPlan("approved"));
+$("planReviseBtn") && ($("planReviseBtn").onclick = () => respondAgentPlan("cancelled"));
+$("planDismissBtn") && ($("planDismissBtn").onclick = () => respondAgentPlan("abandoned"));
+$("agentSessionAutoApprove")?.addEventListener("change", () => {
+  const enabled = !!$("agentSessionAutoApprove").checked;
+  if (agentSocket && agentSocket.readyState === WebSocket.OPEN) {
+    agentSocket.send(JSON.stringify({ type: "set_session_auto_approve", allow: enabled, remember: enabled }));
+  }
+  renderAgentStatus({ ...state.agentStatus, session_auto_approve: enabled });
+  syncComposerAccessSelect();
+});
+$("agentAlwaysApprove")?.addEventListener("change", () => syncComposerAccessSelect());
+$("addProjectBtn")?.addEventListener("click", () => addProjectFromPrompt().catch((err) => toast(err.message, "error")));
+$("chatWorkspaceFileBtn")?.addEventListener("click", () => openWorkspaceFilePicker().catch((err) => toast(err.message, "error")));
+$("workspaceFileCloseBtn")?.addEventListener("click", () => hideWorkspaceFilePicker());
+$("workspaceFileSearch")?.addEventListener("input", () => filterWorkspaceFileList());
 $("permissionRemember")?.addEventListener("change", syncPermissionAllowLabel);
 $("chatComposer").onsubmit = (event) => {
   event.preventDefault();
@@ -4522,7 +5606,11 @@ $("chatInput").addEventListener("paste", (event) => {
   const files = imageItems.map((item) => item.getAsFile()).filter(Boolean);
   handleChatFiles(files);
 });
-$("agentReadonlyNewBtn").onclick = () => run(newAgentSession, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
+$("agentReadonlyNewBtn").onclick = () => run(async () => {
+  try { await api("/api/agent/session/bootstrap", { method: "POST", body: JSON.stringify({ clear: true }) }); } catch {}
+  state.agentNeedsBootstrap = false;
+  return newAgentSession();
+}, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
 $("chatInput").oninput = () => {
   renderAgentStatus(state.agentStatus);
   showSkillsPopup();
@@ -4923,7 +6011,7 @@ $("deleteGrokAuthBtn").onclick = () => run(async () => {
 
 $("registrarEmailProvider").onchange = updateRegistrarProviderFields;
 
-["registrarBrowserPath", "registrarBrowserMode", "registrarProxyUrl", "registrarEmailProvider",
+["registrarBrowserPath", "registrarBrowserMode", "registrarProxyUrl", "registrarProxyStrategy", "registrarProxyCooldown", "registrarEngine", "registrarEmailProvider",
   "registrarDefaultDomains", "registrarCloudmailUrl", "registrarCloudmailAdminEmail",
   "registrarCloudmailPassword", "registrarCloudflareApiBase", "registrarCloudflareApiKey",
   "registrarCloudflareAuthMode", "registrarCloudflareDomains", "registrarCloudflareDomainsPath",
@@ -5142,6 +6230,10 @@ async function bulkGrokPoolAction(action, button) {
       toast(`操作完成，但有文件清理失败：${response.result.failed.join("；")}`, "error");
       return false;
     }
+    if (action === "delete" && response.result?.deleted_files) {
+      toast(`已批量删除 ${abnormal.length} 个异常账号（含 ${response.result.deleted_files} 个源 JSON 文件）`, "success");
+      return false;
+    }
   }, { button, busyLabel: `${verb}中…`, success: `已批量${verb} ${abnormal.length} 个异常账号` });
 }
 
@@ -5252,28 +6344,39 @@ refreshAll()
   })
   .catch((err) => toast(err.message, "error"));
 
-/* Skills popup state */
+/* Slash palette + skills popup state */
 let skillsPopupSkills = [];
 let skillsPopupVisible = [];
 let skillsPopupIdx = -1;
 let skillsPopupLoading = false;
+let workspaceFileEntries = [];
+let workspaceFileFilter = "";
 
-function skillsPopupFilterQuery() {
+const BUILTIN_SLASH_COMMANDS = [
+  { id: "plan", name: "plan", title: "Plan 模式", description: "进入规划模式", kind: "command", insert: "/plan " },
+  { id: "goal", name: "goal", title: "Goal", description: "设定目标", kind: "command", insert: "/goal " },
+  { id: "compact", name: "compact", title: "压缩上下文", description: "请求 Agent 压缩上下文", kind: "command", insert: "/compact", action: "compact" },
+  { id: "status", name: "status", title: "状态", description: "查看当前 Agent 状态", kind: "command", action: "status" },
+  { id: "mcp", name: "mcp", title: "MCP", description: "发送 /mcp 查看 MCP", kind: "command", insert: "/mcp" },
+  { id: "doctor", name: "doctor", title: "Doctor", description: "环境自检提示", kind: "command", action: "doctor" },
+  { id: "new", name: "new", title: "新对话", description: "创建新会话", kind: "command", action: "newChat" },
+  { id: "yolo", name: "yolo", title: "YOLO", description: "切换自动批准工具", kind: "command", action: "yolo" },
+  { id: "skills", name: "skills", title: "Skills", description: "浏览并插入 Skill", kind: "command", insert: "/skills " },
+];
+
+function slashPopupFilterQuery() {
   const input = $("chatInput");
   if (!input) return null;
   const text = input.value;
   const cursorPos = input.selectionStart ?? text.length;
   const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
   const currentLine = text.slice(lineStart, cursorPos);
-  const match = currentLine.match(/^\/skills(?:\s+(.*))?$/i);
-  if (!match) return null;
-  const query = String(match[1] || "").trimStart();
-  if (!query) return "";
-  const nameEnd = query.search(/\s/);
-  const skillName = nameEnd >= 0 ? query.slice(0, nameEnd) : query;
-  const selected = nameEnd >= 0 && skillsPopupSkills.some((sk) => String(sk.name || "").toLowerCase() === skillName.toLowerCase());
-  if (selected) return null;
-  return skillName.toLowerCase();
+  if (!currentLine.startsWith("/")) return null;
+  // After a completed `/skills name ` keep closed.
+  const skillsMatch = currentLine.match(/^\/skills\s+(\S+)\s+/i);
+  if (skillsMatch) return null;
+  const body = currentLine.slice(1);
+  return body.toLowerCase();
 }
 
 function highlightSkillsPopupItems() {
@@ -5285,6 +6388,29 @@ function highlightSkillsPopupItems() {
   list.querySelector(".skillsPopupItem.is-selected")?.scrollIntoView({ block: "nearest" });
 }
 
+function buildSlashCatalog(filterQuery) {
+  const q = String(filterQuery || "").toLowerCase();
+  const skillsMode = q.startsWith("skills");
+  const skillFilter = skillsMode ? q.replace(/^skills\s*/, "") : q;
+  const commands = BUILTIN_SLASH_COMMANDS.filter((cmd) => {
+    if (skillsMode && cmd.name !== "skills") return false;
+    if (!q) return true;
+    return cmd.name.includes(q) || cmd.title.toLowerCase().includes(q) || cmd.description.toLowerCase().includes(q);
+  }).map((cmd) => ({ ...cmd, section: "命令" }));
+  const skills = (skillsPopupSkills || [])
+    .filter((sk) => skillMatchesQuery(sk, skillFilter))
+    .map((sk) => ({
+      id: `skill:${sk.name}`,
+      name: sk.name,
+      title: sk.name,
+      description: skillSourceMeta(sk.source).short + (sk.path ? ` · ${sk.path}` : ""),
+      kind: "skill",
+      section: "Skills",
+      skill: sk,
+    }));
+  return [...commands, ...skills];
+}
+
 function showSkillsPopup() {
   const popup = $("skillsPopup");
   if (!popup) return;
@@ -5293,7 +6419,7 @@ function showSkillsPopup() {
     hideSkillsPopup();
     return;
   }
-  const filterQuery = skillsPopupFilterQuery();
+  const filterQuery = slashPopupFilterQuery();
   if (filterQuery === null) {
     hideSkillsPopup();
     return;
@@ -5303,7 +6429,7 @@ function showSkillsPopup() {
   const countEl = $("skillsPopupCount");
   if (!list) return;
 
-  if (skillsPopupLoading && skillsPopupSkills.length === 0) {
+  if (skillsPopupLoading && skillsPopupSkills.length === 0 && filterQuery.startsWith("skills")) {
     skillsPopupVisible = [];
     skillsPopupIdx = -1;
     list.innerHTML = `<div class="skillsPopupLoading">正在加载 Skills…</div>`;
@@ -5312,16 +6438,10 @@ function showSkillsPopup() {
     return;
   }
 
-  skillsPopupVisible = skillsPopupSkills.filter((sk) => skillMatchesQuery(sk, filterQuery));
+  skillsPopupVisible = buildSlashCatalog(filterQuery);
   if (!skillsPopupVisible.length) {
     skillsPopupIdx = -1;
-    const emptyTitle = skillsPopupSkills.length === 0
-      ? "暂无可用 Skills"
-      : `没有匹配「${escapeHtml(filterQuery)}」`;
-    const emptyHint = skillsPopupSkills.length === 0
-      ? "可在顶部 Skills 页查看安装位置"
-      : "试试其他关键词，或清空过滤词";
-    list.innerHTML = `<div class="skillsPopupEmpty"><strong>${emptyTitle}</strong><span>${emptyHint}</span></div>`;
+    list.innerHTML = `<div class="skillsPopupEmpty"><strong>无匹配项</strong><span>试试 /plan /compact /skills</span></div>`;
     if (countEl) countEl.textContent = "0";
     popup.hidden = false;
     return;
@@ -5331,16 +6451,20 @@ function showSkillsPopup() {
     skillsPopupIdx = 0;
   }
 
-  list.innerHTML = skillsPopupVisible.map((sk, i) => {
-    const meta = skillSourceMeta(sk.source);
-    return `<button type="button" class="skillsPopupItem${i === skillsPopupIdx ? " is-selected" : ""}" role="option" data-index="${i}" aria-selected="${i === skillsPopupIdx ? "true" : "false"}">
-      <img class="skillsPopupItemIcon" src="/skill.svg" alt="" aria-hidden="true">
+  let lastSection = "";
+  list.innerHTML = skillsPopupVisible.map((item, i) => {
+    const sectionHtml = item.section !== lastSection
+      ? `<div class="slashSectionLabel">${escapeHtml(item.section)}</div>`
+      : "";
+    lastSection = item.section;
+    const icon = item.kind === "skill"
+      ? `<img class="skillsPopupItemIcon" src="/skill.svg" alt="" aria-hidden="true">`
+      : `<span class="skillsPopupItemIcon slashCmdIcon">/</span>`;
+    return `${sectionHtml}<button type="button" class="skillsPopupItem${i === skillsPopupIdx ? " is-selected" : ""}" role="option" data-index="${i}" aria-selected="${i === skillsPopupIdx ? "true" : "false"}">
+      ${icon}
       <span class="skillsPopupItemInfo">
-        <span class="skillsPopupItemName">${escapeHtml(sk.name)}</span>
-        <span class="skillsPopupItemMeta">
-          <span class="skillsPopupItemSource">${escapeHtml(meta.short)}</span>
-          <span class="skillsPopupItemPath" title="${escapeHtml(sk.path)}">${escapeHtml(sk.path)}</span>
-        </span>
+        <span class="skillsPopupItemName">${escapeHtml(item.title || item.name)}</span>
+        <span class="skillsPopupItemMeta"><span class="skillsPopupItemSource">${escapeHtml(item.description || "")}</span></span>
       </span>
     </button>`;
   }).join("");
@@ -5357,6 +6481,7 @@ function showSkillsPopup() {
   });
 
   if (countEl) countEl.textContent = String(skillsPopupVisible.length);
+  if ($("slashPopupTitle")) $("slashPopupTitle").textContent = "命令 / Skills";
   popup.hidden = false;
   highlightSkillsPopupItems();
 }
@@ -5371,19 +6496,64 @@ function hideSkillsPopup() {
 function selectSkillsPopupItem(index) {
   const items = skillsPopupVisible;
   if (index < 0 || index >= items.length) return;
+  const item = items[index];
+  if (item.kind === "skill") {
+    insertSlashLine(`/skills ${item.name} `);
+    hideSkillsPopup();
+    return;
+  }
+  if (item.action === "newChat") {
+    hideSkillsPopup();
+    run(newAgentSession, { busyLabel: "创建中…" });
+    return;
+  }
+  if (item.action === "yolo") {
+    hideSkillsPopup();
+    const box = $("agentAlwaysApprove");
+    if (box) {
+      box.checked = !box.checked;
+      toast(box.checked ? "已勾选 YOLO（下次启动生效）" : "已取消 YOLO", "info");
+    }
+    return;
+  }
+  if (item.action === "status") {
+    hideSkillsPopup();
+    const s = state.agentStatus || {};
+    toast(`Agent ${s.state || "idle"} · model ${s.model || "—"} · cwd ${s.cwd || "—"}`, "info");
+    return;
+  }
+  if (item.action === "doctor") {
+    hideSkillsPopup();
+    toast(state.agentStatus?.available === false
+      ? "未检测到 grok 可执行文件，请安装 Grok Build 并加入 PATH"
+      : `Grok 可用：${state.agentStatus?.grok_path || "已发现"}`, "info");
+    return;
+  }
+  if (item.action === "compact") {
+    if (!confirm("向 Agent 发送 /compact 以压缩上下文？")) return;
+    insertSlashLine("/compact");
+    hideSkillsPopup();
+    sendAgentMessage().catch((err) => toast(err.message, "error"));
+    return;
+  }
+  if (item.insert) {
+    insertSlashLine(item.insert);
+    hideSkillsPopup();
+    if (item.insert === "/skills ") loadSkillsForPopup();
+  }
+}
+
+function insertSlashLine(insert) {
   const input = $("chatInput");
   if (!input) return;
-  const sk = items[index];
   const text = input.value;
   const cursorPos = input.selectionStart ?? text.length;
   const lineStart = text.lastIndexOf("\n", cursorPos - 1) + 1;
   const lineEnd = text.indexOf("\n", cursorPos);
   const before = text.slice(0, lineStart);
   const after = text.slice(lineEnd >= 0 ? lineEnd : text.length);
-  const insert = `/skills ${sk.name} `;
   input.value = before + insert + after;
   input.selectionStart = input.selectionEnd = before.length + insert.length;
-  hideSkillsPopup();
   input.focus();
   renderAgentStatus(state.agentStatus);
 }
@@ -5400,6 +6570,341 @@ async function loadSkillsForPopup() {
     skillsPopupLoading = false;
     showSkillsPopup();
   }
+}
+
+async function loadAgentProjects() {
+  try {
+    const list = await api("/api/agent/projects");
+    state.projects = Array.isArray(list) ? list : [];
+  } catch {
+    state.projects = [];
+  }
+  // Sync active project from current cwd without forcing a re-render loop.
+  const activePath = normalizePathKey($("agentCwd")?.value || state.activeAgentSession?.cwd || "");
+  const active = (state.projects || []).find((p) => normalizePathKey(p.path) === activePath);
+  state.activeProjectId = active?.id || state.activeProjectId || "";
+  renderSidebarTree();
+  updateComposerProjectLabel();
+}
+
+/**
+ * Project tree: each workspace expands to show its sessions (cwd match).
+ * Mirrors grok-app sidebar nesting: Project → sessions; orphans listed separately.
+ */
+function renderAgentProjects() {
+  const host = $("agentProjectList");
+  if (!host) return;
+  const list = state.projects || [];
+  const datalist = $("recentProjectPaths");
+  if (datalist) {
+    datalist.innerHTML = list.map((p) => `<option value="${escapeAttr(p.path)}"></option>`).join("");
+  }
+
+  const activePath = normalizePathKey($("agentCwd")?.value || state.activeAgentSession?.cwd || "");
+  const active = list.find((p) => normalizePathKey(p.path) === activePath);
+  if (active) state.activeProjectId = active.id;
+
+  if (!list.length) {
+    host.innerHTML = `<p class="sessionListEmpty">暂无项目。点击 ＋ 添加工作目录后，会话会归入对应项目。</p>`;
+    updateComposerProjectLabel();
+    return;
+  }
+
+  host.innerHTML = "";
+  for (const project of list) {
+    const pathKey = normalizePathKey(project.path);
+    const isActive = !!activePath && pathKey === activePath;
+    const missing = project.path_ok === false;
+    const expanded = isProjectExpanded(project.id);
+    const sessions = sessionsForProject(project);
+
+    const folder = document.createElement("div");
+    folder.className = `projectFolder${isActive ? " is-active" : ""}${missing ? " is-missing" : ""}${expanded ? " is-expanded" : ""}`;
+    folder.dataset.projectId = project.id;
+
+    const row = document.createElement("div");
+    row.className = "projectItem";
+    row.role = "button";
+    row.tabIndex = 0;
+    row.setAttribute("aria-expanded", expanded ? "true" : "false");
+    row.title = project.path || "";
+
+    const chevron = document.createElement("span");
+    chevron.className = "projectItemChevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = expanded ? "▾" : "▸";
+
+    const body = document.createElement("span");
+    body.className = "projectItemBody";
+    const name = document.createElement("span");
+    name.className = "projectItemName";
+    name.textContent = `${project.pinned ? "📌 " : ""}${project.name || "未命名项目"}`;
+    if (!project.trusted) {
+      const badge = document.createElement("span");
+      badge.className = "projectItemBadge";
+      badge.textContent = "未信任";
+      name.append(" ", badge);
+    }
+    if (missing) {
+      const badge = document.createElement("span");
+      badge.className = "projectItemBadge";
+      badge.textContent = "路径失效";
+      name.append(" ", badge);
+    }
+    const pathEl = document.createElement("span");
+    pathEl.className = "projectItemPath mono";
+    pathEl.textContent = project.path || "";
+    body.append(name, pathEl);
+
+    const count = document.createElement("span");
+    count.className = "projectItemCount";
+    count.textContent = String(sessions.length);
+    count.title = `${sessions.length} 个会话`;
+
+    const actions = document.createElement("div");
+    actions.className = "projectItemActions";
+    if (missing) {
+      const fixBtn = document.createElement("button");
+      fixBtn.type = "button";
+      fixBtn.className = "sessionActionBtn projectFixPathBtn";
+      fixBtn.title = "重新选择目录（修复中文/失效路径）";
+      fixBtn.setAttribute("aria-label", `修复 ${project.name} 的路径`);
+      fixBtn.textContent = "↻";
+      fixBtn.onclick = (event) => {
+        event.stopPropagation();
+        relocateProjectPath(project).catch((err) => toast(err.message || String(err), "error"));
+      };
+      actions.append(fixBtn);
+    }
+    const newBtn = document.createElement("button");
+    newBtn.type = "button";
+    newBtn.className = "sessionActionBtn projectNewSessionBtn";
+    newBtn.title = "在此项目下新建会话";
+    newBtn.setAttribute("aria-label", `在 ${project.name} 下新建会话`);
+    newBtn.textContent = "✎";
+    newBtn.disabled = missing;
+    newBtn.onclick = (event) => {
+      event.stopPropagation();
+      run(() => newAgentSession(project), { busyLabel: "创建中…" }).catch((err) => {
+        if (!isAbortError(err)) toast(err.message || String(err), "error");
+      });
+    };
+    actions.append(newBtn);
+
+    row.append(chevron, body, count, actions);
+
+    const toggleExpand = () => {
+      setProjectExpanded(project.id, !isProjectExpanded(project.id));
+      renderSidebarTree();
+    };
+    row.onclick = (event) => {
+      // Row click toggles expand; double-activate workspace when already expanded.
+      if (event.detail > 1) {
+        openProjectById(project.id).catch((err) => toast(err.message, "error"));
+        return;
+      }
+      toggleExpand();
+    };
+    row.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleExpand();
+      }
+    };
+
+    folder.append(row);
+
+    if (expanded) {
+      const children = document.createElement("div");
+      children.className = "projectSessionList";
+      if (missing) {
+        const fixHint = document.createElement("button");
+        fixHint.type = "button";
+        fixHint.className = "projectTrustHint";
+        fixHint.textContent = "路径不可用，点击重新选择目录";
+        fixHint.onclick = (event) => {
+          event.stopPropagation();
+          relocateProjectPath(project).catch((err) => toast(err.message || String(err), "error"));
+        };
+        children.append(fixHint);
+      } else if (!project.trusted) {
+        const trustBtn = document.createElement("button");
+        trustBtn.type = "button";
+        trustBtn.className = "projectTrustHint";
+        trustBtn.textContent = "信任此项目以创建会话";
+        trustBtn.onclick = (event) => {
+          event.stopPropagation();
+          openProjectById(project.id).catch((err) => toast(err.message, "error"));
+        };
+        children.append(trustBtn);
+      }
+      if (!sessions.length) {
+        const empty = document.createElement("p");
+        empty.className = "sessionListEmpty projectSessionEmpty";
+        empty.textContent = missing
+          ? "修复路径后可继续使用"
+          : (project.trusted ? "暂无会话，点 ✎ 新建" : "信任后可在此创建会话");
+        children.append(empty);
+      } else {
+        for (const session of sessions) {
+          // Nested under project: path is implied by parent workspace.
+          children.append(buildSessionItemEl(session, { nested: true, showPath: false }));
+        }
+      }
+      folder.append(children);
+    }
+
+    host.append(folder);
+  }
+  updateComposerProjectLabel();
+}
+
+async function openProjectById(id) {
+  const project = (state.projects || []).find((p) => p.id === id);
+  if (!project) return;
+  if (project.path_ok === false) {
+    await relocateProjectPath(project);
+    return;
+  }
+  const ok = await activateProjectWorkspace(project, { createSession: false });
+  if (!ok) return;
+  updateConversationIdentity();
+  toast(`已切换工作空间：${project.name}`, "info");
+}
+
+/** Re-pick directory for a project whose path is missing or was garbled (Chinese). */
+async function relocateProjectPath(project) {
+  if (!project?.id) return false;
+  toast(`请重新选择「${project.name || "项目"}」的目录`, "info");
+  const path = await pickDirectoryPath(project.path || "");
+  if (!path) {
+    toast("已取消修复", "info");
+    return false;
+  }
+  const updated = await api("/api/agent/projects/relocate", {
+    method: "POST",
+    body: JSON.stringify({ id: project.id, path }),
+  });
+  await loadAgentProjects();
+  const next = (state.projects || []).find((p) => p.id === project.id) || updated;
+  if (next?.path) {
+    if ($("agentCwd")) $("agentCwd").value = next.path;
+    state.activeProjectId = next.id;
+    setProjectExpanded(next.id, true);
+  }
+  updateConversationIdentity();
+  toast(`已修复路径：${next?.path || path}`, "success");
+  return true;
+}
+
+/** Open native folder dialog; returns absolute path or "" if cancelled. */
+async function pickDirectoryPath(start = "") {
+  const initial = String(start || $("agentCwd")?.value || state.agentStatus?.cwd || "").trim();
+  const result = await api("/api/agent/pick-directory", {
+    method: "POST",
+    body: JSON.stringify({ start: initial }),
+  });
+  if (result?.cancelled || !result?.path) return "";
+  return String(result.path).trim();
+}
+
+async function pickWorkingDirectory() {
+  const path = await pickDirectoryPath();
+  if (!path) {
+    toast("已取消选择", "info");
+    return;
+  }
+  if ($("agentCwd")) $("agentCwd").value = path;
+  // If the path is already a registered project, activate that workspace.
+  const matched = projectPathKeys().get(normalizePathKey(path));
+  if (matched) {
+    state.activeProjectId = matched.id;
+    setProjectExpanded(matched.id, true);
+  } else {
+    state.activeProjectId = "";
+  }
+  updateConversationIdentity();
+  updateComposerProjectLabel();
+  toast(matched ? `已切换到项目：${matched.name}` : `已选择工作目录：${path}`, "success");
+}
+
+async function addProjectFromPrompt() {
+  // Prefer native folder picker; fall back to prompt if the API is unavailable.
+  let path = "";
+  try {
+    path = await pickDirectoryPath($("agentCwd")?.value || "");
+  } catch (err) {
+    path = prompt("项目目录绝对路径（文件夹选择器不可用时手动输入）", $("agentCwd")?.value || "") || "";
+    if (!path && err?.message) toast(err.message, "error");
+  }
+  if (!path) return;
+  const item = await api("/api/agent/projects", {
+    method: "POST",
+    body: JSON.stringify({ path, trusted: true }),
+  });
+  await loadAgentProjects();
+  if (item?.id) {
+    await openProjectById(item.id);
+    setProjectExpanded(item.id, true);
+    renderSidebarTree();
+  }
+}
+
+async function saveCurrentCwdAsProject() {
+  const path = $("agentCwd")?.value.trim();
+  if (!path) throw new Error("请先填写或选择工作目录");
+  await api("/api/agent/projects", { method: "POST", body: JSON.stringify({ path, trusted: true }) });
+  await loadAgentProjects();
+  toast("已保存为项目", "success");
+}
+
+async function openWorkspaceFilePicker() {
+  const cwd = $("agentCwd")?.value.trim() || state.agentStatus?.cwd || "";
+  if (!cwd) throw new Error("请先设置工作目录");
+  const popup = $("workspaceFilePopup");
+  const list = $("workspaceFileList");
+  if (!popup || !list) return;
+  list.innerHTML = `<div class="skillsPopupLoading">加载中…</div>`;
+  popup.hidden = false;
+  workspaceFileEntries = await api(`/api/agent/fs?cwd=${encodeURIComponent(cwd)}`);
+  if (!Array.isArray(workspaceFileEntries)) workspaceFileEntries = [];
+  workspaceFileFilter = "";
+  if ($("workspaceFileSearch")) $("workspaceFileSearch").value = "";
+  filterWorkspaceFileList();
+}
+
+function hideWorkspaceFilePicker() {
+  if ($("workspaceFilePopup")) $("workspaceFilePopup").hidden = true;
+}
+
+function filterWorkspaceFileList() {
+  const list = $("workspaceFileList");
+  if (!list) return;
+  const q = ($("workspaceFileSearch")?.value || "").toLowerCase();
+  workspaceFileFilter = q;
+  const items = (workspaceFileEntries || []).filter((e) => {
+    if (e.is_dir) return false;
+    if (!q) return true;
+    return String(e.name || "").toLowerCase().includes(q) || String(e.path || "").toLowerCase().includes(q);
+  }).slice(0, 80);
+  if (!items.length) {
+    list.innerHTML = `<div class="skillsPopupEmpty"><strong>无匹配文件</strong></div>`;
+    return;
+  }
+  list.innerHTML = items.map((e) =>
+    `<button type="button" class="skillsPopupItem" data-path="${escapeAttr(e.path)}" data-name="${escapeAttr(e.name)}">
+      <span class="skillsPopupItemInfo">
+        <span class="skillsPopupItemName">${escapeHtml(e.name)}</span>
+        <span class="skillsPopupItemMeta"><span class="skillsPopupItemPath">${escapeHtml(e.path)}</span></span>
+      </span>
+    </button>`).join("");
+  list.querySelectorAll(".skillsPopupItem").forEach((btn) => {
+    btn.onclick = () => {
+      addPathAttachment(btn.dataset.path, btn.dataset.name);
+      hideWorkspaceFilePicker();
+      toast(`已引用 ${btn.dataset.name}`, "info");
+    };
+  });
 }
 
 async function populateComposerModelSelect() {

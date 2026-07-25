@@ -12,22 +12,41 @@ import (
 	"unicode"
 )
 
+// xAI OAuth Device Authorization Grant (RFC 8628).
+//
+// Split host surface (confirmed via OIDC discovery + live probe, 2026-07):
+//   - API (device code + token + refresh) → auth.x.ai
+//   - Human verification / consent UI     → accounts.x.ai
+//
+// Do NOT POST device-code requests to accounts.x.ai/oauth2/device — that path
+// serves the Next.js verification SPA (HTML 200), not the RFC JSON response.
 const (
-	ClientID           = "b1a00492-073a-47ea-816f-4c329264a828"
-	Issuer             = "https://auth.x.ai"
-	DeviceCodeURL      = "https://auth.x.ai/oauth2/device/code"
-	TokenURL           = "https://auth.x.ai/oauth2/token"
+	ClientID = "b1a00492-073a-47ea-816f-4c329264a828"
+	Issuer   = "https://auth.x.ai"
+	// DeviceCodeURL is device_authorization_endpoint from
+	// https://auth.x.ai/.well-known/openid-configuration
+	DeviceCodeURL = "https://auth.x.ai/oauth2/device/code"
+	// TokenURL is token_endpoint (device_code grant + refresh_token grant).
+	TokenURL = "https://auth.x.ai/oauth2/token"
+	// DeviceConsentURL is the browser allow/deny page (not an API).
+	DeviceConsentURL = "https://accounts.x.ai/oauth2/device/consent"
+	// VerificationURIDefault is the human verification page when the API
+	// response omits verification_uri.
+	VerificationURIDefault = "https://accounts.x.ai/oauth2/device"
+	// Protocol mint (SSO cookie) still uses these auth.x.ai form endpoints.
+	DeviceVerifyURL  = "https://auth.x.ai/oauth2/device/verify"
+	DeviceApproveURL = "https://auth.x.ai/oauth2/device/approve"
 	DefaultBaseURL     = "https://cli-chat-proxy.grok.com/v1"
 	DefaultRedirectURI = "http://127.0.0.1:56121/callback"
 	Scope              = "openid profile email offline_access grok-cli:access api:access"
 )
 
 var defaultClientHeaders = map[string]string{
-	"x-grok-client-version":      "0.2.93",
-	"x-xai-token-auth":           "xai-grok-cli",
-	"x-authenticateresponse":     "authenticate-response",
-	"x-grok-client-identifier":   "grok-shell",
-	"User-Agent":                 "grok-shell/0.2.93 (windows; amd64)",
+	"x-grok-client-version":    "0.2.111",
+	"x-xai-token-auth":         "xai-grok-cli",
+	"x-authenticateresponse":   "authenticate-response",
+	"x-grok-client-identifier": "grok-shell",
+	"User-Agent":               "grok-shell/0.2.111 (windows; amd64)",
 }
 
 // AuthFile is the CPA-compatible xAI OAuth JSON payload.

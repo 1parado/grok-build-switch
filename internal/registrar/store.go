@@ -44,7 +44,13 @@ func normalizeConfig(config Config) Config {
 	if config.BrowserMode == "" {
 		config.BrowserMode = defaults.BrowserMode
 	}
+	// Keep multi-line proxy pools intact (only trim outer whitespace).
 	config.ProxyURL = strings.TrimSpace(config.ProxyURL)
+	config.ProxyStrategy = normalizeProxyStrategy(config.ProxyStrategy)
+	if config.ProxyCooldownSeconds <= 0 {
+		config.ProxyCooldownSeconds = defaults.ProxyCooldownSeconds
+	}
+	config.RegisterEngine = normalizeRegisterEngine(config.RegisterEngine)
 	config.EmailProvider = strings.ToLower(strings.TrimSpace(config.EmailProvider))
 	if config.EmailProvider == "" {
 		config.EmailProvider = defaults.EmailProvider
@@ -102,6 +108,32 @@ func validateConfig(config Config, forStart bool) error {
 	if config.BrowserMode != "auto" && config.BrowserMode != "headless" && config.BrowserMode != "visible" {
 		return fmt.Errorf("浏览器模式必须是 auto、headless 或 visible")
 	}
+	switch config.RegisterEngine {
+	case "browser", "protocol_prefer", "protocol_only", "auto":
+	default:
+		return fmt.Errorf("注册引擎必须是 browser、protocol_prefer、protocol_only 或 auto")
+	}
+	switch config.ProxyStrategy {
+	case ProxyStrategyRoundRobin, ProxyStrategyRandom, ProxyStrategySticky:
+	default:
+		return fmt.Errorf("代理策略必须是 round_robin、random 或 sticky")
+	}
+	if config.ProxyCooldownSeconds < 30 || config.ProxyCooldownSeconds > 3600 {
+		return fmt.Errorf("代理冷却时间必须在 30–3600 秒之间")
+	}
+	// Validate each proxy line if any are configured.
+	for _, line := range strings.Split(config.ProxyURL, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// ParseProxyList already filters invalid entries; warn only when the whole
+		// text is non-empty but yields zero valid proxies.
+		break
+	}
+	if strings.TrimSpace(config.ProxyURL) != "" && len(ParseProxyList(config.ProxyURL)) == 0 {
+		return fmt.Errorf("代理地址无法解析，请检查格式（支持多行 / host:port:user:pass）")
+	}
 	if !forStart {
 		return nil
 	}
@@ -128,6 +160,19 @@ func validateConfig(config Config, forStart bool) error {
 		return fmt.Errorf("当前内置模块只支持 hotmail、cloudmail 和 cloudflare")
 	}
 	return nil
+}
+
+func normalizeRegisterEngine(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "protocol_prefer", "protocol", "prefer":
+		return "protocol_prefer"
+	case "protocol_only", "protocol-only":
+		return "protocol_only"
+	case "auto":
+		return "auto"
+	default:
+		return "browser"
+	}
 }
 
 func normalizeAPIPath(value, fallback string) string {

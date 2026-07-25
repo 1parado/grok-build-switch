@@ -10,10 +10,19 @@ import (
 	acp "github.com/coder/acp-go-sdk"
 )
 
-func (b *Bridge) HandleExtensionMethod(_ context.Context, method string, params json.RawMessage) (any, error) {
-	if method != "_x.ai/session/update" {
+func (b *Bridge) HandleExtensionMethod(ctx context.Context, method string, params json.RawMessage) (any, error) {
+	bare := strings.TrimPrefix(method, "_")
+	switch {
+	case method == "_x.ai/session/update" || bare == "x.ai/session/update":
+		return b.handleSessionUpdateExtension(params)
+	case method == "_x.ai/exit_plan_mode" || bare == "x.ai/exit_plan_mode":
+		return b.handleExitPlanMode(ctx, params)
+	default:
 		return nil, acp.NewMethodNotFound(method)
 	}
+}
+
+func (b *Bridge) handleSessionUpdateExtension(params json.RawMessage) (any, error) {
 	var notification struct {
 		SessionID string          `json:"sessionId"`
 		Update    json.RawMessage `json:"update"`
@@ -50,6 +59,51 @@ func (b *Bridge) HandleExtensionMethod(_ context.Context, method string, params 
 	}
 	b.broadcast(Event{Type: "retry_state", SessionID: notification.SessionID, Retry: &retry})
 	return nil, nil
+}
+
+func (b *Bridge) handleExitPlanMode(ctx context.Context, params json.RawMessage) (any, error) {
+	var payload struct {
+		SessionID   string `json:"sessionId"`
+		ToolCallID  string `json:"toolCallId"`
+		PlanContent string `json:"planContent"`
+		PlanContent2 string `json:"plan_content"`
+	}
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return nil, err
+	}
+	body := strings.TrimSpace(payload.PlanContent)
+	if body == "" {
+		body = strings.TrimSpace(payload.PlanContent2)
+	}
+	requestID := fmt.Sprintf("plan-%d", b.planCounter.Add(1))
+	pending := &pendingPlan{result: make(chan PlanDecision, 1)}
+	b.mu.Lock()
+	b.plans[requestID] = pending
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.plans, requestID)
+		b.mu.Unlock()
+	}()
+	b.broadcast(Event{
+		Type:      "plan_request",
+		SessionID: payload.SessionID,
+		Plan: &PlanEvent{
+			RequestID: requestID,
+			Body:      body,
+			Waiting:   true,
+		},
+	})
+	select {
+	case decision := <-pending.result:
+		result := map[string]any{"outcome": decision.Outcome}
+		if decision.Outcome == "cancelled" && decision.Feedback != "" {
+			result["feedback"] = decision.Feedback
+		}
+		return result, nil
+	case <-ctx.Done():
+		return map[string]any{"outcome": "abandoned"}, nil
+	}
 }
 
 func (b *Bridge) SessionUpdate(_ context.Context, params acp.SessionNotification) error {
@@ -94,6 +148,16 @@ func (b *Bridge) SessionUpdate(_ context.Context, params acp.SessionNotification
 			tool.Status = string(*call.Status)
 		}
 		b.broadcast(Event{Type: "tool_update", SessionID: sessionID, Tool: tool})
+	case update.Plan != nil:
+		entries := make([]PlanEntry, 0, len(update.Plan.Entries))
+		for _, entry := range update.Plan.Entries {
+			entries = append(entries, PlanEntry{
+				Content:  entry.Content,
+				Priority: string(entry.Priority),
+				Status:   string(entry.Status),
+			})
+		}
+		b.broadcast(Event{Type: "plan", SessionID: sessionID, Plan: &PlanEvent{Entries: entries}})
 	}
 	return nil
 }
@@ -268,6 +332,42 @@ func (b *Bridge) RespondPermissionEx(requestID string, allow, remember bool) err
 	}
 	select {
 	case pending.result <- optionID:
+		return nil
+	default:
+		return ErrPermissionNotFound
+	}
+}
+
+// RespondPermissionOption selects a concrete ACP option id (once / session / deny).
+func (b *Bridge) RespondPermissionOption(requestID, optionID string, remember bool) error {
+	optionID = strings.TrimSpace(optionID)
+	if optionID == "" {
+		return errors.New("权限选项不能为空")
+	}
+	b.mu.RLock()
+	pending := b.permissions[requestID]
+	b.mu.RUnlock()
+	if pending == nil {
+		return ErrPermissionNotFound
+	}
+	found := false
+	for _, option := range pending.options {
+		if string(option.OptionId) == optionID {
+			found = true
+			if option.Kind == acp.PermissionOptionKindAllowAlways {
+				remember = true
+			}
+			break
+		}
+	}
+	if !found {
+		return errors.New("权限选项不存在")
+	}
+	if remember {
+		b.SetSessionAutoApprove(true)
+	}
+	select {
+	case pending.result <- acp.PermissionOptionId(optionID):
 		return nil
 	default:
 		return ErrPermissionNotFound

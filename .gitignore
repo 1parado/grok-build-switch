@@ -9,6 +9,7 @@ grok_switch.exe.sha256
 grok_switch_gui.exe.sha256
 site/
 output/
+.tmp/
 
 # Code-signing private keys must never be committed
 *.pfx
@@ -17,6 +18,15 @@ output/
 # Go
 bin/
 /vendor/
+
+# Python (scripts/sso_cpa_mint.py runtime helper)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.venv/
+venv/
 
 # IDE / local agent
 .claude/

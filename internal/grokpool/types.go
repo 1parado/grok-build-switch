@@ -95,10 +95,11 @@ type ImportResult struct {
 }
 
 type BulkResult struct {
-	Action  string   `json:"action"`
-	Matched int      `json:"matched"`
-	Updated int      `json:"updated"`
-	Failed  []string `json:"failed,omitempty"`
+	Action       string   `json:"action"`
+	Matched      int      `json:"matched"`
+	Updated      int      `json:"updated"`
+	DeletedFiles int      `json:"deleted_files,omitempty"`
+	Failed       []string `json:"failed,omitempty"`
 }
 
 type persistedState struct {

@@ -8,7 +8,15 @@ type Config struct {
 	Version                int    `json:"version"`
 	BrowserPath            string `json:"browser_path"`
 	BrowserMode            string `json:"browser_mode"`
-	ProxyURL               string `json:"proxy_url"`
+	// ProxyURL accepts a single proxy or a multi-line / comma-separated pool.
+	ProxyURL string `json:"proxy_url"`
+	// ProxyStrategy: round_robin | random | sticky (by account index).
+	ProxyStrategy string `json:"proxy_strategy"`
+	// ProxyCooldownSeconds: how long a failed proxy stays out of rotation.
+	ProxyCooldownSeconds int `json:"proxy_cooldown_seconds"`
+	// RegisterEngine: browser | protocol_prefer | protocol_only
+	// protocol_* uses gRPC-web for email verification first (see protocol.go).
+	RegisterEngine         string `json:"register_engine"`
 	EmailProvider          string `json:"email_provider"`
 	DefaultDomains         string `json:"default_domains"`
 	CloudmailURL           string `json:"cloudmail_url"`
@@ -89,6 +97,9 @@ func DefaultConfig() Config {
 	return Config{
 		Version:                configVersion,
 		BrowserMode:            "visible",
+		ProxyStrategy:          ProxyStrategyRoundRobin,
+		ProxyCooldownSeconds:    120,
+		RegisterEngine:         "browser",
 		EmailProvider:          "cloudflare",
 		CloudflareAuthMode:     "none",
 		CloudflareDomainsPath:  "/api/domains",

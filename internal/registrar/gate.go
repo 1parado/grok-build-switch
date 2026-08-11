@@ -57,7 +57,9 @@ func effectiveBrowserConcurrency(config Config, pool *ProxyPool) int {
 
 func effectiveStagger(config Config, pool *ProxyPool) time.Duration {
 	if pool != nil && pool.Len() <= 1 {
-		return 4 * time.Second
+		// Serial mode: the previous browser has already closed by the time the
+		// next one launches, so a short gap is enough to release the proxy port.
+		return 2 * time.Second
 	}
 	return 2 * time.Second
 }

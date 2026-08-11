@@ -492,7 +492,10 @@ func mediaAPIBaseURL(profile profiles.Profile, opt ApplyOpts) string {
 		}
 		return strings.TrimSpace(image.BaseURL)
 	}
-	return ""
+	// No independent image generation configured: fall back to the profile's own
+	// base URL so Grok CLI's /imagine tool routes through the same proxy (e.g.
+	// the pool proxy) instead of the default api.x.ai, which rejects OAuth tokens.
+	return strings.TrimSpace(profile.BaseURL)
 }
 
 func mediaImageModelOverride(profile profiles.Profile) string {

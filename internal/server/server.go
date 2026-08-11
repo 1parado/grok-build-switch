@@ -222,6 +222,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grok-pool/bulk", s.handleGrokPoolBulk)
 	mux.HandleFunc("/api/grok-pool/import-dir", s.handleGrokPoolImportDir)
 	mux.HandleFunc("/api/grok-pool/open-auth-dir", s.handleGrokPoolOpenAuthDir)
+	mux.HandleFunc("/api/grok-pool/accounts", s.handleGrokPoolAccountsList)
 	mux.HandleFunc("/api/grok-pool/accounts/", s.handleGrokPoolAccount)
 	mux.HandleFunc("/api/cpa-mint", s.handleCpaMint)
 	mux.HandleFunc("/api/registrar", s.handleRegistrar)

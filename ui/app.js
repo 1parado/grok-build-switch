@@ -54,6 +54,26 @@ let cpaMintSession = null;
 let cpaMintTerminalNotice = "";
 let agentSocket = null;
 let agentReconnectTimer = null;
+
+// Account list state for viewAccounts (paginated/grouped, supports thousands).
+const ACCOUNT_FILTERS = [
+  { key: "", label: "全部" },
+  { key: "healthy", label: "健康" },
+  { key: "quota_exhausted", label: "额度用尽" },
+  { key: "permission_denied", label: "权限被拒" },
+  { key: "reauth", label: "需重新登录" },
+  { key: "abnormal", label: "异常" },
+  { key: "uninspected", label: "待巡检" },
+  { key: "disabled", label: "已禁用" },
+];
+let accountListQuery = "";
+let accountListFilter = "";
+let accountListSort = "recent";
+let accountListPage = 1;
+const ACCOUNT_LIST_PAGE_SIZE = 100;
+let accountListTotal = 0;
+let accountSearchTimer = null;
+let accountListInFlight = false;
 let agentActiveAssistant = null;
 let agentActiveThought = null;
 let agentRetryNotice = null;
@@ -541,10 +561,10 @@ async function refreshAll() {
   populateComposerModelSelect();
   renderBackups(backups);
   renderSettings(settings);
-  renderLANAccess(lanAccess);
   renderGrokAuth(grokAuth);
   renderGrokPool(grokPool);
   renderRegistrar(registrar);
+  renderLANAccess(lanAccess);
   syncAdvancedUI();
   const detail = [];
   if (state.status?.config_path) detail.push(state.status.config_path);
@@ -852,6 +872,7 @@ function showView(name) {
   const settings = $("viewSettings");
   const chat = $("viewChat");
   const skills = $("viewSkills");
+  const accounts = $("viewAccounts");
   if (home) {
     home.hidden = name !== "home";
     home.style.display = name === "home" ? "" : "none";
@@ -863,6 +884,10 @@ function showView(name) {
   if (settings) {
     settings.hidden = name !== "settings";
     settings.style.display = name === "settings" ? "" : "none";
+  }
+  if (accounts) {
+    accounts.hidden = name !== "accounts";
+    accounts.style.display = name === "accounts" ? "" : "none";
   }
   if (chat) {
     chat.hidden = name !== "chat";
@@ -879,10 +904,13 @@ function showView(name) {
   // Keep header add/import only on home list.
   if ($("headerSubtitle")) {
     $("headerSubtitle").textContent =
-      name === "settings" ? "设置" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : name === "skills" ? "Skills" : "供应商";
+      name === "settings" ? "设置" : name === "accounts" ? "账号管理" : name === "edit" ? ( $("profileId")?.value ? "编辑供应商" : "添加供应商") : name === "chat" ? "对话" : name === "skills" ? "Skills" : "供应商";
   }
   if (name === "settings") {
     loadConfigEditor().catch((err) => toast(err.message, "error"));
+  }
+  if (name === "accounts") {
+    loadAccountsView().catch((err) => toast(err.message, "error"));
   }
   if (name === "skills") {
     loadSkills().catch((err) => toast(err.message, "error"));
@@ -4339,7 +4367,6 @@ function renderSettings(settings) {
   $("autostart").checked = !!settings.autostart;
   $("silentAutostart").checked = !!settings.silent_autostart;
   $("autoOpenBrowser").checked = !!settings.auto_open_browser;
-  $("lanAccessEnabled").checked = !!settings.lan_access_enabled;
   $("port").value = settings.port;
   const actual = state.status?.port;
   const hint = $("portHint");
@@ -4693,7 +4720,11 @@ function renderGrokPool(pool) {
     if (pool?.watch_last_error) watchParts.push(pool.watch_last_error);
     $("grokPoolAuthDirStatus").textContent = watchParts.join(" · ") || "认证目录尚未扫描";
   }
-  renderGrokPoolAccounts(pool?.accounts || []);
+  // Refresh the visible account list page (paginated) without re-rendering
+  // thousands of rows. Stats in the header come from the summary above.
+  if ($("viewAccounts") && !$("viewAccounts").hidden) {
+    refreshAccountsListView({ silent: true }).catch(() => {});
+  }
   if (pool?.running) {
     grokPoolPollTimer = setTimeout(() => loadGrokPool().catch((err) => toast(err.message, "error")), 1500);
   }
@@ -4762,57 +4793,176 @@ async function loadLatestCpaMint() {
   renderCpaMint(response.session);
 }
 
-function renderGrokPoolAccounts(accounts) {
+function renderAccountFilterChips(summary) {
+  const container = $("accountFilterChips");
+  if (!container) return;
+  const counts = {
+    "": summary.total || 0,
+    healthy: summary.healthy || 0,
+    quota_exhausted: summary.quota || 0,
+    permission_denied: summary.permission || 0,
+    reauth: summary.reauth || 0,
+    abnormal: summary.abnormal || 0,
+    uninspected: summary.uninspected || 0,
+    disabled: summary.disabled || 0,
+  };
+  container.innerHTML = ACCOUNT_FILTERS.map((filter) => {
+    const active = accountListFilter === filter.key;
+    return `<button type="button" class="accountChip ${active ? "active" : ""}" data-filter="${escapeAttr(filter.key)}">${escapeHtml(filter.label)} <span class="accountChipCount">${counts[filter.key] ?? 0}</span></button>`;
+  }).join("");
+  container.querySelectorAll(".accountChip").forEach((chip) => {
+    chip.onclick = () => {
+      accountListFilter = chip.dataset.filter;
+      accountListPage = 1;
+      loadAccountsList().catch((err) => toast(err.message, "error"));
+    };
+  });
+}
+
+// Entering the accounts view: prime the toolbar and load the first page.
+async function loadAccountsView() {
+  if ($("accountSort")) $("accountSort").value = accountListSort;
+  if ($("accountSearch")) $("accountSearch").value = accountListQuery;
+  await loadGrokPool();
+  await loadAccountsList();
+}
+
+// Silent refresh used by the inspection poller: re-fetch only the visible page
+// and update stats without resetting scroll/selection.
+async function refreshAccountsListView({ silent = false } = {}) {
+  await loadAccountsList({ silent });
+}
+
+async function loadAccountsList({ silent = false, append = false } = {}) {
+  const container = $("grokPoolAccounts");
+  if (!container || accountListInFlight) return;
+  accountListInFlight = true;
+  try {
+    const params = new URLSearchParams({
+      page: String(accountListPage),
+      page_size: String(ACCOUNT_LIST_PAGE_SIZE),
+      sort: accountListSort,
+    });
+    if (accountListQuery) params.set("q", accountListQuery);
+    if (accountListFilter) params.set("classification", accountListFilter);
+    const data = await api(`/api/grok-pool/accounts?${params.toString()}`);
+    accountListTotal = data.total || 0;
+    if (data.summary) renderAccountFilterChips(data.summary);
+    renderAccountList(data.accounts || [], { append });
+    renderAccountPager();
+    const meta = $("accountListMeta");
+    if (meta) {
+      const loadedUpTo = Math.min(accountListPage * ACCOUNT_LIST_PAGE_SIZE, accountListTotal);
+      meta.textContent = `共 ${accountListTotal} 个账号 · 已加载 ${loadedUpTo}`;
+    }
+  } catch (err) {
+    if (!silent) toast(err.message, "error");
+  } finally {
+    accountListInFlight = false;
+  }
+}
+
+function renderAccountList(accounts, { append = false } = {}) {
   const container = $("grokPoolAccounts");
   if (!container) return;
-  container.innerHTML = "";
-  if (!accounts.length) {
-    container.innerHTML = `<p class="muted tiny">可一次选择多个 CPA xai-*.json；也支持 Grok CLI auth.json。</p>`;
+  if (!append) container.innerHTML = "";
+  if (!accounts.length && !append) {
+    container.innerHTML = `<p class="muted tiny">没有匹配的账号。可一次选择多个 CPA xai-*.json；也支持 Grok CLI auth.json。</p>`;
     return;
   }
+  // Group accounts by classification (empty filter keeps the visual grouping).
+  const groups = new Map();
   accounts.forEach((account) => {
-    const classification = account.classification || "uninspected";
-    const el = document.createElement("div");
-    el.className = `poolAccount ${escapeAttr(classification)}`;
-    const title = account.email || account.file_name || account.id;
-    const inspected = account.last_inspected ? new Date(account.last_inspected).toLocaleString() : "未巡检";
-    const errorParts = [];
-    if (account.error_code) errorParts.push(`错误码：${account.error_code}`);
-    if (account.error_message) errorParts.push(`原因：${account.error_message}`);
-    const errorDetail = errorParts.length
-      ? `<p class="poolAccountError">${escapeHtml(errorParts.join("\n"))}</p>`
-      : "";
-    el.innerHTML = `
-      <div class="poolAccountTop">
-        <div class="poolAccountTitle">
-          <strong>${escapeHtml(title)}</strong>
-          <p class="poolAccountMeta">${escapeHtml(account.file_name || account.id)} · ${escapeHtml(account.model || "未选模型")} · ${escapeHtml(inspected)}</p>
-        </div>
-        <span class="badge">${account.disabled ? "手动禁用 · " : ""}${escapeHtml(GROK_POOL_CLASS_LABELS[classification] || classification)}</span>
-      </div>
-      <p class="poolAccountReason">${escapeHtml(account.reason || "等待巡检")}${account.http_status ? ` · HTTP ${account.http_status}` : ""}</p>
-      ${errorDetail}
-      <div class="inlineActions" style="margin-top:10px">
-        <button type="button" class="btn sm" data-action="toggle">${account.disabled ? "启用" : "禁用"}</button>
-        <button type="button" class="btn sm danger" data-action="delete">删除</button>
-      </div>
-    `;
-    const toggle = el.querySelector('[data-action="toggle"]');
-    toggle.onclick = () => run(async () => {
-      await api(`/api/grok-pool/accounts/${encodeURIComponent(account.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ disabled: !account.disabled }),
-      });
-      await loadGrokPool();
-    }, { button: toggle, busyLabel: "处理中…", success: account.disabled ? "账号已启用" : "账号已禁用" });
-    const remove = el.querySelector('[data-action="delete"]');
-    remove.onclick = () => run(async () => {
-      if (!confirm(`删除号池账号 ${title}？此操作会删除 grok_switch 保存的凭据副本。`)) return false;
-      await api(`/api/grok-pool/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
-      await refreshAll();
-    }, { button: remove, busyLabel: "删除中…", success: "号池账号已删除" });
-    container.appendChild(el);
+    const classification = account.disabled ? "disabled" : (account.classification || "uninspected");
+    if (!groups.has(classification)) groups.set(classification, []);
+    groups.get(classification).push(account);
   });
+  const order = ["healthy", "quota_exhausted", "permission_denied", "reauth", "abnormal", "uninspected", "disabled", "unknown", "model_unavailable", "probe_error"];
+  const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
+    const ai = order.indexOf(a[0]);
+    const bi = order.indexOf(b[0]);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+  sortedGroups.forEach(([classification, groupAccounts]) => {
+    const label = classification === "disabled" ? "已禁用" : (GROK_POOL_CLASS_LABELS[classification] || classification);
+    let group = container.querySelector(`details.accountGroup[data-group="${cssEscape(classification)}"]`);
+    if (group) {
+      const body = group.querySelector(".accountGroupBody");
+      groupAccounts.forEach((account) => body.appendChild(buildAccountRow(account)));
+      const countEl = group.querySelector(".accountGroupCount");
+      if (countEl) countEl.textContent = String(body.children.length);
+      return;
+    }
+    group = document.createElement("details");
+    group.className = `accountGroup ${escapeAttr(classification)}`;
+    group.dataset.group = classification;
+    group.open = true;
+    const summary = document.createElement("summary");
+    summary.className = "accountGroupHead";
+    summary.innerHTML = `<span class="accountGroupLabel">${escapeHtml(label)}</span><span class="accountGroupCount">${groupAccounts.length}</span>`;
+    group.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "accountGroupBody";
+    groupAccounts.forEach((account) => body.appendChild(buildAccountRow(account)));
+    group.appendChild(body);
+    container.appendChild(group);
+  });
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return window.CSS.escape(value);
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+}
+
+function buildAccountRow(account) {
+  const classification = account.classification || "uninspected";
+  const row = document.createElement("div");
+  row.className = `accountRow ${escapeAttr(classification)}${account.disabled ? " is-disabled" : ""}`;
+  const title = account.email || account.file_name || account.id;
+  const inspected = account.last_inspected ? new Date(account.last_inspected).toLocaleString() : "未巡检";
+  const expires = account.expires_at
+    ? new Date(account.expires_at).toLocaleString()
+    : "—";
+  const statusText = account.disabled ? "手动禁用" : (GROK_POOL_CLASS_LABELS[classification] || classification);
+  const errorBits = [];
+  if (account.http_status) errorBits.push(`HTTP ${account.http_status}`);
+  if (account.error_code) errorBits.push(account.error_code);
+  row.innerHTML = `
+    <div class="accountRowMain">
+      <strong class="accountRowTitle">${escapeHtml(title)}</strong>
+      <span class="accountRowSub muted tiny">${escapeHtml(account.model || "未选模型")} · 巡检 ${escapeHtml(inspected)} · Token ${escapeHtml(expires)}</span>
+      ${errorBits.length || account.reason ? `<span class="accountRowReason">${escapeHtml([account.reason || "", ...errorBits].filter(Boolean).join(" · "))}</span>` : ""}
+    </div>
+    <span class="badge accountRowBadge ${escapeAttr(classification)}">${escapeHtml(statusText)}</span>
+    <div class="accountRowActions">
+      <button type="button" class="btn sm" data-action="toggle">${account.disabled ? "启用" : "禁用"}</button>
+      <button type="button" class="btn sm danger" data-action="delete">删除</button>
+    </div>
+  `;
+  const toggle = row.querySelector('[data-action="toggle"]');
+  toggle.onclick = () => run(async () => {
+    await api(`/api/grok-pool/accounts/${encodeURIComponent(account.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ disabled: !account.disabled }),
+    });
+    await Promise.all([loadGrokPool(), loadAccountsList({ silent: true })]);
+  }, { button: toggle, busyLabel: "处理中…", success: account.disabled ? "账号已启用" : "账号已禁用" });
+  const remove = row.querySelector('[data-action="delete"]');
+  remove.onclick = () => run(async () => {
+    if (!confirm(`删除号池账号 ${title}？此操作会删除 grok_switch 保存的凭据副本。`)) return false;
+    await api(`/api/grok-pool/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
+    await Promise.all([loadGrokPool(), loadAccountsList({ silent: true })]);
+  }, { button: remove, busyLabel: "删除中…", success: "号池账号已删除" });
+  return row;
+}
+
+function renderAccountPager() {
+  const loadMore = $("accountLoadMoreBtn");
+  const info = $("accountPagerInfo");
+  const loadedUpTo = accountListPage * ACCOUNT_LIST_PAGE_SIZE;
+  const hasMore = loadedUpTo < accountListTotal;
+  if (loadMore) loadMore.hidden = !hasMore;
+  if (info) info.textContent = hasMore ? `已加载 ${Math.min(loadedUpTo, accountListTotal)} / ${accountListTotal}` : "";
 }
 
 async function loadGrokPool() {
@@ -5509,10 +5659,30 @@ async function saveCurrentProfile() {
 // Navigation
 $("navHomeBtn").onclick = () => showView("home");
 $("navSkillsBtn").onclick = () => showView("skills");
+$("navAccountsBtn").onclick = () => showView("accounts");
 $("navSettingsBtn").onclick = () => showView("settings");
 $("backFromEditBtn").onclick = () => showView("home");
 $("backFromSkillsBtn").onclick = () => showView("home");
 $("backFromSettingsBtn").onclick = () => showView("home");
+$("backFromAccountsBtn").onclick = () => showView("home");
+$("goAccountsFromSettingsBtn").onclick = () => showView("accounts");
+$("accountLoadMoreBtn").onclick = () => {
+  accountListPage += 1;
+  loadAccountsList({ append: true }).catch((err) => toast(err.message, "error"));
+};
+$("accountSort").onchange = () => {
+  accountListSort = $("accountSort").value;
+  accountListPage = 1;
+  loadAccountsList().catch((err) => toast(err.message, "error"));
+};
+$("accountSearch").oninput = () => {
+  clearTimeout(accountSearchTimer);
+  accountSearchTimer = setTimeout(() => {
+    accountListQuery = $("accountSearch").value.trim();
+    accountListPage = 1;
+    loadAccountsList().catch((err) => toast(err.message, "error"));
+  }, 300);
+};
 $("chatBtn").onclick = () => showView("chat");
 $("addBtn").onclick = () => openEdit(newProfileDraft());
 $("emptyNewBtn").onclick = () => openEdit(newProfileDraft());

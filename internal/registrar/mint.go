@@ -907,10 +907,10 @@ type tokenPollPacer struct {
 func pollIntervalForDevice(device deviceCode) time.Duration {
 	interval := time.Duration(device.Interval) * time.Second
 	if interval < 2*time.Second {
-		interval = 5 * time.Second
+		interval = 3 * time.Second
 	}
 	if interval > 10*time.Second {
-		interval = 5 * time.Second
+		interval = 3 * time.Second
 	}
 	return interval
 }
@@ -933,9 +933,10 @@ func (p *tokenPollPacer) speedUp() {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Floor at 1.5s — aggressive enough after allow, still polite to the token endpoint.
-	if p.interval > 1500*time.Millisecond {
-		p.interval = 1500 * time.Millisecond
+	// Floor at 1s — aggressive enough after a real allow click while still
+	// respecting the token endpoint's typical response time.
+	if p.interval > 1000*time.Millisecond {
+		p.interval = 1000 * time.Millisecond
 	}
 }
 
@@ -1262,7 +1263,7 @@ func mintBrowserNativeWithDevice(ctx context.Context, browser *browserSession, c
 	}
 
 	mintLog(log, "点击步骤结束，立即换 token…")
-	tokens, err := pollDeviceToken(ctx, client, device, log, 18*time.Second, 1500*time.Millisecond, 12, nil)
+	tokens, err := pollDeviceToken(ctx, client, device, log, 16*time.Second, 1000*time.Millisecond, 14, nil)
 	if err == nil {
 		mintLog(log, fmt.Sprintf("token 换取成功 expires_in=%ds", tokens.ExpiresIn))
 		return tokens, nil

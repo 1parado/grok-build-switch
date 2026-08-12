@@ -241,7 +241,7 @@ func (m *cloudflareMailbox) WaitCode(ctx context.Context, timeout time.Duration,
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(1200 * time.Millisecond):
 		}
 	}
 	return "", fmt.Errorf("Cloudflare 在 %s 内未收到验证码", timeout)

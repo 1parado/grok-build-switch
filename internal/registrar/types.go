@@ -38,6 +38,11 @@ type Config struct {
 	PreferProtocolMint     bool   `json:"prefer_protocol_mint"`
 	ProtocolOnly           bool   `json:"protocol_only"`
 	LastJobID              string `json:"last_job_id,omitempty"`
+	// warmSession is a runtime-only (non-serialized) field: when non-nil, it
+	// holds a pre-started Chrome session that registerWithBrowser should reuse
+	// instead of cold-starting a new one. Set by the service worker loop to
+	// overlap browser launch with the previous account's CPA mint phase.
+	warmSession *browserSession `json:"-"`
 }
 
 type JobStatus string

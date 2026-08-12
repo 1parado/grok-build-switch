@@ -7,7 +7,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=49">
+  <link rel="stylesheet" href="/style.css?v=53">
 </head>
 <body>
   <div class="shell">
@@ -27,7 +27,11 @@
         <button type="button" id="addBtn" class="btn primary" data-home-only>添加供应商</button>
         <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
         <button type="button" id="navSkillsBtn" class="btn">Skills</button>
+        <button type="button" id="navAccountsBtn" class="btn" title="账号管理">账号</button>
         <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
+        <a href="https://github.com/1parado/grok-build-switch" target="_blank" rel="noopener" class="navGithubBtn" title="GitHub 仓库" aria-label="GitHub">
+          <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        </a>
       </div>
     </header>
 
@@ -586,6 +590,16 @@
         <button type="submit" id="saveSettingsBtn" class="btn primary">保存设置</button>
       </form>
 
+      <section class="formCard hintCard">
+        <div class="rowBetween">
+          <div>
+            <h2 class="sectionTitle">账号、号池与注册机</h2>
+            <p class="muted tiny">Grok Auth 导入、号池巡检和自动注册已移至独立的「账号」页面，支持搜索、分类筛选与大规模账号管理。</p>
+          </div>
+          <button type="button" id="goAccountsFromSettingsBtn" class="btn primary">前往账号管理</button>
+        </div>
+      </section>
+
       <section class="formCard lanAccessCard" id="lanAccessCard">
         <div class="rowBetween">
           <div>
@@ -634,6 +648,45 @@
           </div>
         </div>
       </section>
+
+      <section class="formCard configEditor">
+        <div class="rowBetween">
+          <div>
+            <h2 class="sectionTitle">config.toml</h2>
+            <p class="muted tiny" id="configPathLabel">加载中…</p>
+          </div>
+          <div class="inlineActions">
+            <button type="button" id="reloadConfigBtn" class="btn sm ghost">重新加载</button>
+            <button type="button" id="saveConfigBtn" class="btn sm primary">保存到文件</button>
+          </div>
+        </div>
+        <p class="muted tiny">这是 grok <strong>当前生效</strong>的唯一配置文件（不是「每个供应商各一份」）。各供应商档案在列表里；启用某个供应商后，其 URL/Key/模型会写进此文件。</p>
+        <textarea id="configEditor" class="configTextarea mono" spellcheck="false" rows="18" placeholder="config.toml 内容"></textarea>
+        <p id="configEditorStatus" class="muted tiny"></p>
+      </section>
+
+      <details class="fold advancedFold" id="backupFold">
+        <summary>高级 · 备份与恢复</summary>
+        <div class="foldBody">
+          <p class="muted tiny">切换供应商或保存 config 时会自动备份。备份含 API Key，请勿外传。</p>
+          <p id="statusDetail" class="mono tiny pathBox"></p>
+          <div class="rowBetween">
+            <span class="muted tiny" id="backupCountLabel">—</span>
+            <button type="button" id="refreshBackupsBtn" class="btn sm ghost">刷新</button>
+          </div>
+          <div id="backups" class="backupList"></div>
+        </div>
+      </details>
+
+      <button type="button" id="backFromSettingsBtn" class="btn">返回供应商列表</button>
+    </main>
+
+    <!-- ACCOUNTS -->
+    <main id="viewAccounts" class="view" hidden>
+      <div class="pageHead">
+        <h1 class="pageTitle">账号管理</h1>
+        <p class="pageDesc">xAI OAuth 号池：导入、注册、巡检与大规模账号管理</p>
+      </div>
 
       <section class="formCard" id="grokAuthCard">
         <div class="rowBetween">
@@ -918,39 +971,33 @@
         <input type="file" id="grokPoolFiles" accept="application/json,.json" multiple hidden>
         <input type="file" id="grokPoolDirectory" accept="application/json,.json" webkitdirectory directory multiple hidden>
         <p class="muted tiny">「从认证目录导入」使用上方配置的本机路径；「选择目录导入」通过浏览器选取（不写回路径）。铸造产出与热加载共用 CPA 认证目录。原文件不会被移动。</p>
-        <div id="grokPoolAccounts" class="poolAccounts"></div>
-      </section>
 
-      <section class="formCard configEditor">
-        <div class="rowBetween">
-          <div>
-            <h2 class="sectionTitle">config.toml</h2>
-            <p class="muted tiny" id="configPathLabel">加载中…</p>
+        <div class="accountManager">
+          <div class="accountToolbar">
+            <div class="accountSearch">
+              <input id="accountSearch" type="search" placeholder="搜索邮箱 / 文件名 / ID" autocomplete="off">
+            </div>
+            <div class="accountFilterChips" id="accountFilterChips" role="group" aria-label="账号分类筛选"></div>
+            <label class="accountSort">
+              排序
+              <select id="accountSort">
+                <option value="recent">最近巡检</option>
+                <option value="imported">导入时间</option>
+                <option value="email">邮箱</option>
+                <option value="expires">Token 有效期</option>
+              </select>
+            </label>
           </div>
-          <div class="inlineActions">
-            <button type="button" id="reloadConfigBtn" class="btn sm ghost">重新加载</button>
-            <button type="button" id="saveConfigBtn" class="btn sm primary">保存到文件</button>
+          <p id="accountListMeta" class="muted tiny"></p>
+          <div id="grokPoolAccounts" class="poolAccounts"></div>
+          <div class="accountPager">
+            <button type="button" id="accountLoadMoreBtn" class="btn" hidden>加载更多</button>
+            <span id="accountPagerInfo" class="muted tiny"></span>
           </div>
         </div>
-        <p class="muted tiny">这是 grok <strong>当前生效</strong>的唯一配置文件（不是「每个供应商各一份」）。各供应商档案在列表里；启用某个供应商后，其 URL/Key/模型会写进此文件。</p>
-        <textarea id="configEditor" class="configTextarea mono" spellcheck="false" rows="18" placeholder="config.toml 内容"></textarea>
-        <p id="configEditorStatus" class="muted tiny"></p>
       </section>
 
-      <details class="fold advancedFold" id="backupFold">
-        <summary>高级 · 备份与恢复</summary>
-        <div class="foldBody">
-          <p class="muted tiny">切换供应商或保存 config 时会自动备份。备份含 API Key，请勿外传。</p>
-          <p id="statusDetail" class="mono tiny pathBox"></p>
-          <div class="rowBetween">
-            <span class="muted tiny" id="backupCountLabel">—</span>
-            <button type="button" id="refreshBackupsBtn" class="btn sm ghost">刷新</button>
-          </div>
-          <div id="backups" class="backupList"></div>
-        </div>
-      </details>
-
-      <button type="button" id="backFromSettingsBtn" class="btn">返回供应商列表</button>
+      <button type="button" id="backFromAccountsBtn" class="btn">返回供应商列表</button>
     </main>
   </div>
 

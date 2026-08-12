@@ -624,8 +624,11 @@ func TestApplyProfileWritesIndependentImageGeneration(t *testing.T) {
 	if _, ok := tableAt(doc, "model")["grok-imagine-image"]; ok {
 		t.Fatalf("disabled image alias should be absent: %#v", tableAt(doc, "model"))
 	}
-	if _, ok := tableAt(doc, "endpoints")["xai_api_base_url"]; ok {
-		t.Fatalf("disabled image endpoint should be absent: %#v", tableAt(doc, "endpoints"))
+	// With independent image gen disabled, xai_api_base_url falls back to
+	// models_base_url so Grok CLI's /imagine tool routes through the same proxy.
+	ep := tableAt(doc, "endpoints")
+	if got := stringAt(ep, "xai_api_base_url"); got != "https://chat.example.com/v1" {
+		t.Fatalf("disabled image endpoint should fall back to base_url, got %#v", ep)
 	}
 }
 

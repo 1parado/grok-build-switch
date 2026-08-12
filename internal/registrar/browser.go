@@ -116,9 +116,23 @@ func navigateSignupWithRetry(ctx context.Context, proxy string, log func(string)
 }
 
 func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox, authDir, cookieDir string, headless bool, log func(string)) (registrationOutcome, error) {
-	session, err := startBrowser(parent, config, headless)
-	if err != nil {
-		return registrationOutcome{}, wrapStage(stageBrowserStart, err)
+	// Use a pre-warmed browser session if the service provided one (saves the
+	// 2-3s Chrome cold-start). Otherwise cold-start as usual.
+	var session *browserSession
+	var err error
+	if config.warmSession != nil {
+		session = config.warmSession
+		config.warmSession = nil // prevent accidental reuse
+		if !browserAlive(session) {
+			session.Close()
+			session = nil
+		}
+	}
+	if session == nil {
+		session, err = startBrowser(parent, config, headless)
+		if err != nil {
+			return registrationOutcome{}, wrapStage(stageBrowserStart, err)
+		}
 	}
 	defer session.Close()
 	ctx, cancel := context.WithTimeout(session.ctx, time.Duration(config.PageTimeoutSeconds)*time.Second)

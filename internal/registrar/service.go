@@ -47,6 +47,101 @@ type liveJob struct {
 	log    *os.File
 }
 
+// warmSlot holds a pre-started Chrome session so the next account can skip the
+// 2-3s browser cold-start. Only used in single-worker serial mode.
+type warmSlot struct {
+	mu       sync.Mutex
+	session  *browserSession
+	headless bool
+	starting bool
+}
+
+// take retrieves the warmed session, waiting briefly (up to 3s) if a warm
+// launch is in progress. Returns nil if none is available within the window.
+func (w *warmSlot) take() *browserSession {
+	if w == nil {
+		return nil
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		w.mu.Lock()
+		if w.session != nil {
+			s := w.session
+			w.session = nil
+			w.mu.Unlock()
+			return s
+		}
+		starting := w.starting
+		w.mu.Unlock()
+		if !starting || time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// start launches a Chrome session in the background and stores it for the next
+// account. If a warm session already exists (unused from a previous round), it
+// is discarded first. Failures are silent — the next account cold-starts.
+func (w *warmSlot) start(ctx context.Context, config Config, log func(string, string), jobID string) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	if w.starting {
+		w.mu.Unlock()
+		return
+	}
+	// Discard any previous unused warm session.
+	if w.session != nil {
+		w.session.Close()
+		w.session = nil
+	}
+	w.starting = true
+	w.mu.Unlock()
+
+	go func() {
+		// Use a background-derived context so the warm browser survives the brief
+		// gap between accounts. The job context is watched for cancellation.
+		warmCtx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-ctx.Done():
+				cancel()
+			case <-warmCtx.Done():
+			}
+		}()
+		warmConfig := config
+		warmConfig.warmSession = nil // never carry a warm session into startBrowser
+		session, err := startBrowser(warmCtx, warmConfig, w.headless)
+		if err != nil {
+			cancel()
+			log(jobID, "预热浏览器启动失败（下一个账号将冷启动）："+err.Error())
+			w.mu.Lock()
+			w.starting = false
+			w.mu.Unlock()
+			return
+		}
+		w.mu.Lock()
+		w.session = session
+		w.starting = false
+		w.mu.Unlock()
+	}()
+}
+
+// discard closes any warmed session (called at job end / cancellation).
+func (w *warmSlot) discard() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.session != nil {
+		w.session.Close()
+		w.session = nil
+	}
+}
+
 func NewService(dataDir string) (*Service, error) {
 	runtimeDir := filepath.Join(dataDir, "registrar")
 	if err := os.MkdirAll(filepath.Join(runtimeDir, "jobs"), 0o700); err != nil {
@@ -261,12 +356,27 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 			config.Workers, gate.Limit(), reason, config.Workers,
 		))
 	}
-	tasks := make(chan int)
-	var wg sync.WaitGroup
+
+	// Browser pre-warm: only useful in single-worker serial mode. When enabled,
+	// each account launches Chrome for the NEXT account while the current one
+	// is still running (during CPA mint), so the next account skips the 2-3s
+	// cold-start and navigates immediately after acquiring the gate.
 	workers := config.Workers
 	if workers > config.Count {
 		workers = config.Count
 	}
+	headless := browserHeadless(config)
+	warmEnabled := workers == 1 && !headless && normalizeRegisterEngine(config.RegisterEngine) != "protocol_only"
+	var warm *warmSlot
+	if warmEnabled {
+		warm = &warmSlot{headless: headless}
+		s.log(live.job.ID, "浏览器预热已启用（串行模式下为下一个账号提前启动 Chrome）")
+		// Kick off the first warm immediately so account #1 can also benefit.
+		warm.start(ctx, config, s.log, live.job.ID)
+	}
+
+	tasks := make(chan int)
+	var wg sync.WaitGroup
 	for worker := 1; worker <= workers; worker++ {
 		workerID := worker
 		wg.Add(1)
@@ -276,7 +386,7 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 				if ctx.Err() != nil {
 					return
 				}
-				s.runOne(ctx, live.job.ID, config, provider, pool, gate, workerID, index)
+				s.runOne(ctx, live.job.ID, config, provider, pool, gate, warm, workerID, index)
 			}
 		}()
 	}
@@ -286,6 +396,9 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 		case <-ctx.Done():
 			close(tasks)
 			wg.Wait()
+			if warm != nil {
+				warm.discard()
+			}
 			s.syncProviderCredentials(provider)
 			s.finish(live, ctx.Err())
 			return
@@ -293,11 +406,14 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 	}
 	close(tasks)
 	wg.Wait()
+	if warm != nil {
+		warm.discard()
+	}
 	s.syncProviderCredentials(provider)
 	s.finish(live, ctx.Err())
 }
 
-func (s *Service) runOne(ctx context.Context, jobID string, config Config, provider MailProvider, pool *ProxyPool, gate *browserGate, worker, index int) {
+func (s *Service) runOne(ctx context.Context, jobID string, config Config, provider MailProvider, pool *ProxyPool, gate *browserGate, warm *warmSlot, worker, index int) {
 	mailbox, err := provider.Allocate(ctx)
 	if err != nil {
 		s.completeAccount(jobID, AccountResult{Status: "failed", Error: err.Error()})
@@ -312,14 +428,6 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 		s.log(jobID, fmt.Sprintf("[W%d %d/%d %s] %s", worker, index, config.Count, email, message))
 	}
 
-	// Serialize browser sessions (especially when all share one local proxy).
-	log("等待浏览器名额…")
-	if err := gate.Acquire(ctx); err != nil {
-		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: "任务已取消"})
-		return
-	}
-	defer gate.Release()
-
 	// Per-account proxy from the pool (sticky by index when strategy=sticky).
 	accountConfig := config
 	proxy := ""
@@ -327,6 +435,29 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 		proxy = pool.Pick(index - 1)
 	}
 	accountConfig.ProxyURL = proxy
+
+	// Pick up a pre-warmed browser session (if the service warmed one for us).
+	if warm != nil {
+		if ws := warm.take(); ws != nil {
+			if browserAlive(ws) {
+				accountConfig.warmSession = ws
+				log("使用预热浏览器（跳过冷启动）")
+			} else {
+				ws.Close()
+			}
+		}
+	}
+
+	// Serialize browser sessions (especially when all share one local proxy).
+	log("等待浏览器名额…")
+	if err := gate.Acquire(ctx); err != nil {
+		if accountConfig.warmSession != nil {
+			accountConfig.warmSession.Close()
+		}
+		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: "任务已取消"})
+		return
+	}
+
 	if proxy != "" {
 		log("开始注册 · 代理 " + RedactProxy(proxy))
 	} else {
@@ -334,6 +465,18 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 	}
 
 	outcome, err := s.runAccount(ctx, accountConfig, mailbox, s.resolvedAuthDir(), s.cookieDir, log)
+
+	// Start warming a browser for the NEXT account BEFORE releasing the gate.
+	// This gives the warm Chrome ~2-3s head start while the current browser
+	// (inside runAccount) is being torn down via session.Close().
+	if warm != nil {
+		warm.start(ctx, accountConfig, s.log, jobID)
+	}
+
+	// Release the gate so the next account can acquire it immediately.
+	gate.Release()
+
+
 	if err != nil {
 		if pool != nil && proxy != "" && shouldCoolProxy(proxy, pool, err) {
 			pool.ReportFailure(proxy)

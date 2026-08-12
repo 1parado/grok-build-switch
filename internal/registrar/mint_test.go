@@ -221,12 +221,12 @@ func TestTokenPollPacerSpeedUp(t *testing.T) {
 		t.Fatalf("get = %s", p.get())
 	}
 	p.speedUp()
-	if p.get() != 1500*time.Millisecond {
+	if p.get() != 1000*time.Millisecond {
 		t.Fatalf("after speedUp get = %s", p.get())
 	}
 	// Second speedUp must not go below floor.
 	p.speedUp()
-	if p.get() != 1500*time.Millisecond {
+	if p.get() != 1000*time.Millisecond {
 		t.Fatalf("floor broken: %s", p.get())
 	}
 }
@@ -235,7 +235,7 @@ func TestPollIntervalForDevice(t *testing.T) {
 	if got := pollIntervalForDevice(deviceCode{Interval: 5}); got != 5*time.Second {
 		t.Fatalf("got %s", got)
 	}
-	if got := pollIntervalForDevice(deviceCode{Interval: 0}); got != 5*time.Second {
+	if got := pollIntervalForDevice(deviceCode{Interval: 0}); got != 3*time.Second {
 		t.Fatalf("default got %s", got)
 	}
 }

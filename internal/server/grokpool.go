@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"grok_switch/internal/grokpool"
@@ -121,6 +122,60 @@ func (s *Server) handleGrokPoolBulk(w http.ResponseWriter, r *http.Request) {
 	}
 	s.changed()
 	writeJSON(w, map[string]any{"result": result, "status": status})
+}
+
+// handleGrokPoolAccountsList serves a filtered, sorted and paginated account
+// list. It is registered at "/api/grok-pool/accounts" (no trailing id) so it
+// does not collide with handleGrokPoolAccount at "/api/grok-pool/accounts/".
+func (s *Server) handleGrokPoolAccountsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.GrokPool == nil {
+		writeError(w, fmt.Errorf("Grok 号池未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	query := r.URL.Query()
+	opts := grokpool.QueryOpts{
+		Query:           query.Get("q"),
+		Classifications: splitCSV(query.Get("classification")),
+		Sort:            query.Get("sort"),
+		Page:            atoiOrDefault(query.Get("page"), 1),
+		PageSize:        atoiOrDefault(query.Get("page_size"), 100),
+	}
+	if raw := strings.TrimSpace(query.Get("disabled")); raw != "" {
+		disabled := raw == "1" || strings.EqualFold(raw, "true")
+		opts.Disabled = &disabled
+	}
+	writeJSON(w, s.GrokPool.QueryAccounts(opts))
+}
+
+func splitCSV(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func atoiOrDefault(value string, fallback int) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 func (s *Server) handleGrokPoolAccount(w http.ResponseWriter, r *http.Request) {

@@ -63,6 +63,22 @@ body {
   flex-wrap: wrap;
 }
 
+.navGithubBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm, 8px);
+  color: var(--text);
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+.navGithubBtn:hover {
+  background: var(--surface-2);
+  color: var(--accent);
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -1896,6 +1912,138 @@ textarea:focus,
 .poolAccount.permission_denied,
 .poolAccount.reauth { border-color: color-mix(in srgb, var(--danger) 32%, var(--line)); }
 
+/* Account manager (viewAccounts) — compact, scalable to thousands of rows. */
+.accountManager { margin-top: 4px; }
+
+.accountToolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.accountSearch { flex: 1 1 240px; min-width: 180px; }
+.accountSearch input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.accountFilterChips { display: flex; flex-wrap: wrap; gap: 6px; }
+.accountChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.accountChip:hover { border-color: var(--line-strong); color: var(--text); }
+.accountChip.active {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+  color: var(--text);
+}
+.accountChipCount {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+}
+.accountChip.active .accountChipCount {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--text);
+}
+.accountSort { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.accountSort select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.accountGroup {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.accountGroup > summary.accountGroupHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+.accountGroup > summary.accountGroupHead::-webkit-details-marker { display: none; }
+.accountGroup > summary.accountGroupHead::before {
+  content: "▾";
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+.accountGroup:not([open]) > summary.accountGroupHead::before { transform: rotate(-90deg); }
+.accountGroupLabel { flex: 1; min-width: 0; }
+.accountGroupCount {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.accountGroup.healthy { border-left: 3px solid var(--success); }
+.accountGroup.quota_exhausted,
+.accountGroup.permission_denied,
+.accountGroup.reauth,
+.accountGroup.abnormal { border-left: 3px solid var(--danger); }
+.accountGroupBody { display: flex; flex-direction: column; }
+
+.accountRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+.accountRow:first-child { border-top: none; }
+.accountRowMain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.accountRowTitle { font-size: 13px; overflow-wrap: anywhere; }
+.accountRowSub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.accountRowReason { font-size: 11px; color: var(--danger); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.accountRowBadge { flex-shrink: 0; font-size: 11px; }
+.accountRowBadge.healthy { background: color-mix(in srgb, var(--success) 18%, transparent); }
+.accountRowBadge.quota_exhausted,
+.accountRowBadge.permission_denied,
+.accountRowBadge.reauth,
+.accountRowBadge.abnormal { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+.accountRowActions { display: flex; gap: 6px; flex-shrink: 0; }
+.accountRow.is-disabled .accountRowTitle { color: var(--muted); }
+
+.accountPager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
 @media (max-width: 680px) {
   .registrarForm,
   .registrarEssentials,
@@ -1916,6 +2064,10 @@ textarea:focus,
   .poolAuthDirField { grid-column: 1 / -1; }
   .cpaMintCodes { grid-template-columns: 1fr; }
   .authKeyRow { grid-template-columns: 1fr auto; }
+  .accountRow { flex-wrap: wrap; }
+  .accountRowSub { white-space: normal; }
+  .accountRowActions { width: 100%; }
+  .accountRowActions .btn { flex: 1; }
   .authKeyRow input { grid-column: 1 / -1; }
 }
 

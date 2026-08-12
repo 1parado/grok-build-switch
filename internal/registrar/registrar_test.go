@@ -4,11 +4,25 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestCookieSnapshotFileNameIsSafeAndStable(t *testing.T) {
+	got := cookieSnapshotFileName("User+Tag@Example.COM")
+	if filepath.Ext(got) != ".json" {
+		t.Fatalf("extension = %q", filepath.Ext(got))
+	}
+	if strings.ContainsAny(got, "+@/\\ ") {
+		t.Fatalf("unsafe filename = %q", got)
+	}
+	if got != cookieSnapshotFileName(" user+tag@example.com ") {
+		t.Fatalf("filename is not stable across normalization: %q", got)
+	}
+}
 
 type resendTestMailbox struct {
 	address string
@@ -128,7 +142,7 @@ func TestServiceRunsAccountsAndWritesLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetAuthDirResolver(func() string { return authDir })
-	service.runAccount = func(_ context.Context, _ Config, mailbox Mailbox, _ string, _ func(string)) (registrationOutcome, error) {
+	service.runAccount = func(_ context.Context, _ Config, mailbox Mailbox, _ string, _ string, _ func(string)) (registrationOutcome, error) {
 		return registrationOutcome{Email: mailbox.Address(), Password: "generated", SSO: "sso-value", MintMethod: "protocol", AuthFile: "xai.json"}, nil
 	}
 	finished := make(chan Job, 1)
@@ -161,7 +175,7 @@ func TestServiceStopCancelsJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetAuthDirResolver(func() string { return authDir })
-	service.runAccount = func(ctx context.Context, _ Config, _ Mailbox, _ string, _ func(string)) (registrationOutcome, error) {
+	service.runAccount = func(ctx context.Context, _ Config, _ Mailbox, _ string, _ string, _ func(string)) (registrationOutcome, error) {
 		<-ctx.Done()
 		return registrationOutcome{}, ctx.Err()
 	}

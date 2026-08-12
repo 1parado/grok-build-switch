@@ -21,6 +21,7 @@ type registrationOutcome struct {
 	SSO        string
 	MintMethod string
 	AuthFile   string
+	CookieFile string
 }
 
 type Service struct {
@@ -36,7 +37,8 @@ type Service struct {
 	last         *Job
 	authDir      func() string
 	onFinished   func(Job)
-	runAccount   func(context.Context, Config, Mailbox, string, func(string)) (registrationOutcome, error)
+	cookieDir    string
+	runAccount   func(context.Context, Config, Mailbox, string, string, func(string)) (registrationOutcome, error)
 }
 
 type liveJob struct {
@@ -56,6 +58,7 @@ func NewService(dataDir string) (*Service, error) {
 		runtimeDir:   runtimeDir,
 		accountsPath: filepath.Join(runtimeDir, "accounts_cli.txt"),
 		attemptsPath: filepath.Join(runtimeDir, "emails_attempted.txt"),
+		cookieDir:    filepath.Join(runtimeDir, "cookies"),
 		runAccount:   registerAccount,
 	}
 	if err := s.loadConfig(); err != nil {
@@ -330,7 +333,7 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 		log("开始注册 · 直连")
 	}
 
-	outcome, err := s.runAccount(ctx, accountConfig, mailbox, s.resolvedAuthDir(), log)
+	outcome, err := s.runAccount(ctx, accountConfig, mailbox, s.resolvedAuthDir(), s.cookieDir, log)
 	if err != nil {
 		if pool != nil && proxy != "" && shouldCoolProxy(proxy, pool, err) {
 			pool.ReportFailure(proxy)
@@ -352,7 +355,7 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 	if err := s.appendAccount(outcome); err != nil {
 		failMsg := "账号已注册，但账本写入失败：" + err.Error()
 		log(failMsg)
-		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: failMsg, AuthFile: outcome.AuthFile})
+		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: failMsg, AuthFile: outcome.AuthFile, CookieFile: outcome.CookieFile})
 		return
 	}
 	log("注册与 CPA 铸造成功")
@@ -361,6 +364,7 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 		Status:     "success",
 		MintMethod: outcome.MintMethod,
 		AuthFile:   outcome.AuthFile,
+		CookieFile: outcome.CookieFile,
 	})
 }
 
@@ -486,7 +490,7 @@ func (s *Service) log(jobID, message string) {
 }
 
 func (s *Service) stateLocked() State {
-	state := State{Config: s.config, AuthDir: s.resolvedAuthDirLocked(), AccountsPath: s.accountsPath}
+	state := State{Config: s.config, AuthDir: s.resolvedAuthDirLocked(), AccountsPath: s.accountsPath, CookieDir: s.cookieDir}
 	if s.current != nil {
 		job := cloneJob(s.current.job)
 		state.Job = &job

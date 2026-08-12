@@ -3,6 +3,7 @@ package registrar
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -48,7 +49,7 @@ type browserSession struct {
 	blockedAPI              string
 }
 
-func registerAccount(ctx context.Context, config Config, mailbox Mailbox, authDir string, log func(string)) (registrationOutcome, error) {
+func registerAccount(ctx context.Context, config Config, mailbox Mailbox, authDir, cookieDir string, log func(string)) (registrationOutcome, error) {
 	// CreateEmailValidationCode is routinely blocked in headless/automation-heavy
 	// sessions. Prefer visible Chrome (matches the working DrissionPage path).
 	// "auto" also uses visible first; headless is only used when explicitly selected.
@@ -57,18 +58,18 @@ func registerAccount(ctx context.Context, config Config, mailbox Mailbox, authDi
 	switch engine {
 	case "protocol_only":
 		log("注册引擎：protocol_only（协议邮箱验证 + 浏览器完成资料/Turnstile）")
-		return registerWithProtocol(ctx, config, mailbox, authDir, log)
+		return registerWithProtocol(ctx, config, mailbox, authDir, cookieDir, log)
 	case "protocol_prefer", "auto":
 		log("注册引擎：" + engine + "（优先协议，失败回退完整浏览器）")
-		outcome, err := registerWithProtocol(ctx, config, mailbox, authDir, log)
+		outcome, err := registerWithProtocol(ctx, config, mailbox, authDir, cookieDir, log)
 		if err == nil {
 			return outcome, nil
 		}
 		log("协议路径失败，完整浏览器重试：" + err.Error())
-		return registerWithBrowser(ctx, config, mailbox, authDir, headless, log)
+		return registerWithBrowser(ctx, config, mailbox, authDir, cookieDir, headless, log)
 	default:
 		log("注册引擎：browser")
-		return registerWithBrowser(ctx, config, mailbox, authDir, headless, log)
+		return registerWithBrowser(ctx, config, mailbox, authDir, cookieDir, headless, log)
 	}
 }
 
@@ -114,7 +115,7 @@ func navigateSignupWithRetry(ctx context.Context, proxy string, log func(string)
 	return regErr(stageOpenSignup, "nav_connection_closed", last.Error(), hint, "")
 }
 
-func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox, authDir string, headless bool, log func(string)) (registrationOutcome, error) {
+func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox, authDir, cookieDir string, headless bool, log func(string)) (registrationOutcome, error) {
 	session, err := startBrowser(parent, config, headless)
 	if err != nil {
 		return registrationOutcome{}, wrapStage(stageBrowserStart, err)
@@ -221,7 +222,7 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 	// Some flows already have SSO after email verify (no profile step).
 	if earlySSO, ssoErr := waitForSSOCookie(ctx, 10*time.Second); ssoErr == nil && earlySSO != "" {
 		logStage(log, stageSSO, "邮箱验证后已拿到 SSO，跳过资料页")
-		return finalizeRegistration(parent, session, config, mailbox, earlySSO, "", authDir, log)
+		return finalizeRegistration(parent, session, config, mailbox, earlySSO, "", authDir, cookieDir, log)
 	}
 
 	given, family, password, err := randomProfile()
@@ -243,7 +244,7 @@ func registerWithBrowser(parent context.Context, config Config, mailbox Mailbox,
 		}
 		return registrationOutcome{}, regErr(stageSSO, "sso_timeout", err.Error(), hint, snap.Summary())
 	}
-	return finalizeRegistration(parent, session, config, mailbox, sso, password, authDir, log)
+	return finalizeRegistration(parent, session, config, mailbox, sso, password, authDir, cookieDir, log)
 }
 
 func errWithDetail(err error, detail string) error {
@@ -304,14 +305,15 @@ func enrichProfileError(ctx context.Context, session *browserSession, err error)
 		snap.Summary())
 }
 
-// finalizeRegistration mints CPA tokens from the SSO cookie and writes the auth
-// file. Shared by the skip-profile path (SSO already present after verify) and
-// the normal path (SSO obtained after profile submission).
+// finalizeRegistration mints CPA tokens from the SSO cookie, writes the auth
+// file, and exports the browser cookies. Shared by the skip-profile path (SSO
+// already present after verify) and the normal path (SSO obtained after profile
+// submission).
 //
 // parent must be the job context (not the browser/CDP context). Minting uses an
 // independent timeout so Chrome close or CDP disconnect cannot cancel the
 // pure-HTTP device flow after SSO has already been obtained.
-func finalizeRegistration(parent context.Context, session *browserSession, config Config, mailbox Mailbox, sso, password, authDir string, log func(string)) (registrationOutcome, error) {
+func finalizeRegistration(parent context.Context, session *browserSession, config Config, mailbox Mailbox, sso, password, authDir, cookieDir string, log func(string)) (registrationOutcome, error) {
 	logStage(log, stageSSO, "已获取 SSO")
 	mintCtx, cancel := mintContext(parent)
 	defer cancel()
@@ -338,11 +340,85 @@ func finalizeRegistration(parent context.Context, session *browserSession, confi
 		return registrationOutcome{}, regErr(stageMint, "write_cpa_failed", err.Error(),
 			"检查 CPA 认证目录是否可写", authDir)
 	}
-	logStage(log, stageMint, "铸造成功 method="+method+" file="+authPath)
+	cookiePath, err := saveBrowserCookieSnapshot(session.ctx, cookieDir, mailbox.Address())
+	if err != nil {
+		return registrationOutcome{}, regErr(stageMint, "write_cookie_failed", err.Error(),
+			"检查注册 cookie 目录是否可写", cookieDir)
+	}
+	logStage(log, stageMint, "铸造成功 method="+method+" file="+authPath+" cookie="+cookiePath)
 	return registrationOutcome{
 		Email: mailbox.Address(), Password: password, SSO: sso,
-		MintMethod: method, AuthFile: authPath,
+		MintMethod: method, AuthFile: authPath, CookieFile: cookiePath,
 	}, nil
+}
+
+const cookieSnapshotVersion = 1
+
+type cookieSnapshot struct {
+	Version   int               `json:"version"`
+	Email     string            `json:"email"`
+	CreatedAt time.Time         `json:"created_at"`
+	Cookies   []*network.Cookie `json:"cookies"`
+}
+
+// saveBrowserCookieSnapshot exports the xAI cookies before the temporary
+// Chrome profile is removed by browserSession.Close.
+func saveBrowserCookieSnapshot(ctx context.Context, cookieDir, email string) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("浏览器 cookie 上下文为空")
+	}
+	if strings.TrimSpace(cookieDir) == "" {
+		return "", fmt.Errorf("cookie 目录为空")
+	}
+	var cookies []*network.Cookie
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		var err error
+		cookies, err = network.GetCookies().WithURLs([]string{
+			"https://accounts.x.ai/",
+			"https://auth.x.ai/",
+			"https://grok.com/",
+			"https://x.ai/",
+		}).Do(ctx)
+		return err
+	}))
+	if err != nil {
+		return "", fmt.Errorf("读取浏览器 cookie: %w", err)
+	}
+	if len(cookies) == 0 {
+		return "", fmt.Errorf("浏览器未返回 xAI cookie")
+	}
+	snapshot := cookieSnapshot{
+		Version:   cookieSnapshotVersion,
+		Email:     strings.TrimSpace(email),
+		CreatedAt: time.Now().UTC(),
+		Cookies:   cookies,
+	}
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("编码 cookie 快照: %w", err)
+	}
+	path := filepath.Join(cookieDir, cookieSnapshotFileName(email))
+	if err := atomicWrite(path, append(data, '\n'), 0o600); err != nil {
+		return "", fmt.Errorf("保存 cookie 快照: %w", err)
+	}
+	return path, nil
+}
+
+func cookieSnapshotFileName(email string) string {
+	clean := strings.ToLower(strings.TrimSpace(email))
+	var b strings.Builder
+	for _, r := range clean {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		b.WriteString("account")
+	}
+	sum := sha256.Sum256([]byte(clean))
+	return b.String() + "-" + hex.EncodeToString(sum[:])[:12] + ".json"
 }
 
 type mailboxCodeResult struct {

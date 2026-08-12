@@ -245,7 +245,7 @@ func parseGRPCWebStatus(raw []byte) (int, string) {
 // registerWithProtocol runs email verification over gRPC-web, then finishes the
 // account in a browser session (profile + Turnstile + SSO) using the same proxy.
 // Full browserless create_account still needs a live Turnstile token provider.
-func registerWithProtocol(parent context.Context, config Config, mailbox Mailbox, authDir string, log func(string)) (registrationOutcome, error) {
+func registerWithProtocol(parent context.Context, config Config, mailbox Mailbox, authDir, cookieDir string, log func(string)) (registrationOutcome, error) {
 	proxy := strings.TrimSpace(config.ProxyURL)
 	logStage(log, stageEmailSubmit, "协议路径：HTTP/gRPC-web 邮箱验证（代理 "+RedactProxy(proxy)+"）")
 
@@ -301,14 +301,14 @@ func registerWithProtocol(parent context.Context, config Config, mailbox Mailbox
 	// Complete profile + Turnstile + SSO in browser; email step already done server-side
 	// when cookies transfer successfully. Caller decides whether to fall back to a
 	// full browser signup on failure.
-	return completeProtocolInBrowser(parent, config, mailbox, authDir, client, log)
+	return completeProtocolInBrowser(parent, config, mailbox, authDir, cookieDir, client, log)
 }
 
 func browserHeadless(config Config) bool {
 	return strings.EqualFold(strings.TrimSpace(config.BrowserMode), "headless")
 }
 
-func completeProtocolInBrowser(parent context.Context, config Config, mailbox Mailbox, authDir string, proto *protocolClient, log func(string)) (registrationOutcome, error) {
+func completeProtocolInBrowser(parent context.Context, config Config, mailbox Mailbox, authDir, cookieDir string, proto *protocolClient, log func(string)) (registrationOutcome, error) {
 	session, err := startBrowser(parent, config, browserHeadless(config))
 	if err != nil {
 		return registrationOutcome{}, wrapStage(stageBrowserStart, err)
@@ -338,7 +338,7 @@ func completeProtocolInBrowser(parent context.Context, config Config, mailbox Ma
 	// Prefer waiting for profile form or early SSO.
 	if earlySSO, ssoErr := waitForSSOCookie(ctx, 8*time.Second); ssoErr == nil && earlySSO != "" {
 		logStage(log, stageSSO, "协议+浏览器路径已拿到 SSO")
-		return finalizeRegistration(parent, session, config, mailbox, earlySSO, "", authDir, log)
+		return finalizeRegistration(parent, session, config, mailbox, earlySSO, "", authDir, cookieDir, log)
 	}
 
 	given, family, password, err := randomProfile()
@@ -354,7 +354,7 @@ func completeProtocolInBrowser(parent context.Context, config Config, mailbox Ma
 	if err != nil {
 		return registrationOutcome{}, err
 	}
-	return finalizeRegistration(parent, session, config, mailbox, sso, password, authDir, log)
+	return finalizeRegistration(parent, session, config, mailbox, sso, password, authDir, cookieDir, log)
 }
 
 func injectJarCookies(ctx context.Context, proto *protocolClient) error {

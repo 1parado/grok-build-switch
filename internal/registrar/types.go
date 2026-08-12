@@ -5,9 +5,9 @@ import "time"
 const configVersion = 1
 
 type Config struct {
-	Version                int    `json:"version"`
-	BrowserPath            string `json:"browser_path"`
-	BrowserMode            string `json:"browser_mode"`
+	Version     int    `json:"version"`
+	BrowserPath string `json:"browser_path"`
+	BrowserMode string `json:"browser_mode"`
 	// ProxyURL accepts a single proxy or a multi-line / comma-separated pool.
 	ProxyURL string `json:"proxy_url"`
 	// ProxyStrategy: round_robin | random | sticky (by account index).
@@ -56,6 +56,7 @@ type AccountResult struct {
 	MintMethod string `json:"mint_method,omitempty"`
 	Error      string `json:"error,omitempty"`
 	AuthFile   string `json:"auth_file,omitempty"`
+	CookieFile string `json:"cookie_file,omitempty"`
 }
 
 type Job struct {
@@ -79,6 +80,7 @@ type State struct {
 	Job          *Job   `json:"job,omitempty"`
 	AuthDir      string `json:"auth_dir,omitempty"`
 	AccountsPath string `json:"accounts_path"`
+	CookieDir    string `json:"cookie_dir"`
 }
 
 type ProbeCheck struct {
@@ -98,7 +100,7 @@ func DefaultConfig() Config {
 		Version:                configVersion,
 		BrowserMode:            "visible",
 		ProxyStrategy:          ProxyStrategyRoundRobin,
-		ProxyCooldownSeconds:    120,
+		ProxyCooldownSeconds:   120,
 		RegisterEngine:         "browser",
 		EmailProvider:          "cloudflare",
 		CloudflareAuthMode:     "none",

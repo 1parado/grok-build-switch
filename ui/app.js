@@ -4461,6 +4461,7 @@ function renderRegistrar(stateData) {
     const paths = [];
     if (stateData?.auth_dir) paths.push(`CPA 目录：${stateData.auth_dir}`);
     if (stateData?.accounts_path) paths.push(`账本：${stateData.accounts_path}`);
+    if (stateData?.cookie_dir) paths.push(`Cookie：${stateData.cookie_dir}`);
     $("registrarPaths").textContent = paths.join(" · ");
   }
 }
@@ -4523,6 +4524,7 @@ function renderRegistrarResults(job) {
     const email = escapeRegistrarHtml(r.email || "（未分配邮箱）");
     const status = ok ? "成功" : "失败";
     const mint = r.mint_method ? `<span class="registrarResultMint">铸造 ${escapeRegistrarHtml(r.mint_method)}</span>` : "";
+    const cookie = r.cookie_file ? `<div class="registrarResultCookie">Cookie：<span class="mono">${escapeRegistrarHtml(r.cookie_file)}</span></div>` : "";
     const err = r.error
       ? `<div class="registrarResultError">${escapeRegistrarHtml(r.error)}</div>`
       : "";
@@ -4532,6 +4534,7 @@ function renderRegistrarResults(job) {
         <span class="registrarResultStatus">${status}</span>
         ${mint}
       </div>
+      ${cookie}
       ${err}
     </div>`;
   }).join("");

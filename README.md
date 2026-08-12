@@ -144,6 +144,7 @@ ZeroTier 或 WireGuard 等 VPN。
 | `%USERPROFILE%\.grok_switch\grok_auth.json` | 单账号 xAI OAuth 凭据与本地代理 key（**敏感**） |
 | `%USERPROFILE%\.grok_switch\grok_pool\pool.json` | 号池展示状态与巡检/代理设置（不含 token；代理 URL 可能包含认证信息） |
 | `%USERPROFILE%\.grok_switch\grok_pool\accounts\` | 号池各账号 OAuth 凭据副本（**敏感**） |
+| `%USERPROFILE%\.grok_switch\registrar\cookies\` | 注册账号浏览器 cookie 快照（**敏感，可用于恢复登录态**） |
 | `%USERPROFILE%\.grok_switch\grok_switch.log` | 日志 |
 | `%USERPROFILE%\.grok_switch\update_state.json` | 更新通知与跳过版本状态 |
 

@@ -4430,7 +4430,11 @@ function registrarConfigFromForm() {
     proxy_cooldown_seconds: Number($("registrarProxyCooldown")?.value || 120),
     register_engine: $("registrarEngine")?.value || "browser",
     email_provider: provider,
-    default_domains: (provider === "cloudflare" ? $("registrarCloudflareDomains").value : $("registrarDefaultDomains").value).trim(),
+    default_domains: (provider === "cloudflare"
+      ? $("registrarCloudflareDomains").value
+      : provider === "yyds"
+        ? ($("registrarYydsDomains")?.value || "").trim()
+        : $("registrarDefaultDomains").value).trim(),
     cloudmail_url: $("registrarCloudmailUrl").value.trim(),
     cloudmail_admin_email: $("registrarCloudmailAdminEmail").value.trim(),
     cloudmail_password: $("registrarCloudmailPassword").value,
@@ -4443,6 +4447,10 @@ function registrarConfigFromForm() {
     cloudflare_path_messages: $("registrarCloudflareMessagesPath").value.trim(),
     hotmail_accounts_text: $("registrarHotmailAccounts").value,
     hotmail_max_aliases: Number($("registrarHotmailAliases").value || 5),
+    gptmail_url: $("registrarGptmailUrl")?.value.trim() || "",
+    gptmail_api_key: $("registrarGptmailApiKey")?.value.trim() || "",
+    yyds_url: $("registrarYydsUrl")?.value.trim() || "",
+    yyds_api_key: $("registrarYydsApiKey")?.value.trim() || "",
     count: Number($("registrarCount").value || 1),
     workers: Number($("registrarWorkers").value || 1),
     mail_timeout_seconds: Number($("registrarMailTimeout").value || 180),
@@ -4476,6 +4484,11 @@ function renderRegistrar(stateData) {
     if ($("registrarCloudflareMessagesPath")) $("registrarCloudflareMessagesPath").value = config.cloudflare_path_messages || "/api/mails";
     if ($("registrarHotmailAccounts")) $("registrarHotmailAccounts").value = config.hotmail_accounts_text || "";
     if ($("registrarHotmailAliases")) $("registrarHotmailAliases").value = config.hotmail_max_aliases || 5;
+    if ($("registrarGptmailUrl")) $("registrarGptmailUrl").value = config.gptmail_url || "";
+    if ($("registrarGptmailApiKey")) $("registrarGptmailApiKey").value = config.gptmail_api_key || "";
+    if ($("registrarYydsUrl")) $("registrarYydsUrl").value = config.yyds_url || "";
+    if ($("registrarYydsApiKey")) $("registrarYydsApiKey").value = config.yyds_api_key || "";
+    if ($("registrarYydsDomains")) $("registrarYydsDomains").value = config.default_domains || "";
     if ($("registrarCount")) $("registrarCount").value = config.count || 1;
     if ($("registrarWorkers")) $("registrarWorkers").value = config.workers || 1;
     if ($("registrarMailTimeout")) $("registrarMailTimeout").value = config.mail_timeout_seconds || 180;
@@ -4501,6 +4514,8 @@ function updateRegistrarProviderFields() {
   if ($("registrarHotmailFields")) $("registrarHotmailFields").hidden = provider !== "hotmail";
   if ($("registrarCloudmailFields")) $("registrarCloudmailFields").hidden = provider !== "cloudmail";
   if ($("registrarCloudflareFields")) $("registrarCloudflareFields").hidden = !isCloudflare;
+  if ($("registrarGptmailFields")) $("registrarGptmailFields").hidden = provider !== "gptmail";
+  if ($("registrarYydsFields")) $("registrarYydsFields").hidden = provider !== "yyds";
   // Non-default email modes need advanced fields; expand so users notice.
   const advanced = $("registrarAdvanced");
   if (advanced && !isCloudflare && !advanced.open) {

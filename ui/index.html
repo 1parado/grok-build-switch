@@ -796,6 +796,8 @@
                   <option value="cloudflare">Cloudflare 临时邮箱（推荐）</option>
                   <option value="hotmail">Hotmail / Outlook</option>
                   <option value="cloudmail">CloudMail</option>
+                  <option value="gptmail">GPTMail</option>
+                  <option value="yyds">YYDS Mail</option>
                 </select>
               </label>
 
@@ -849,6 +851,27 @@
                 </label>
                 <label class="field">邮件列表接口
                   <input id="registrarCloudflareMessagesPath" class="mono" value="/api/mails">
+                </label>
+              </div>
+
+              <div id="registrarGptmailFields" class="registrarProviderFields registrarProviderWide" hidden>
+                <label class="field registrarProviderWide">GPTMail API Base
+                  <input id="registrarGptmailUrl" class="mono" placeholder="https://mail.chatgpt.org.uk">
+                </label>
+                <label class="field registrarProviderWide">API Key
+                  <input id="registrarGptmailApiKey" type="password" autocomplete="off" placeholder="X-API-Key">
+                </label>
+              </div>
+
+              <div id="registrarYydsFields" class="registrarProviderFields registrarProviderWide" hidden>
+                <label class="field registrarProviderWide">YYDS Mail API Base
+                  <input id="registrarYydsUrl" class="mono" placeholder="https://maliapi.215.im/v1">
+                </label>
+                <label class="field registrarProviderWide">API Key
+                  <input id="registrarYydsApiKey" type="password" autocomplete="off" placeholder="AC-xxxxxx">
+                </label>
+                <label class="field registrarProviderWide">固定域名（可选，留空自动分配）
+                  <input id="registrarYydsDomains" class="mono" placeholder="mail.example.com">
                 </label>
               </div>
 

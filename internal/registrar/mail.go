@@ -57,6 +57,10 @@ func newMailProvider(config Config, used map[string]bool) (MailProvider, error) 
 		return newCloudmailProvider(config, used, client)
 	case "cloudflare":
 		return newCloudflareProvider(config, used, client)
+	case "gptmail":
+		return newGptmailProvider(config, used, client)
+	case "yyds":
+		return newYydsProvider(config, used, client)
 	default:
 		return nil, fmt.Errorf("不支持的邮箱服务商: %s", config.EmailProvider)
 	}

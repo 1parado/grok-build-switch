@@ -31,6 +31,10 @@ type Config struct {
 	CloudflareMessagesPath string `json:"cloudflare_path_messages"`
 	HotmailAccountsText    string `json:"hotmail_accounts_text"`
 	HotmailMaxAliases      int    `json:"hotmail_max_aliases"`
+	GptmailURL             string `json:"gptmail_url"`
+	GptmailAPIKey          string `json:"gptmail_api_key"`
+	YydsURL                string `json:"yyds_url"`
+	YydsAPIKey             string `json:"yyds_api_key"`
 	Count                  int    `json:"count"`
 	Workers                int    `json:"workers"`
 	MailTimeoutSeconds     int    `json:"mail_timeout_seconds"`

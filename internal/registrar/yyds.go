@@ -30,6 +30,14 @@ func newYydsProvider(config Config, used map[string]bool, client *http.Client) (
 	if strings.TrimSpace(config.YydsAPIKey) == "" {
 		return nil, fmt.Errorf("YYDS Mail 需要 API Key")
 	}
+	// Endpoints below are written starting with /v1 (e.g. /v1/accounts).
+	// Accept a base URL with or without the trailing /v1 so both
+	// https://maliapi.215.im and https://maliapi.215.im/v1 work.
+	baseURL := strings.TrimRight(strings.TrimSpace(config.YydsURL), "/")
+	if strings.HasSuffix(baseURL, "/v1") {
+		baseURL = strings.TrimSuffix(baseURL, "/v1")
+	}
+	config.YydsURL = baseURL
 	return &yydsProvider{
 		config: config,
 		used:   used,

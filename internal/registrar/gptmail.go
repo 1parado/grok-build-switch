@@ -127,35 +127,37 @@ func (m *gptmailMailbox) WaitCode(ctx context.Context, timeout time.Duration, lo
 	deadline := time.Now().Add(timeout)
 	seen := map[string]bool{}
 	for time.Now().Before(deadline) {
-		var data []struct {
-			ID      string `json:"id"`
-			Subject string `json:"subject"`
-			From    string `json:"from"`
-		}
+		var data any
 		query := url.Values{"email": {m.address}}
 		if err := m.provider.request(ctx, http.MethodGet, "/api/emails?"+query.Encode(), nil, &data); err != nil {
 			if log != nil {
 				log("GPTMail 收件请求失败，继续重试: " + err.Error())
 			}
 		} else {
-			for index := len(data) - 1; index >= 0; index-- {
-				message := data[index]
-				if message.ID == "" || seen[message.ID] {
+			messages := responseItems(data)
+			for index := len(messages) - 1; index >= 0; index-- {
+				message := messages[index]
+				id := messageID(message)
+				if id == "" || seen[id] {
 					continue
 				}
-				seen[message.ID] = true
-				var detail struct {
-					// Keep the raw JSON so the shared extractor can scan
-					// text/html bodies regardless of exact field names.
-					Raw map[string]any `json:"-"`
+				seen[id] = true
+				// List responses already carry a plain-text content snippet which
+				// usually contains the code; try it before fetching the detail.
+				if code := extractVerificationCode(messageChunks(message)...); code != "" {
+					if log != nil {
+						log("已从 GPTMail 邮件提取验证码")
+					}
+					return code, nil
 				}
-				if err := m.provider.request(ctx, http.MethodGet, "/api/email/"+url.PathEscape(message.ID), nil, &detail.Raw); err != nil {
+				var detail any
+				if err := m.provider.request(ctx, http.MethodGet, "/api/email/"+url.PathEscape(id), nil, &detail); err != nil {
 					if log != nil {
 						log("GPTMail 邮件详情读取失败: " + err.Error())
 					}
 					continue
 				}
-				if code := extractVerificationCode(messageChunks(detail.Raw)...); code != "" {
+				if code := extractVerificationCode(messageChunks(responseObject(detail))...); code != "" {
 					if log != nil {
 						log("已从 GPTMail 邮件提取验证码")
 					}

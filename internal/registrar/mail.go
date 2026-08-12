@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -242,4 +243,70 @@ func decodeMIMEHeader(value string) string {
 		return value
 	}
 	return decoded
+}
+
+func responseItems(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []any:
+		items := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if object, ok := item.(map[string]any); ok {
+				items = append(items, object)
+			}
+		}
+		return items
+	case map[string]any:
+		for _, key := range []string{"results", "hydra:member", "data", "messages", "mails", "emails"} {
+			if child, exists := typed[key]; exists {
+				if items := responseItems(child); len(items) > 0 {
+					return items
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func responseObject(value any) map[string]any {
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"data", "result", "message", "mail"} {
+		if child, ok := object[key].(map[string]any); ok {
+			return child
+		}
+	}
+	return object
+}
+
+func messageID(message map[string]any) string {
+	for _, key := range []string{"id", "msgid", "messageId"} {
+		switch value := message[key].(type) {
+		case string:
+			if value != "" {
+				return value
+			}
+		case float64:
+			return strconv.FormatInt(int64(value), 10)
+		}
+	}
+	return ""
+}
+
+func messageChunks(message map[string]any) []string {
+	chunks := make([]string, 0, 10)
+	for _, key := range []string{"subject", "text", "raw", "content", "intro", "body", "snippet", "html", "html_content", "textContent", "email_address", "from_address"} {
+		switch value := message[key].(type) {
+		case string:
+			chunks = append(chunks, value)
+		case []any:
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					chunks = append(chunks, text)
+				}
+			}
+		}
+	}
+	return chunks
 }

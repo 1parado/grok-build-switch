@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -348,55 +347,6 @@ func firstMapString(object map[string]any, keys ...string) string {
 	return ""
 }
 
-func responseItems(value any) []map[string]any {
-	switch typed := value.(type) {
-	case []any:
-		items := make([]map[string]any, 0, len(typed))
-		for _, item := range typed {
-			if object, ok := item.(map[string]any); ok {
-				items = append(items, object)
-			}
-		}
-		return items
-	case map[string]any:
-		for _, key := range []string{"results", "hydra:member", "data", "messages", "mails"} {
-			if child, exists := typed[key]; exists {
-				if items := responseItems(child); len(items) > 0 {
-					return items
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func responseObject(value any) map[string]any {
-	object, ok := value.(map[string]any)
-	if !ok {
-		return nil
-	}
-	for _, key := range []string{"data", "result", "message", "mail"} {
-		if child, ok := object[key].(map[string]any); ok {
-			return child
-		}
-	}
-	return object
-}
-
-func messageID(message map[string]any) string {
-	for _, key := range []string{"id", "msgid", "messageId"} {
-		switch value := message[key].(type) {
-		case string:
-			if value != "" {
-				return value
-			}
-		case float64:
-			return strconv.FormatInt(int64(value), 10)
-		}
-	}
-	return ""
-}
-
 func messageRecipient(message map[string]any) string {
 	for _, key := range []string{"address", "to", "toEmail", "recipient"} {
 		switch value := message[key].(type) {
@@ -421,19 +371,3 @@ func messageRecipient(message map[string]any) string {
 	return ""
 }
 
-func messageChunks(message map[string]any) []string {
-	chunks := make([]string, 0, 10)
-	for _, key := range []string{"subject", "text", "raw", "content", "intro", "body", "snippet", "html", "textContent"} {
-		switch value := message[key].(type) {
-		case string:
-			chunks = append(chunks, value)
-		case []any:
-			for _, item := range value {
-				if text, ok := item.(string); ok {
-					chunks = append(chunks, text)
-				}
-			}
-		}
-	}
-	return chunks
-}

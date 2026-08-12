@@ -68,6 +68,10 @@ func normalizeConfig(config Config) Config {
 	config.CloudflareAccountsPath = normalizeAPIPath(config.CloudflareAccountsPath, defaults.CloudflareAccountsPath)
 	config.CloudflareTokenPath = normalizeAPIPath(config.CloudflareTokenPath, defaults.CloudflareTokenPath)
 	config.CloudflareMessagesPath = normalizeAPIPath(config.CloudflareMessagesPath, defaults.CloudflareMessagesPath)
+	config.GptmailURL = strings.TrimRight(strings.TrimSpace(config.GptmailURL), "/")
+	config.GptmailAPIKey = strings.TrimSpace(config.GptmailAPIKey)
+	config.YydsURL = strings.TrimRight(strings.TrimSpace(config.YydsURL), "/")
+	config.YydsAPIKey = strings.TrimSpace(config.YydsAPIKey)
 	if config.HotmailMaxAliases == 0 {
 		config.HotmailMaxAliases = defaults.HotmailMaxAliases
 	}
@@ -156,8 +160,22 @@ func validateConfig(config Config, forStart bool) error {
 		if config.CloudflareAuthMode != "none" && config.CloudflareAPIKey == "" {
 			return fmt.Errorf("Cloudflare 认证方式 %s 需要 API Key", config.CloudflareAuthMode)
 		}
+	case "gptmail":
+		if config.GptmailURL == "" {
+			return fmt.Errorf("GPTMail 模式需要 API Base URL")
+		}
+		if config.GptmailAPIKey == "" {
+			return fmt.Errorf("GPTMail 模式需要 API Key")
+		}
+	case "yyds":
+		if config.YydsURL == "" {
+			return fmt.Errorf("YYDS Mail 模式需要 API Base URL")
+		}
+		if config.YydsAPIKey == "" {
+			return fmt.Errorf("YYDS Mail 模式需要 API Key")
+		}
 	default:
-		return fmt.Errorf("当前内置模块只支持 hotmail、cloudmail 和 cloudflare")
+		return fmt.Errorf("当前内置模块只支持 hotmail、cloudmail、cloudflare、gptmail 和 yyds")
 	}
 	return nil
 }

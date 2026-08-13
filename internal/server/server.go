@@ -227,6 +227,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cpa-mint", s.handleCpaMint)
 	mux.HandleFunc("/api/registrar", s.handleRegistrar)
 	mux.HandleFunc("/api/registrar/probe", s.handleRegistrarProbe)
+	mux.HandleFunc("/api/registrar/clash-autodetect", s.handleRegistrarClashAutoDetect)
 	mux.HandleFunc("/api/registrar/start", s.handleRegistrarStart)
 	mux.HandleFunc("/api/registrar/stop", s.handleRegistrarStop)
 	mux.HandleFunc("/api/registrar/job", s.handleRegistrarJob)

@@ -54,6 +54,15 @@ func (s *Server) handleRegistrarProbe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.Registrar.Probe(&config))
 }
 
+func (s *Server) handleRegistrarClashAutoDetect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	result := registrar.AutoDetectClash(r.Context())
+	writeJSON(w, result)
+}
+
 func (s *Server) handleRegistrarStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)

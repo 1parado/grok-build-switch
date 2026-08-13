@@ -339,13 +339,22 @@ func (s *Service) SetImportResult(id string, imported, updated int, importErr er
 func (s *Service) run(ctx context.Context, live *liveJob, config Config, provider MailProvider) {
 	pool := NewProxyPool(config)
 	gate := newBrowserGate(config, pool)
+	rotator := NewClashRotator(config.ClashController, config.ClashSelectorGroup)
+	if rotator.Available() {
+		if rErr := rotator.RefreshNodes(ctx); rErr != nil {
+			s.log(live.job.ID, "Clash 节点轮换初始化失败："+rErr.Error())
+		} else {
+			s.log(live.job.ID, fmt.Sprintf("Clash 节点轮换已启用：控制器=%s 组=%q 可用节点=%d",
+				config.ClashController, config.ClashSelectorGroup, len(rotator.Nodes())))
+		}
+	}
 	if pool.Len() > 0 {
 		s.log(live.job.ID, fmt.Sprintf("代理池：%d 条，策略=%s，冷却=%ds，引擎=%s",
 			pool.Len(), config.ProxyStrategy, config.ProxyCooldownSeconds, config.RegisterEngine))
 	} else {
 		s.log(live.job.ID, fmt.Sprintf("代理：直连，引擎=%s", config.RegisterEngine))
 	}
-	s.log(live.job.ID, gate.Describe()+"（单代理/直连时强制串行，避免 ERR_CONNECTION_CLOSED）")
+	s.log(live.job.ID, gate.Describe()+"（单代理/直连也允许并行：需配合 Clash 节点轮换，否则多开 Chrome 可能 EOF）")
 	if config.Workers > gate.Limit() {
 		reason := "单代理/直连时强制串行，避免多开 Chrome 打爆本地 Clash（EOF / ERR_CONNECTION_CLOSED）"
 		if pool != nil && pool.Len() > 1 {
@@ -386,7 +395,7 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 				if ctx.Err() != nil {
 					return
 				}
-				s.runOne(ctx, live.job.ID, config, provider, pool, gate, warm, workerID, index)
+				s.runOne(ctx, live.job.ID, config, provider, pool, gate, warm, rotator, workerID, index)
 			}
 		}()
 	}
@@ -413,7 +422,7 @@ func (s *Service) run(ctx context.Context, live *liveJob, config Config, provide
 	s.finish(live, ctx.Err())
 }
 
-func (s *Service) runOne(ctx context.Context, jobID string, config Config, provider MailProvider, pool *ProxyPool, gate *browserGate, warm *warmSlot, worker, index int) {
+func (s *Service) runOne(ctx context.Context, jobID string, config Config, provider MailProvider, pool *ProxyPool, gate *browserGate, warm *warmSlot, rotator *ClashRotator, worker, index int) {
 	mailbox, err := provider.Allocate(ctx)
 	if err != nil {
 		s.completeAccount(jobID, AccountResult{Status: "failed", Error: err.Error()})
@@ -456,6 +465,21 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 		}
 		s.completeAccount(jobID, AccountResult{Email: email, Status: "failed", Error: "任务已取消"})
 		return
+	}
+
+	// After acquiring the gate (mutual exclusion), rotate the Clash selector
+	// group to a distinct node so this registration leaves through a different
+	// exit IP than the previous worker. Safe because no other worker is
+	// mid-registration while we hold the gate.
+	if rotator.Available() {
+		node := rotator.NextNode()
+		if node != "" {
+			if sErr := rotator.SelectNode(ctx, node); sErr != nil {
+				log("Clash 切换节点失败（沿用当前节点）：" + sErr.Error())
+			} else {
+				log(fmt.Sprintf("Clash 已切换到节点：%s（该账号将使用此出口 IP）", node))
+			}
+		}
 	}
 
 	if proxy != "" {

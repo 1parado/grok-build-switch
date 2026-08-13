@@ -756,7 +756,7 @@
             </div>
             <p id="registrarAltProviderHint" class="muted tiny registrarHint" hidden>当前不是 Cloudflare 模式，请在「高级选项」中配置对应邮箱服务。</p>
             <label class="field">注册数量
-              <input id="registrarCount" type="number" min="1" max="100" value="1">
+              <input id="registrarCount" type="number" min="1" max="3000" value="1">
             </label>
           </div>
 
@@ -781,6 +781,17 @@
               <label class="field">代理冷却（秒）
                 <input id="registrarProxyCooldown" type="number" min="30" max="3600" value="120">
               </label>
+              <label class="field registrarProviderWide">Clash 控制器 URL（单代理多线程专用）
+                <input id="registrarClashController" class="mono" placeholder="http://127.0.0.1:9090（留空=不启用节点轮换）" autocomplete="off">
+              </label>
+              <label class="field registrarProviderWide">Clash 选择器组名
+                <div style="display:flex; gap:6px; align-items:stretch;">
+                  <input id="registrarClashSelectorGroup" class="mono" placeholder="如：🔰 选择节点（FlClash 默认）" autocomplete="off" style="flex:1; min-width:0;">
+                  <button type="button" id="registrarClashAutoDetectBtn" class="btn" style="white-space:nowrap; flex-shrink:0;">🔍 自动检测</button>
+                </div>
+              </label>
+              <p id="registrarClashAutoDetectHint" class="muted tiny registrarHint" style="grid-column:1/-1" hidden></p>
+              <p class="muted tiny registrarHint" style="grid-column:1/-1">填了上面两项后，每个账号注册前会自动把该组切到不同节点（需 FlClash/Clash 已开启外部控制器）。单端口也能让连续注册走不同出口 IP。点「自动检测」可自动填入。</p>
               <label class="field">浏览器模式
                 <select id="registrarBrowserMode">
                   <option value="visible">可见浏览器（推荐）</option>

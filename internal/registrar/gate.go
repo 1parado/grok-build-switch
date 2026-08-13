@@ -35,19 +35,19 @@ func effectiveBrowserConcurrency(config Config, pool *ProxyPool) int {
 	if workers < 1 {
 		workers = 1
 	}
-	if workers > 3 {
-		workers = 3
+	if workers > 30 {
+		workers = 30
 	}
 	proxies := 0
 	if pool != nil {
 		proxies = pool.Len()
 	}
-	// One proxy (or direct): only one Chromium at a time. Concurrent visible
-	// browsers through the same 127.0.0.1:7897 Clash port commonly yield
-	// net::ERR_CONNECTION_CLOSED / EOF on accounts.x.ai and auth.x.ai.
-	// Multi-thread registration requires multiple distinct proxies (≥ workers).
+	// 放开单代理/直连的并发锁：允许在单个 Clash 端口（负载均衡多端口）下并行。
+	// 原逻辑 proxies <= 1 时强制 return 1 会锁死并发；现在尊重用户配置的 workers。
+	// 配合 ClashRotator（通过 Clash API 在每个账号注册前切换到不同节点），
+	// 单端口也能让连续注册走不同出口 IP。
 	if proxies <= 1 {
-		return 1
+		return workers
 	}
 	if proxies < workers {
 		return proxies

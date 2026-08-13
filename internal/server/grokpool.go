@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -233,4 +234,65 @@ func writePoolAccountError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, err, http.StatusInternalServerError)
+}
+
+// handleGrokPoolExportDir copies all .json files from the auth directory
+// (cpa_auths) into a user-chosen target folder.
+func (s *Server) handleGrokPoolExportDir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.GrokPool == nil {
+		writeError(w, fmt.Errorf("号池模块未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimSpace(req.Path)
+	if target == "" {
+		writeError(w, fmt.Errorf("目标目录不能为空"), http.StatusBadRequest)
+		return
+	}
+	srcDir := s.GrokPool.ResolvedAuthDir()
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		writeError(w, fmt.Errorf("读取认证目录失败: %w", err), http.StatusInternalServerError)
+		return
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		writeError(w, fmt.Errorf("创建目标目录失败: %w", err), http.StatusInternalServerError)
+		return
+	}
+	exported := 0
+	skipped := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+			continue
+		}
+		src := filepath.Join(srcDir, entry.Name())
+		dst := filepath.Join(target, entry.Name())
+		data, readErr := os.ReadFile(src)
+		if readErr != nil {
+			skipped++
+			continue
+		}
+		if writeErr := os.WriteFile(dst, data, 0o644); writeErr != nil {
+			skipped++
+			continue
+		}
+		exported++
+	}
+	writeJSON(w, map[string]any{
+		"ok":       true,
+		"exported": exported,
+		"skipped":  skipped,
+		"path":     target,
+		"source":   srcDir,
+	})
 }

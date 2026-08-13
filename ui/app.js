@@ -6459,6 +6459,23 @@ async function bulkGrokPoolAction(action, button) {
 $("batchDisableGrokPoolBtn").onclick = () => bulkGrokPoolAction("disable", $("batchDisableGrokPoolBtn"));
 $("batchDeleteGrokPoolBtn").onclick = () => bulkGrokPoolAction("delete", $("batchDeleteGrokPoolBtn"));
 
+$("exportGrokPoolDirBtn")?.addEventListener("click", async () => {
+  const target = await pickDirectoryPath();
+  if (!target) return;
+  await run(async () => {
+    const response = await api("/api/grok-pool/export-dir", {
+      method: "POST",
+      body: JSON.stringify({ path: target }),
+    });
+    if (response.ok) {
+      const msg = `已导出 ${response.exported} 个 JSON 文件到：${response.path}` + (response.skipped ? `（跳过 ${response.skipped} 个）` : "");
+      toast(msg, "success");
+      try { await api("/api/agent/open-path", { method: "POST", body: JSON.stringify({ path: target }) }); } catch (_) {}
+      return false;
+    }
+  }, { button: $("exportGrokPoolDirBtn"), busyLabel: "导出中…", success: "导出完成" });
+});
+
 $("activateGrokPoolBtn").onclick = () => {
   const profile = state.profiles.find((item) => item.name === "Grok Auth（本地代理）");
   if (!profile) {

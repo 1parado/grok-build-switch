@@ -4,6 +4,21 @@ import "time"
 
 const configVersion = 1
 
+// Concurrency / count limits shared by validateConfig (user-facing policy)
+// and effectiveBrowserConcurrency (runtime gate). Keep maxBrowserHardCap >=
+// maxConfigWorkers so a validated config is never silently clamped by the
+// hard cap alone; if they drift apart the gate would degrade without any
+// validation ever rejecting the value.
+const (
+	maxRegisterCount  = 500
+	maxConfigWorkers  = 15
+	maxBrowserHardCap = 30
+)
+
+// Compile-time guard: maxBrowserHardCap must never drop below maxConfigWorkers,
+// otherwise the array length goes negative and the build fails.
+var _ [maxBrowserHardCap - maxConfigWorkers]struct{}
+
 type Config struct {
 	Version     int    `json:"version"`
 	BrowserPath string `json:"browser_path"`

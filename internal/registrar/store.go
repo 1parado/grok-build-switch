@@ -94,11 +94,11 @@ func normalizeConfig(config Config) Config {
 }
 
 func validateConfig(config Config, forStart bool) error {
-	if config.Count < 1 || config.Count > 100 {
-		return fmt.Errorf("注册数量必须在 1–100 之间")
+	if config.Count < 1 || config.Count > maxRegisterCount {
+		return fmt.Errorf("注册数量必须在 1–%d 之间", maxRegisterCount)
 	}
-	if config.Workers < 1 || config.Workers > 3 {
-		return fmt.Errorf("注册并发必须在 1–3 之间")
+	if config.Workers < 1 || config.Workers > maxConfigWorkers {
+		return fmt.Errorf("注册并发必须在 1–%d 之间", maxConfigWorkers)
 	}
 	if config.HotmailMaxAliases < 1 || config.HotmailMaxAliases > 100 {
 		return fmt.Errorf("单邮箱别名数必须在 1–100 之间")

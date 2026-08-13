@@ -4428,6 +4428,8 @@ function registrarConfigFromForm() {
     proxy_url: $("registrarProxyUrl").value.trim(),
     proxy_strategy: $("registrarProxyStrategy")?.value || "round_robin",
     proxy_cooldown_seconds: Number($("registrarProxyCooldown")?.value || 120),
+    clash_controller: $("registrarClashController")?.value.trim() || "",
+    clash_selector_group: $("registrarClashSelectorGroup")?.value.trim() || "",
     register_engine: $("registrarEngine")?.value || "browser",
     email_provider: provider,
     default_domains: (provider === "cloudflare"
@@ -4468,6 +4470,8 @@ function renderRegistrar(stateData) {
     if ($("registrarProxyUrl")) $("registrarProxyUrl").value = config.proxy_url || "";
     if ($("registrarProxyStrategy")) $("registrarProxyStrategy").value = config.proxy_strategy || "round_robin";
     if ($("registrarProxyCooldown")) $("registrarProxyCooldown").value = config.proxy_cooldown_seconds || 120;
+    if ($("registrarClashController")) $("registrarClashController").value = config.clash_controller || "";
+    if ($("registrarClashSelectorGroup")) $("registrarClashSelectorGroup").value = config.clash_selector_group || "";
     if ($("registrarEngine")) $("registrarEngine").value = config.register_engine || "browser";
     if ($("registrarEmailProvider")) $("registrarEmailProvider").value = config.email_provider || "cloudflare";
     if ($("registrarDefaultDomains")) $("registrarDefaultDomains").value = config.default_domains || "";
@@ -6199,7 +6203,34 @@ $("deleteGrokAuthBtn").onclick = () => run(async () => {
 
 $("registrarEmailProvider").onchange = updateRegistrarProviderFields;
 
-["registrarBrowserPath", "registrarBrowserMode", "registrarProxyUrl", "registrarProxyStrategy", "registrarProxyCooldown", "registrarEngine", "registrarEmailProvider",
+$("registrarClashAutoDetectBtn")?.addEventListener("click", async () => {
+  const btn = $("registrarClashAutoDetectBtn");
+  const hint = $("registrarClashAutoDetectHint");
+  btn.disabled = true;
+  btn.textContent = "🔍 正在扫描本地端口…";
+  hint.hidden = false;
+  hint.textContent = "正在扫描 9090 / 9097 / 9091 等常见 Clash 控制器端口…";
+  try {
+    const res = await fetch("/api/registrar/clash-autodetect", { method: "POST" });
+    const data = await res.json();
+    if (data.found) {
+      if (data.controller && $("registrarClashController")) $("registrarClashController").value = data.controller;
+      if (data.group && $("registrarClashSelectorGroup")) $("registrarClashSelectorGroup").value = data.group;
+      const portInfo = data.mixed_port ? `（mixed-port=${data.mixed_port}）` : "";
+      hint.innerHTML = `✅ 已检测到 Clash 核心 v${data.core_version}，控制器=<code>${data.controller}</code>，选择器组=<code>${data.group || "未找到"}</code>（${data.group_node_count || 0} 个可用节点）${portInfo}。配置已自动填入。`;
+      registrarFormDirty = true;
+    } else {
+      hint.innerHTML = "❌ 未检测到正在运行的 Clash/mihomo 控制器。请确认 FlClash / ClashVerge / ClashX 已启动并开启了外部控制器（默认端口 9090）。";
+    }
+  } catch (e) {
+    hint.textContent = "❌ 检测失败：" + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🔍 自动检测 Clash";
+  }
+});
+
+["registrarBrowserPath", "registrarBrowserMode", "registrarProxyUrl", "registrarProxyStrategy", "registrarProxyCooldown", "registrarClashController", "registrarClashSelectorGroup", "registrarEngine", "registrarEmailProvider",
   "registrarDefaultDomains", "registrarCloudmailUrl", "registrarCloudmailAdminEmail",
   "registrarCloudmailPassword", "registrarCloudflareApiBase", "registrarCloudflareApiKey",
   "registrarCloudflareAuthMode", "registrarCloudflareDomains", "registrarCloudflareDomainsPath",

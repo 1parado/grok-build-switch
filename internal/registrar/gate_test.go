@@ -8,12 +8,13 @@ import (
 )
 
 func TestEffectiveBrowserConcurrencySingleProxy(t *testing.T) {
+	// 放开单代理并发锁后：单代理/直连尊重 workers（依赖 ClashRotator 切换节点）。
 	cfg := DefaultConfig()
 	cfg.Workers = 3
 	cfg.ProxyURL = "http://127.0.0.1:7897"
 	pool := NewProxyPool(cfg)
-	if n := effectiveBrowserConcurrency(cfg, pool); n != 1 {
-		t.Fatalf("single proxy concurrency = %d, want 1", n)
+	if n := effectiveBrowserConcurrency(cfg, pool); n != 3 {
+		t.Fatalf("single proxy concurrency = %d, want 3 (workers)", n)
 	}
 }
 
@@ -42,12 +43,13 @@ func TestShouldCoolProxySkipsLoopbackTransient(t *testing.T) {
 }
 
 func TestBrowserGateSerializes(t *testing.T) {
+	// 多代理场景：并发上限 = min(workers, proxies)，单个 worker 满后第二个应阻塞。
 	cfg := DefaultConfig()
-	cfg.Workers = 3
-	cfg.ProxyURL = "http://127.0.0.1:7897"
+	cfg.Workers = 1
+	cfg.ProxyURL = "http://1.2.3.4:8080\nhttp://5.6.7.8:8080"
 	gate := newBrowserGate(cfg, NewProxyPool(cfg))
 	if gate.Limit() != 1 {
-		t.Fatalf("limit = %d", gate.Limit())
+		t.Fatalf("limit = %d, want 1", gate.Limit())
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -65,6 +67,31 @@ func TestBrowserGateSerializes(t *testing.T) {
 	if err := gate.Acquire(ctx); err != nil {
 		t.Fatal(err)
 	}
+	gate.Release()
+}
+
+// TestBrowserGateAllowsSingleProxyParallel 验证放开并发锁后：
+// 单代理 + workers=2 时，gate 允许两个浏览器同时持有（不再串行）。
+func TestBrowserGateAllowsSingleProxyParallel(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Workers = 2
+	cfg.ProxyURL = "http://127.0.0.1:7897"
+	gate := newBrowserGate(cfg, NewProxyPool(cfg))
+	if gate.Limit() != 2 {
+		t.Fatalf("single-proxy limit = %d, want 2 (workers)", gate.Limit())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := gate.Acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// 第二个能获取，但受 stagger（默认 2s）错峰限制，需等待间隔后才能拿到。
+	second, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel2()
+	if err := gate.Acquire(second); err != nil {
+		t.Fatalf("expected second acquire to succeed under limit, got %v", err)
+	}
+	gate.Release()
 	gate.Release()
 }
 

@@ -14,6 +14,14 @@ type Config struct {
 	ProxyStrategy string `json:"proxy_strategy"`
 	// ProxyCooldownSeconds: how long a failed proxy stays out of rotation.
 	ProxyCooldownSeconds int `json:"proxy_cooldown_seconds"`
+	// ClashController: FlClash/mihomo external-controller URL (e.g. http://127.0.0.1:9090).
+	// When set together with ClashSelectorGroup, each worker rotates the selector
+	// group to a distinct node before starting its browser, so consecutive
+	// registrations leave through different exit IPs even on a single local port.
+	ClashController string `json:"clash_controller"`
+	// ClashSelectorGroup: the Selector group name the mixed-port ultimately routes
+	// through (e.g. "🔰 选择节点"). Rotation switches this group per worker.
+	ClashSelectorGroup string `json:"clash_selector_group"`
 	// RegisterEngine: browser | protocol_prefer | protocol_only
 	// protocol_* uses gRPC-web for email verification first (see protocol.go).
 	RegisterEngine         string `json:"register_engine"`

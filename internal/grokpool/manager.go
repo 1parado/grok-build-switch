@@ -145,6 +145,7 @@ func (m *Manager) importFiles(files []ImportFile, onlyMissing bool) (ImportResul
 	}
 	result := ImportResult{}
 	changed := 0
+	var importedIDs []string
 	for _, file := range files {
 		credentials, err := grokauth.ParseCredentials([]byte(file.Content))
 		if err != nil {
@@ -156,7 +157,8 @@ func (m *Manager) importFiles(files []ImportFile, onlyMissing bool) (ImportResul
 			if len(credentials) > 1 {
 				name = fmt.Sprintf("%s#%d", firstNonEmpty(name, "auth.json"), index+1)
 			}
-			if onlyMissing && m.hasCredential(credentialID(credential)) {
+			id := credentialID(credential)
+			if onlyMissing && m.hasCredential(id) {
 				result.Updated++
 				continue
 			}
@@ -170,23 +172,49 @@ func (m *Manager) importFiles(files []ImportFile, onlyMissing bool) (ImportResul
 			} else {
 				result.Imported++
 			}
+			importedIDs = append(importedIDs, id)
 			changed++
 		}
 	}
 	if result.Imported+result.Updated == 0 {
 		return result, fmt.Errorf("没有成功导入账号")
 	}
-	if changed > 0 {
-		m.mu.Lock()
-		if m.running {
-			m.rerunRequested = true
-		} else if m.state.Settings.Enabled {
-			m.nextRun = time.Now().UTC()
-		}
-		m.mu.Unlock()
-		m.signalWake()
+	// 只对新导入/更新的账号做单独巡检，不再触发全量巡检。
+	// 原来的 signalWake + nextRun=now 会遍历整个号池，网络波动时
+	// 容易把好账号误判为异常（reauth/delete），搞坏已有账号。
+	if changed > 0 && len(importedIDs) > 0 {
+		go m.inspectAccountsOnly(importedIDs)
 	}
 	return result, nil
+}
+
+// inspectAccountsOnly inspects a subset of accounts by ID without touching
+// the rest of the pool. Used after import to verify only the new/updated
+// credentials instead of running a full-pool sweep.
+func (m *Manager) inspectAccountsOnly(ids []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		m.mu.Lock()
+		var account Account
+		found := false
+		for _, a := range m.state.Accounts {
+			if a.ID == id {
+				account = a
+				found = true
+				break
+			}
+		}
+		m.mu.Unlock()
+		if !found {
+			continue
+		}
+		result := m.inspectAccount(ctx, account)
+		m.recordInspection(result)
+	}
 }
 
 func (m *Manager) hasCredential(id string) bool {

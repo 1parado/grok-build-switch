@@ -4712,6 +4712,9 @@ function renderGrokPool(pool) {
   if ($("inspectGrokPoolBtn")) {
     $("inspectGrokPoolBtn").disabled = !configured || !!pool?.running;
   }
+  if ($("batchRefreshGrokPoolBtn")) {
+    $("batchRefreshGrokPoolBtn").disabled = !configured || !!pool?.running || batchRefreshRunning;
+  }
   const abnormalAccounts = (pool?.accounts || []).filter((account) => {
     const classification = account.classification || "uninspected";
     return classification !== "healthy" && classification !== "uninspected";
@@ -4955,9 +4958,15 @@ function buildAccountRow(account) {
     <span class="badge accountRowBadge ${escapeAttr(classification)}">${escapeHtml(statusText)}</span>
     <div class="accountRowActions">
       <button type="button" class="btn sm" data-action="toggle">${account.disabled ? "启用" : "禁用"}</button>
+      <button type="button" class="btn sm" data-action="refresh" title="重新登录该账号并更新 Cookie / 铸造 CPA 凭据">刷新</button>
       <button type="button" class="btn sm danger" data-action="delete">删除</button>
     </div>
   `;
+  const refreshCookie = row.querySelector('[data-action="refresh"]');
+  refreshCookie.title = account.email
+    ? `重新登录 ${account.email} 并更新 Cookie / 铸造 CPA 凭据`
+    : "重新登录该账号并更新 Cookie / 铸造 CPA 凭据";
+  refreshCookie.onclick = () => startAccountRefresh(account.id, refreshCookie);
   const toggle = row.querySelector('[data-action="toggle"]');
   toggle.onclick = () => run(async () => {
     await api(`/api/grok-pool/accounts/${encodeURIComponent(account.id)}`, {
@@ -4973,6 +4982,98 @@ function buildAccountRow(account) {
     await Promise.all([loadGrokPool(), loadAccountsList({ silent: true })]);
   }, { button: remove, busyLabel: "删除中…", success: "号池账号已删除" });
   return row;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function pollReloginJob(jobId, timeoutMs) {
+  const start = Date.now();
+  const cap = timeoutMs || 10 * 60 * 1000;
+  while (Date.now() - start < cap) {
+    const job = await api(`/api/grok-pool/refresh-cookie/${encodeURIComponent(jobId)}`);
+    if (!job.running) return job;
+    await sleep(2000);
+  }
+  throw new Error("刷新任务超时");
+}
+
+async function startAccountRefresh(accountId, button) {
+  const label = button?.textContent || "刷新";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "刷新中…";
+  }
+  try {
+    const resp = await api("/api/grok-pool/refresh-cookie", {
+      method: "POST",
+      body: JSON.stringify({ ids: [accountId] }),
+    });
+    const job = await pollReloginJob(resp.id);
+    const entry = job.entries?.[0];
+    if (entry && entry.status === "success") {
+      toast(`Cookie 已刷新：${entry.email}`, "success");
+    } else {
+      toast(`刷新失败：${entry?.email || ""} ${entry?.error || "未知原因"}`.trim(), "error");
+    }
+    await Promise.all([loadGrokPool(), loadAccountsList({ silent: true })]);
+  } catch (err) {
+    toast(err.message || "刷新失败", "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+}
+
+let batchRefreshRunning = false;
+
+async function batchRefreshAccounts(button) {
+  if (batchRefreshRunning) {
+    toast("批量刷新已在运行", "info");
+    return;
+  }
+  const total = (state.grokPool?.accounts || []).length;
+  if (!total) {
+    toast("号池中还没有账号", "error");
+    return;
+  }
+  if (!confirm(`确定批量刷新 ${total} 个号池账号？\n将逐个处理：先用现有 refresh_token 直接续期（秒级、不弹浏览器）；续期失败（吊销/过期）才回退浏览器重新登录铸造（每个约 40~90 秒）。\n没有在 registrar 账本（accounts_cli.txt）中保存密码的账号会被跳过。`)) return;
+  batchRefreshRunning = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = `批量刷新中…（${total}）`;
+  }
+  try {
+    const resp = await api("/api/grok-pool/refresh-cookie", {
+      method: "POST",
+      body: JSON.stringify({ ids: [] }),
+    });
+    const meta = $("accountListMeta");
+    const progressTimer = setInterval(async () => {
+      try {
+        const job = await api(`/api/grok-pool/refresh-cookie/${encodeURIComponent(resp.id)}`);
+        if (meta) meta.textContent = `批量刷新 ${job.done}/${job.total} …`;
+      } catch (_) { /* 轮询失败忽略 */ }
+    }, 3000);
+    const job = await pollReloginJob(resp.id, 120 * 60 * 1000);
+    clearInterval(progressTimer);
+    const entries = job.entries || [];
+    const ok = entries.filter((e) => e.status === "success").length;
+    const failed = entries.filter((e) => e.status !== "success").length;
+    toast(`批量刷新完成：成功 ${ok}，失败/跳过 ${failed}`, ok > 0 ? "success" : "error");
+    if (meta) meta.textContent = `共 ${accountListTotal} 个账号 · 批量刷新完成（成功 ${ok} / 失败 ${failed}）`;
+    await Promise.all([loadGrokPool(), loadAccountsList({ silent: true })]);
+  } catch (err) {
+    toast(err.message || "批量刷新失败", "error");
+  } finally {
+    batchRefreshRunning = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = "批量刷新";
+    }
+    await loadAccountsList({ silent: true }).catch(() => {});
+  }
 }
 
 function renderAccountPager() {
@@ -6420,6 +6521,10 @@ $("inspectGrokPoolBtn").onclick = () => run(async () => {
   state.grokPool = await api("/api/grok-pool/inspect", { method: "POST" });
   renderGrokPool(state.grokPool);
 }, { button: $("inspectGrokPoolBtn"), busyLabel: "启动中…", success: "号池巡检已启动" });
+
+if ($("batchRefreshGrokPoolBtn")) {
+  $("batchRefreshGrokPoolBtn").onclick = () => batchRefreshAccounts($("batchRefreshGrokPoolBtn"));
+}
 
 $("stopGrokPoolBtn").onclick = () => run(async () => {
   await api("/api/grok-pool/inspect", { method: "DELETE" });

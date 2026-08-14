@@ -61,6 +61,10 @@ type Server struct {
 	httpServer    *http.Server
 	loginMu       sync.Mutex
 	loginFails    map[string]loginFailure
+
+	reloginMu   sync.Mutex
+	reloginSeq  int64
+	reloginJobs map[string]*reloginRun
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -225,6 +229,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/grok-pool/open-auth-dir", s.handleGrokPoolOpenAuthDir)
 	mux.HandleFunc("/api/grok-pool/accounts", s.handleGrokPoolAccountsList)
 	mux.HandleFunc("/api/grok-pool/accounts/", s.handleGrokPoolAccount)
+	mux.HandleFunc("/api/grok-pool/refresh-cookie", s.handleGrokPoolRefreshCookie)
+	mux.HandleFunc("/api/grok-pool/refresh-cookie/", s.handleGrokPoolRefreshCookieStatus)
 	mux.HandleFunc("/api/cpa-mint", s.handleCpaMint)
 	mux.HandleFunc("/api/registrar", s.handleRegistrar)
 	mux.HandleFunc("/api/registrar/probe", s.handleRegistrarProbe)

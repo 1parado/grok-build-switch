@@ -35,8 +35,8 @@ func effectiveBrowserConcurrency(config Config, pool *ProxyPool) int {
 	if workers < 1 {
 		workers = 1
 	}
-	if workers > 30 {
-		workers = 30
+	if workers > maxBrowserHardCap {
+		workers = maxBrowserHardCap
 	}
 	proxies := 0
 	if pool != nil {

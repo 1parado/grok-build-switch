@@ -606,6 +606,29 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	if req.ProfileID != "" {
 		profile, err := s.Profiles.Get(req.ProfileID)
 		if err == nil {
+			// The local-proxy Grok Auth profile always syncs straight from the
+			// official xAI upstream and rebuilds its model list from that
+			// response; the generic gateway fetch does not apply here.
+			if profile.Name == grokAuthProfileName {
+				result, err := s.fetchOfficialGrokAuthModels(r.Context(), profile)
+				if err != nil {
+					writeError(w, err, http.StatusBadGateway)
+					return
+				}
+				payload := map[string]any{
+					"models":           result.Models,
+					"enabled_models":   result.EnabledModels,
+					"default_model":    result.DefaultModel,
+					"websearch_model":  result.WebSearchModel,
+					"subagents_models": map[string]string{"explore": result.Explore, "plan": result.Plan},
+					"official":         true,
+				}
+				if result.Warning != "" {
+					payload["warning"] = result.Warning
+				}
+				writeJSON(w, payload)
+				return
+			}
 			if req.BaseURL == "" {
 				req.BaseURL = profile.BaseURL
 			}
@@ -1009,13 +1032,15 @@ func extractModels(payload any) []string {
 	walk = func(v any) {
 		switch x := v.(type) {
 		case map[string]any:
-			if id, ok := x["id"].(string); ok && id != "" && !seen[id] {
-				seen[id] = true
-				out = append(out, id)
+			// Prefer the machine ID; only fall back to the display name so
+			// gateways that expose both don't leak "Grok 4.6" as a model ID.
+			candidate, _ := x["id"].(string)
+			if candidate == "" {
+				candidate, _ = x["name"].(string)
 			}
-			if name, ok := x["name"].(string); ok && name != "" && !seen[name] {
-				seen[name] = true
-				out = append(out, name)
+			if candidate != "" && !seen[candidate] {
+				seen[candidate] = true
+				out = append(out, candidate)
 			}
 			for key, child := range x {
 				if key == "data" || key == "models" {

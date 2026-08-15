@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,10 +21,17 @@ import (
 
 const grokAuthProfileName = "Grok Auth（本地代理）"
 
+// grok-4.5 已被上游下线（/models 只返回 grok-4.6），存量 Profile 仍钉在
+// 旧默认值上时由 migrateGrokAuthModel* 自动升级到 grok-4.6。
+const (
+	currentGrokAuthChatModel = "grok-4.6"
+	retiredGrokAuthChatModel = "grok-4.5"
+)
+
 var defaultGrokAuthModels = []profiles.ModelDef{
 	{
-		Name:                  "grok-4.5",
-		Model:                 "grok-4.5",
+		Name:                  currentGrokAuthChatModel,
+		Model:                 currentGrokAuthChatModel,
 		APIBackend:            "responses",
 		SupportsBackendSearch: true,
 		ContextWindow:         500000,
@@ -228,6 +236,224 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, proxyRequest)
 }
 
+// grokAuthModelsFetch is the payload returned by /api/models/fetch when the
+// target is the local-proxy Grok Auth profile: the official model list drives
+// both the suggestion chips and the enabled model definitions.
+type grokAuthModelsFetch struct {
+	Models         []string
+	EnabledModels  []profiles.ModelDef
+	DefaultModel   string
+	WebSearchModel string
+	Explore        string
+	Plan           string
+	Warning        string
+}
+
+type officialGrokModelInfo struct {
+	ID                    string
+	APIBackend            string
+	ContextWindow         int64
+	SupportsReasoningFlag bool
+	ReasoningEfforts      []string
+}
+
+// fetchOfficialGrokAuthModels queries the xAI upstream /models directly with a
+// pool token and rebuilds the local-proxy profile from that response, so the
+// profile no longer depends on the hardcoded default model set. Entries that
+// the official list no longer returns (e.g. the plan composer) are preserved
+// unless they reference the retired grok-4.5.
+func (s *Server) fetchOfficialGrokAuthModels(ctx context.Context, profile profiles.Profile) (grokAuthModelsFetch, error) {
+	token, err := s.officialGrokToken(ctx)
+	if err != nil {
+		return grokAuthModelsFetch{}, err
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	if s.GrokPool != nil {
+		if transport := s.GrokPool.Transport(); transport != nil {
+			client.Transport = transport
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, grokauth.UpstreamURL()+"/models", nil)
+	if err != nil {
+		return grokAuthModelsFetch{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	req.Header.Set("x-grok-client-version", "0.2.93")
+	req.Header.Set("User-Agent", "xai-grok-workspace/0.2.93")
+	resp, err := client.Do(req)
+	if err != nil {
+		return grokAuthModelsFetch{}, fmt.Errorf("请求官方模型列表失败: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return grokAuthModelsFetch{}, fmt.Errorf("读取官方模型列表失败: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return grokAuthModelsFetch{}, fmt.Errorf("官方模型列表返回 %s: %s", resp.Status, truncateTextServer(string(raw), 200))
+	}
+	official := parseOfficialGrokModels(raw)
+	if len(official) == 0 {
+		return grokAuthModelsFetch{}, fmt.Errorf("官方 /models 未返回任何模型")
+	}
+
+	apiKey, configured, err := s.proxyAPIKey()
+	if err != nil {
+		return grokAuthModelsFetch{}, err
+	}
+	if !configured {
+		return grokAuthModelsFetch{}, fmt.Errorf("尚未导入 Grok auth JSON 或号池账号")
+	}
+
+	defs := make([]profiles.ModelDef, 0, len(official)+len(profile.Models))
+	seen := map[string]bool{}
+	for _, item := range official {
+		if seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+		def := profiles.ModelDef{
+			Name:                    item.ID,
+			Model:                   item.ID,
+			APIBackend:              firstNonEmptyServer(item.APIBackend, "responses"),
+			SupportsBackendSearch:   true,
+			SupportsReasoningEffort: item.SupportsReasoningFlag,
+			ReasoningEfforts:        item.ReasoningEfforts,
+			ContextWindow:           500000,
+			MaxCompletionTokens:     65536,
+		}
+		if item.ContextWindow > 0 {
+			def.ContextWindow = item.ContextWindow
+		}
+		defs = append(defs, def)
+	}
+	for _, existing := range profile.Models {
+		id := firstNonEmptyServer(existing.Model, existing.Name)
+		if id == "" || seen[id] || id == retiredGrokAuthChatModel {
+			continue
+		}
+		seen[id] = true
+		defs = append(defs, existing)
+	}
+
+	profile.Models = cloneModelDefs(defs, s.localGrokAuthURL(), apiKey)
+	names := modelNames(profile.Models)
+	profile.AvailableModels = uniqueModelNames(names)
+	profile.DefaultModel = reconcileGrokAuthModelRef(profile.DefaultModel, names)
+	profile.WebSearchModel = reconcileGrokAuthModelRef(profile.WebSearchModel, names)
+	profile.SubagentsModels.Explore = reconcileGrokAuthModelRef(profile.SubagentsModels.Explore, names)
+	profile.SubagentsModels.Plan = reconcileGrokAuthModelRef(profile.SubagentsModels.Plan, names)
+
+	result := grokAuthModelsFetch{
+		Models:         profile.AvailableModels,
+		EnabledModels:  profile.Models,
+		DefaultModel:   profile.DefaultModel,
+		WebSearchModel: profile.WebSearchModel,
+		Explore:        profile.SubagentsModels.Explore,
+		Plan:           profile.SubagentsModels.Plan,
+	}
+	updated, err := s.Profiles.Update(profile.ID, profile)
+	if err != nil {
+		return grokAuthModelsFetch{}, err
+	}
+	s.changed()
+	if updated.IsActive {
+		if _, activateErr := s.Switcher.Activate(updated.ID); activateErr != nil {
+			result.Warning = "模型列表已按官方更新，但重写 config.toml 失败：" + activateErr.Error()
+		}
+	}
+	return result, nil
+}
+
+func (s *Server) officialGrokToken(ctx context.Context) (string, error) {
+	if s.poolConfigured() {
+		token, _, err := s.GrokPool.NextToken(ctx, "models-fetch")
+		if err == nil {
+			return token, nil
+		}
+		if !s.singleGrokAuthConfigured() {
+			return "", fmt.Errorf("获取号池 token 失败: %w", err)
+		}
+	}
+	if s.singleGrokAuthConfigured() {
+		token, err := s.GrokAuth.Token(ctx)
+		if err != nil {
+			return "", fmt.Errorf("刷新单账号 token 失败: %w", err)
+		}
+		return token, nil
+	}
+	return "", fmt.Errorf("尚未导入 Grok auth JSON 或号池账号")
+}
+
+func parseOfficialGrokModels(body []byte) []officialGrokModelInfo {
+	var payload struct {
+		Data []struct {
+			ID                      string `json:"id"`
+			Model                   string `json:"model"`
+			APIBackend              string `json:"api_backend"`
+			ContextWindow           int64  `json:"context_window"`
+			SupportsReasoningEffort bool   `json:"supports_reasoning_effort"`
+			ReasoningEfforts        []struct {
+				ID    string `json:"id"`
+				Value string `json:"value"`
+			} `json:"reasoning_efforts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	out := make([]officialGrokModelInfo, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		id := firstNonEmptyServer(item.ID, item.Model)
+		if id == "" {
+			continue
+		}
+		info := officialGrokModelInfo{
+			ID:                    id,
+			APIBackend:            strings.TrimSpace(item.APIBackend),
+			ContextWindow:         item.ContextWindow,
+			SupportsReasoningFlag: item.SupportsReasoningEffort,
+		}
+		for _, effort := range item.ReasoningEfforts {
+			if value := firstNonEmptyServer(effort.ID, effort.Value); value != "" {
+				info.ReasoningEfforts = append(info.ReasoningEfforts, value)
+			}
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// reconcileGrokAuthModelRef keeps a model reference valid after the model list
+// was rebuilt from the official response: retired grok-4.5 is migrated, and a
+// reference that no longer exists falls back to the first available model.
+func reconcileGrokAuthModelRef(ref string, available []string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	ref = migrateGrokAuthModelID(ref)
+	for _, name := range available {
+		if name == ref {
+			return ref
+		}
+	}
+	if len(available) > 0 {
+		return available[0]
+	}
+	return ref
+}
+
+func truncateTextServer(text string, limit int) string {
+	text = strings.TrimSpace(text)
+	if len(text) > limit {
+		return text[:limit] + "…"
+	}
+	return text
+}
+
 func (s *Server) ensureGrokAuthProfile() error {
 	if s.ActualPort == 0 {
 		return nil
@@ -267,10 +493,10 @@ func (s *Server) upsertGrokAuthProfile() (profiles.Profile, error) {
 		BaseURL:         baseURL,
 		APIKey:          apiKey,
 		AvailableModels: modelNames(defaultGrokAuthModels),
-		DefaultModel:    "grok-4.5",
-		WebSearchModel:  "grok-4.5",
+		DefaultModel:    currentGrokAuthChatModel,
+		WebSearchModel:  currentGrokAuthChatModel,
 		SubagentsModels: profiles.SubagentsModels{
-			Explore: "grok-4.5",
+			Explore: currentGrokAuthChatModel,
 			Plan:    "grok-composer-2.5-fast",
 		},
 		Models: cloneModelDefs(defaultGrokAuthModels, baseURL, apiKey),
@@ -278,12 +504,12 @@ func (s *Server) upsertGrokAuthProfile() (profiles.Profile, error) {
 	if existing == nil {
 		return s.Profiles.Create(profile)
 	}
-	profile.DefaultModel = firstNonEmptyServer(existing.DefaultModel, profile.DefaultModel)
-	profile.WebSearchModel = firstNonEmptyServer(existing.WebSearchModel, profile.WebSearchModel)
-	profile.SubagentsModels.Explore = firstNonEmptyServer(existing.SubagentsModels.Explore, profile.SubagentsModels.Explore)
+	profile.DefaultModel = migrateGrokAuthModelID(firstNonEmptyServer(existing.DefaultModel, profile.DefaultModel))
+	profile.WebSearchModel = migrateGrokAuthModelID(firstNonEmptyServer(existing.WebSearchModel, profile.WebSearchModel))
+	profile.SubagentsModels.Explore = migrateGrokAuthModelID(firstNonEmptyServer(existing.SubagentsModels.Explore, profile.SubagentsModels.Explore))
 	profile.SubagentsModels.Plan = firstNonEmptyServer(existing.SubagentsModels.Plan, profile.SubagentsModels.Plan)
 	if len(existing.Models) > 0 {
-		profile.Models = cloneModelDefs(existing.Models, baseURL, apiKey)
+		profile.Models = cloneModelDefs(migrateGrokAuthModelDefs(existing.Models), baseURL, apiKey)
 		profile.AvailableModels = uniqueModelNames(append(existing.AvailableModels, modelNames(profile.Models)...))
 	}
 	updated, err := s.Profiles.Update(existing.ID, profile)
@@ -391,6 +617,25 @@ func (s *Server) singleGrokAuthConfigured() bool {
 	}
 	status, err := s.GrokAuth.Status()
 	return err == nil && status.Configured
+}
+
+func migrateGrokAuthModelID(id string) string {
+	if id == retiredGrokAuthChatModel {
+		return currentGrokAuthChatModel
+	}
+	return id
+}
+
+func migrateGrokAuthModelDefs(models []profiles.ModelDef) []profiles.ModelDef {
+	out := make([]profiles.ModelDef, 0, len(models))
+	for _, model := range models {
+		if model.Model == retiredGrokAuthChatModel || (model.Model == "" && model.Name == retiredGrokAuthChatModel) {
+			out = append(out, defaultGrokAuthModels[0])
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
 }
 
 func cloneModelDefs(models []profiles.ModelDef, baseURL, apiKey string) []profiles.ModelDef {

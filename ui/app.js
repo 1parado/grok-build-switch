@@ -6161,11 +6161,28 @@ $("fetchModelsBtn").onclick = () => run(async () => {
     }),
   });
   state.availableModels = unique(result.models);
-  renderModelSelect();
+  if (Array.isArray(result.enabled_models) && result.enabled_models.length) {
+    applyOfficialGrokModels(result);
+  } else {
+    renderModelSelect();
+  }
   if ($("connectBlock")) $("connectBlock").open = true;
-  showConnectionStatus(true, `已获取 ${result.models.length} 个模型`);
-  toast(`获取到 ${result.models.length} 个模型`, "success");
+  const detail = result.official ? "（已按官方列表更新已启用模型）" : "";
+  showConnectionStatus(true, `已获取 ${result.models.length} 个模型${detail}`);
+  if (result.warning) toast(result.warning, "error");
+  toast(`获取到 ${result.models.length} 个模型${detail}`, "success");
 }, { button: $("fetchModelsBtn"), busyLabel: "拉取中…" });
+
+function applyOfficialGrokModels(result) {
+  $("modelsBody").innerHTML = "";
+  result.enabled_models.forEach((model) => addModelCard(model));
+  syncEnabledModelList();
+  if (result.default_model) $("defaultModel").value = result.default_model;
+  if (result.websearch_model) $("webSearchModel").value = result.websearch_model;
+  if (result.subagents_models?.explore) $("subagentsExploreModel").value = result.subagents_models.explore;
+  if (result.subagents_models?.plan) $("subagentsPlanModel").value = result.subagents_models.plan;
+  renderModelSelect();
+}
 
 $("profileForm").onsubmit = (event) => {
   event.preventDefault();

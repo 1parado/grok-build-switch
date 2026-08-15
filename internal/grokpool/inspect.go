@@ -188,7 +188,7 @@ func (m *Manager) inspectAccount(ctx context.Context, account Account) Account {
 		result.ExpiresAt = status.ExpiresAt
 	}
 
-	model := "grok-4.5"
+	model := "grok-4.6"
 	modelsResp, modelsErr := m.doProbe(ctx, http.MethodGet, m.upstreamURL+"/models", token, nil)
 	if modelsErr == nil && modelsResp.StatusCode >= 200 && modelsResp.StatusCode < 300 {
 		model = pickModel(modelsResp.Body)
@@ -400,7 +400,7 @@ func pickModel(body string) string {
 			ids = append(ids, id)
 		}
 	}
-	for _, preferred := range []string{"grok-4.5-build-free", "grok-4.5", "grok-4", "grok-3-mini"} {
+	for _, preferred := range []string{"grok-4.6", "grok-4.6-build-free", "grok-4", "grok-3-mini"} {
 		for _, id := range ids {
 			if id == preferred {
 				return id
@@ -410,7 +410,7 @@ func pickModel(body string) string {
 	if len(ids) > 0 {
 		return ids[0]
 	}
-	return "grok-4.5"
+	return "grok-4.6"
 }
 
 func stringField(value any) string {

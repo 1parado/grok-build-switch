@@ -71,7 +71,7 @@ func (p Profile) Matches(other Profile) bool {
 	if p.BaseURL != other.BaseURL ||
 		!runtimeDefaultMatches(p, other.DefaultModel) ||
 		p.DefaultReasoningEffort != other.DefaultReasoningEffort ||
-		p.WebSearchModel != other.WebSearchModel ||
+		!webSearchModelMatches(p, other) ||
 		p.SubagentsModels.Explore != other.SubagentsModels.Explore ||
 		p.SubagentsModels.Plan != other.SubagentsModels.Plan ||
 		!imageGenerationMatches(p.ImageGeneration, other.ImageGeneration) {
@@ -113,6 +113,31 @@ func runtimeDefaultMatches(profile Profile, actual string) bool {
 		return !IsMediaModel(model)
 	}
 	return false
+}
+
+// EffectiveWebSearchModel resolves the web-search model written to config.toml:
+// an empty (follow) value tracks the main model so config never ends up with
+// web_search = ”.
+func (p Profile) EffectiveWebSearchModel() string {
+	if strings.TrimSpace(p.WebSearchModel) == "" {
+		return p.DefaultModel
+	}
+	return p.WebSearchModel
+}
+
+func webSearchModelMatches(p, other Profile) bool {
+	if p.WebSearchModel == other.WebSearchModel {
+		return true
+	}
+	// "Follow the main model" profiles accept whatever enabled model the
+	// runtime default switched to; a pinned model must match exactly.
+	if strings.TrimSpace(p.WebSearchModel) != "" {
+		return false
+	}
+	if other.WebSearchModel == "" || other.WebSearchModel == other.DefaultModel {
+		return true
+	}
+	return runtimeDefaultMatches(p, other.WebSearchModel)
 }
 
 func modelKey(m ModelDef) string {

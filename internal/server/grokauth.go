@@ -342,9 +342,9 @@ func (s *Server) fetchOfficialGrokAuthModels(ctx context.Context, profile profil
 	names := modelNames(profile.Models)
 	profile.AvailableModels = uniqueModelNames(names)
 	profile.DefaultModel = reconcileGrokAuthModelRef(profile.DefaultModel, names)
-	profile.WebSearchModel = reconcileGrokAuthModelRef(profile.WebSearchModel, names)
-	profile.SubagentsModels.Explore = reconcileGrokAuthModelRef(profile.SubagentsModels.Explore, names)
-	profile.SubagentsModels.Plan = reconcileGrokAuthModelRef(profile.SubagentsModels.Plan, names)
+	profile.WebSearchModel = followMainGrokAuthModel(reconcileGrokAuthModelRef(profile.WebSearchModel, names))
+	profile.SubagentsModels.Explore = followMainGrokAuthModel(reconcileGrokAuthModelRef(profile.SubagentsModels.Explore, names))
+	profile.SubagentsModels.Plan = followMainGrokAuthModel(reconcileGrokAuthModelRef(profile.SubagentsModels.Plan, names))
 
 	result := grokAuthModelsFetch{
 		Models:         profile.AvailableModels,
@@ -494,20 +494,16 @@ func (s *Server) upsertGrokAuthProfile() (profiles.Profile, error) {
 		APIKey:          apiKey,
 		AvailableModels: modelNames(defaultGrokAuthModels),
 		DefaultModel:    currentGrokAuthChatModel,
-		WebSearchModel:  currentGrokAuthChatModel,
-		SubagentsModels: profiles.SubagentsModels{
-			Explore: currentGrokAuthChatModel,
-			Plan:    "grok-composer-2.5-fast",
-		},
+		// 联网 / explore / plan 默认留空：跟随主模型，仅在手动选择后固定。
 		Models: cloneModelDefs(defaultGrokAuthModels, baseURL, apiKey),
 	}
 	if existing == nil {
 		return s.Profiles.Create(profile)
 	}
 	profile.DefaultModel = migrateGrokAuthModelID(firstNonEmptyServer(existing.DefaultModel, profile.DefaultModel))
-	profile.WebSearchModel = migrateGrokAuthModelID(firstNonEmptyServer(existing.WebSearchModel, profile.WebSearchModel))
-	profile.SubagentsModels.Explore = migrateGrokAuthModelID(firstNonEmptyServer(existing.SubagentsModels.Explore, profile.SubagentsModels.Explore))
-	profile.SubagentsModels.Plan = firstNonEmptyServer(existing.SubagentsModels.Plan, profile.SubagentsModels.Plan)
+	profile.WebSearchModel = followMainGrokAuthModel(migrateGrokAuthModelID(existing.WebSearchModel))
+	profile.SubagentsModels.Explore = followMainGrokAuthModel(migrateGrokAuthModelID(existing.SubagentsModels.Explore))
+	profile.SubagentsModels.Plan = followMainGrokAuthModel(existing.SubagentsModels.Plan)
 	if len(existing.Models) > 0 {
 		profile.Models = cloneModelDefs(migrateGrokAuthModelDefs(existing.Models), baseURL, apiKey)
 		profile.AvailableModels = uniqueModelNames(append(existing.AvailableModels, modelNames(profile.Models)...))
@@ -617,6 +613,18 @@ func (s *Server) singleGrokAuthConfigured() bool {
 	}
 	status, err := s.GrokAuth.Status()
 	return err == nil && status.Configured
+}
+
+// followMainGrokAuthModel drops sub-model references that were pinned by the
+// old hardcoded template (the chat model itself or the plan composer) so they
+// follow the main model again; any other value is a manual pick and is kept.
+func followMainGrokAuthModel(ref string) string {
+	switch strings.TrimSpace(ref) {
+	case "", retiredGrokAuthChatModel, currentGrokAuthChatModel, "grok-composer-2.5-fast":
+		return ""
+	default:
+		return strings.TrimSpace(ref)
+	}
 }
 
 func migrateGrokAuthModelID(id string) string {

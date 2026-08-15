@@ -218,7 +218,7 @@ func SnippetForProfile(profile profiles.Profile, opts ...ApplyOpts) (string, err
 	b.WriteString("\n")
 	b.WriteString("[models]\n")
 	b.WriteString("default = " + quote(profile.DefaultModel) + "\n")
-	b.WriteString("web_search = " + quote(profile.WebSearchModel) + "\n")
+	b.WriteString("web_search = " + quote(profile.EffectiveWebSearchModel()) + "\n")
 	b.WriteString("default_reasoning_effort = " + quote(profile.DefaultReasoningEffort) + "\n\n")
 	if snippet := formatSubagentsModelsSnippet(profile); snippet != "" {
 		b.WriteString(snippet)
@@ -253,7 +253,7 @@ func ApplyProfile(doc map[string]any, profile profiles.Profile, opts ...ApplyOpt
 
 	models := ensureTable(doc, "models")
 	models["default"] = profile.DefaultModel
-	models["web_search"] = profile.WebSearchModel
+	models["web_search"] = profile.EffectiveWebSearchModel()
 	models["default_reasoning_effort"] = profile.DefaultReasoningEffort
 
 	applySubagentsModelsToDoc(doc, profile)
@@ -722,7 +722,7 @@ func rewriteSection(lines []string, section string, profile profiles.Profile, op
 		}
 	case "models":
 		values["default"] = quote(profile.DefaultModel)
-		values["web_search"] = quote(profile.WebSearchModel)
+		values["web_search"] = quote(profile.EffectiveWebSearchModel())
 		values["default_reasoning_effort"] = quote(profile.DefaultReasoningEffort)
 	}
 	managed := []string{}

@@ -5415,7 +5415,7 @@ function syncEnabledModelList(preferred) {
   const names = unique(readEnabledModelNames().filter((name) => !isMediaModelID(name)));
   const fields = [
     { id: "defaultModel", emptyLabel: "（请先启用模型）", required: false },
-    { id: "webSearchModel", emptyLabel: "（可选）", required: false },
+    { id: "webSearchModel", emptyLabel: "（跟随主模型）", required: false },
     { id: "subagentsExploreModel", emptyLabel: "（继承主模型）", required: false },
     { id: "subagentsPlanModel", emptyLabel: "（继承主模型）", required: false },
   ];

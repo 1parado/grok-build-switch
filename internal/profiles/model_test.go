@@ -77,3 +77,35 @@ func TestMatchesAllowsRuntimeSwitchToEnabledChatModel(t *testing.T) {
 		t.Fatal("the built-in image alias should not become the chat default")
 	}
 }
+
+func TestWebSearchFollowsMainModel(t *testing.T) {
+	base := Profile{
+		BaseURL:      "https://api.example.com/v1",
+		APIKey:       "sk-test",
+		DefaultModel: "chat-a",
+		Models: []ModelDef{
+			{Name: "chat-a", Model: "chat-a"},
+			{Name: "chat-b", Model: "chat-b"},
+		},
+	}
+	if got := base.EffectiveWebSearchModel(); got != "chat-a" {
+		t.Fatalf("empty web search should follow the main model, got %q", got)
+	}
+	pinned := base
+	pinned.WebSearchModel = "chat-b"
+	if got := pinned.EffectiveWebSearchModel(); got != "chat-b" {
+		t.Fatalf("a manual web-search pick must stay, got %q", got)
+	}
+
+	// Runtime /model switch: the config keeps the previously written
+	// web_search value while the stored profile tracks the main model.
+	runtime := base
+	runtime.DefaultModel = "chat-b"
+	runtime.WebSearchModel = "chat-a"
+	if !base.Matches(runtime) {
+		t.Fatal("a follow-main-model profile must accept the runtime default switch")
+	}
+	if pinned.Matches(runtime) {
+		t.Fatal("a pinned web-search model must not be silently replaced")
+	}
+}

@@ -65,6 +65,9 @@ type Server struct {
 	reloginMu   sync.Mutex
 	reloginSeq  int64
 	reloginJobs map[string]*reloginRun
+
+	// Imagine 是基于 grok.com 网页端 /imagine 协议的本地生图引擎（走 registrar 账号 Cookie 轮询）。
+	Imagine *ImagineEngine
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -131,6 +134,11 @@ func (s *Server) Listen(preferred int) (*http.Server, int, error) {
 		return nil, 0, err
 	}
 	s.ActualPort = port
+	// 初始化本地生图引擎（账号目录来自 <DataDir>/registrar/cookies，自动跟随当前用户）。
+	s.Imagine = NewImagineEngine(s.Paths.DataDir)
+	if s.Imagine != nil {
+		fmt.Fprintf(os.Stderr, "[imagine] engine ready with %d accounts\n", s.Imagine.AccountCount())
+	}
 	if s.Switcher != nil {
 		s.Switcher.ImagineProxyBaseURL = s.localImagineURL()
 		if _, err := s.Switcher.ReapplyActive(); err != nil {
@@ -267,6 +275,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/grok/v1/", s.handleGrokProxy)
 	mux.HandleFunc("/imagine/v1", s.handleImagineProxy)
 	mux.HandleFunc("/imagine/v1/", s.handleImagineProxy)
+	mux.HandleFunc("/api/imagine/generate", s.handleImagineGenerate)
+	mux.HandleFunc("/imagine-output/", s.handleImagineOutput)
 	mux.HandleFunc("/", s.handleStatic)
 }
 
@@ -356,6 +366,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"port":                  s.ActualPort,
 		"settings":              currentSettings,
 		"config_matches_active": matches,
+		"imagine_accounts":      s.imagineAccountCount(),
+		"imagine_ready":         s.imagineAccountCount() > 0,
 	})
 }
 
@@ -1075,6 +1087,73 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
+// handleImagineGenerate 接收 {prompt, model, aspect_ratio}，用本地账号池轮询生图。
+func (s *Server) handleImagineGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Imagine == nil {
+		writeError(w, fmt.Errorf("生图引擎未初始化"), http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		Prompt      string `json:"prompt"`
+		Model       string `json:"model"`
+		AspectRatio string `json:"aspect_ratio"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		writeError(w, fmt.Errorf("prompt 不能为空"), http.StatusBadRequest)
+		return
+	}
+	model := req.Model
+	if model == "" {
+		model = "grok-imagine-image"
+	}
+	aspect := req.AspectRatio
+	if aspect == "" {
+		aspect = "1:1"
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+	res := s.Imagine.Generate(ctx, prompt, model, aspect)
+	if !res.OK {
+		writeJSONStatus(w, res, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, res)
+}
+
+// handleImagineOutput 提供生成的图片文件（位于 <DataDir>/imagine_outputs/）。
+func (s *Server) handleImagineOutput(w http.ResponseWriter, r *http.Request) {
+	if s.Imagine == nil {
+		http.NotFound(w, r)
+		return
+	}
+	rel := strings.TrimPrefix(r.URL.Path, "/imagine-output/")
+	rel = path.Clean(rel)
+	if rel == "." || rel == "" || strings.Contains(rel, "..") || strings.HasPrefix(rel, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	full := filepath.Join(s.Imagine.outputsDir, rel)
+	if ct := mime.TypeByExtension(path.Ext(full)); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Write(data)
+}
+
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 	if name == "." || name == "" {
@@ -1102,6 +1181,13 @@ func (s *Server) changed() {
 	if s.onChanged != nil {
 		s.onChanged()
 	}
+}
+
+func (s *Server) imagineAccountCount() int {
+	if s.Imagine == nil {
+		return 0
+	}
+	return s.Imagine.AccountCount()
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

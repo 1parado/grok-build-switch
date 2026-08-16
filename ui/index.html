@@ -28,6 +28,7 @@
         <button type="button" id="importHeaderBtn" class="btn" data-home-only>导入配置</button>
         <button type="button" id="navSkillsBtn" class="btn">Skills</button>
         <button type="button" id="navAccountsBtn" class="btn" title="账号管理">账号</button>
+        <button type="button" id="navImagineBtn" class="btn" title="生图">生图</button>
         <button type="button" id="navSettingsBtn" class="btn" title="设置">设置</button>
         <a href="https://github.com/1parado/grok-build-switch" target="_blank" rel="noopener" class="navGithubBtn" title="GitHub 仓库" aria-label="GitHub">
           <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -1034,6 +1035,49 @@
       </section>
 
       <button type="button" id="backFromAccountsBtn" class="btn">返回供应商列表</button>
+    </main>
+
+    <!-- IMAGINE -->
+    <main id="viewImagine" class="view imagineView" hidden>
+      <div class="pageHead">
+        <h1 class="pageTitle">生图</h1>
+        <p class="pageDesc">基于 grok.com /imagine 协议，自动轮换可用账号生成图片</p>
+      </div>
+
+      <section class="formCard imagineComposer">
+        <label class="field block">提示词
+          <textarea id="imaginePrompt" class="imaginePrompt" rows="3" placeholder="描述你想生成的画面…"></textarea>
+        </label>
+
+        <div class="imagineOptions">
+          <label class="field">模型
+            <select id="imagineModel">
+              <option value="grok-imagine-image">Speed（快速）</option>
+              <option value="grok-imagine-image-quality">Quality（高清）</option>
+            </select>
+          </label>
+          <label class="field">比例
+            <select id="imagineRatio">
+              <option value="1:1">1:1</option>
+              <option value="16:9">16:9</option>
+              <option value="9:16">9:16</option>
+              <option value="4:3">4:3</option>
+              <option value="3:4">3:4</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="inlineActions">
+          <button type="button" id="imagineGenerateBtn" class="btn primary">生成图片</button>
+          <button type="button" id="imagineClearBtn" class="btn">清空画廊</button>
+        </div>
+        <p id="imagineStatus" class="muted tiny imagineStatus" hidden></p>
+      </section>
+
+      <div id="imagineGallery" class="imagineGallery"></div>
+      <div id="imagineEmpty" class="empty" hidden>
+        <p>还没有图片。输入提示词，点击「生成图片」试试。</p>
+      </div>
     </main>
   </div>
 

@@ -5392,3 +5392,121 @@ body.resizingChatPanels * {
   background: #fff;
   border: 1px solid var(--line);
 }
+
+/* ===== Imagine (生图) view ===== */
+.imagineComposer .imaginePrompt {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2, #fff);
+  color: inherit;
+  font: 14px/1.5 var(--sans, system-ui, sans-serif);
+  box-sizing: border-box;
+}
+
+.imagineOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.field.block {
+  display: block;
+}
+
+.field.block .imaginePrompt {
+  margin-top: 6px;
+}
+
+.imagineStatus {
+  margin: 10px 0 0;
+}
+
+.imagineStatus.busy {
+  color: var(--accent, #4f7cff);
+}
+
+.imagineStatus.error {
+  color: var(--danger, #e5484d);
+}
+
+.imagineStatus.ok {
+  color: var(--ok, #2e9e5b);
+}
+
+.imagineGallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.imagineCard {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-2, #fff);
+  cursor: zoom-in;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.imagineCard:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
+}
+
+.imagineCard img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.imagineCardActions {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.imagineCard:hover .imagineCardActions {
+  opacity: 1;
+}
+
+.imagineCardActions .btn {
+  backdrop-filter: blur(4px);
+}
+
+/* Lightbox */
+.imagineLightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+}
+
+.imagineLightbox img {
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.imagineLightbox .imagineLightboxBar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 8px;
+}

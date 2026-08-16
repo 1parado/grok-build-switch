@@ -897,6 +897,11 @@ function showView(name) {
     skills.hidden = name !== "skills";
     skills.style.display = name === "skills" ? "" : "none";
   }
+  const imagine = $("viewImagine");
+  if (imagine) {
+    imagine.hidden = name !== "imagine";
+    imagine.style.display = name === "imagine" ? "" : "none";
+  }
   if ($("navHomeBtn")) $("navHomeBtn").hidden = name === "home";
   document.querySelectorAll("[data-home-only]").forEach((el) => {
     el.hidden = name !== "home";
@@ -914,6 +919,9 @@ function showView(name) {
   }
   if (name === "skills") {
     loadSkills().catch((err) => toast(err.message, "error"));
+  }
+  if (name === "imagine") {
+    refreshImagineStatus().catch(() => {});
   }
   if (name === "chat") {
     openAgentView().catch((err) => toast(err.message, "error"));
@@ -5780,7 +5788,10 @@ async function saveCurrentProfile() {
 $("navHomeBtn").onclick = () => showView("home");
 $("navSkillsBtn").onclick = () => showView("skills");
 $("navAccountsBtn").onclick = () => showView("accounts");
+$("navImagineBtn").onclick = () => showView("imagine");
 $("navSettingsBtn").onclick = () => showView("settings");
+$("imagineGenerateBtn").onclick = () => generateImagine();
+$("imagineClearBtn").onclick = () => clearImagineGallery();
 $("backFromEditBtn").onclick = () => showView("home");
 $("backFromSkillsBtn").onclick = () => showView("home");
 $("backFromSettingsBtn").onclick = () => showView("home");
@@ -7368,3 +7379,171 @@ document.addEventListener("click", (event) => {
     hideSkillsPopup();
   }
 });
+
+// ===== Imagine (生图) =====
+async function refreshImagineStatus() {
+  const statusEl = $("imagineStatus");
+  const emptyEl = $("imagineEmpty");
+  try {
+    const data = await api("/api/status");
+    const ready = !!(data && data.imagine_ready);
+    const count = (data && Number(data.imagine_accounts)) || 0;
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = "muted tiny imagineStatus" + (ready ? " ok" : "");
+      statusEl.textContent = ready
+        ? `生图引擎就绪 · 可用账号 ${count} 个`
+        : "生图引擎未就绪：registrar/cookies 中未找到可用账号";
+    }
+  } catch {
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = "muted tiny imagineStatus";
+      statusEl.textContent = "无法获取生图引擎状态";
+    }
+  }
+  if (emptyEl) {
+    const gallery = $("imagineGallery");
+    emptyEl.hidden = !!(gallery && gallery.children.length > 0);
+  }
+}
+
+async function generateImagine() {
+  const promptEl = $("imaginePrompt");
+  const modelEl = $("imagineModel");
+  const ratioEl = $("imagineRatio");
+  const statusEl = $("imagineStatus");
+  const btn = $("imagineGenerateBtn");
+  const prompt = (promptEl && promptEl.value || "").trim();
+  if (!prompt) {
+    toast("请先输入提示词", "error");
+    if (promptEl) promptEl.focus();
+    return;
+  }
+  const model = modelEl ? modelEl.value : "grok-imagine-image";
+  const ratio = ratioEl ? ratioEl.value : "1:1";
+
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.className = "muted tiny imagineStatus busy";
+    statusEl.textContent = "正在生成，自动轮换账号中…";
+  }
+  setBusy(btn, true, "生成中…");
+  try {
+    const res = await fetch("/api/imagine/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, model, aspect_ratio: ratio }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      const msg = data.err_msg || data.error || res.statusText || "生图失败";
+      throw new Error(msg);
+    }
+    const images = Array.isArray(data.images) ? data.images : [];
+    if (images.length === 0) {
+      throw new Error("未返回任何图片");
+    }
+    renderImagineImages(images, data);
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = "muted tiny imagineStatus ok";
+      const meta = [data.model_name, data.width && data.height ? `${data.width}x${data.height}` : null, data.account ? `账号 ${data.account}` : null]
+        .filter(Boolean).join(" · ");
+      statusEl.textContent = `生成成功（${images.length} 张）${meta ? " · " + meta : ""}`;
+    }
+    toast(`生成成功，${images.length} 张图片`, "success");
+  } catch (err) {
+    if (statusEl) {
+      statusEl.hidden = false;
+      statusEl.className = "muted tiny imagineStatus error";
+      statusEl.textContent = "生成失败：" + (err.message || err);
+    }
+    toast("生图失败：" + (err.message || err), "error");
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+function renderImagineImages(images, data) {
+  const gallery = $("imagineGallery");
+  const emptyEl = $("imagineEmpty");
+  if (!gallery) return;
+  const frag = document.createDocumentFragment();
+  for (const url of images) {
+    const card = document.createElement("div");
+    card.className = "imagineCard";
+
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = (data && data.model_name ? data.model_name + " " : "") + "生成图片";
+    img.loading = "lazy";
+    card.appendChild(img);
+
+    const actions = document.createElement("div");
+    actions.className = "imagineCardActions";
+    const dl = document.createElement("button");
+    dl.type = "button";
+    dl.className = "btn sm";
+    dl.textContent = "下载";
+    dl.onclick = (e) => {
+      e.stopPropagation();
+      downloadImagine(url);
+    };
+    actions.appendChild(dl);
+    card.appendChild(actions);
+
+    card.onclick = () => openImagineLightbox(url);
+    frag.appendChild(card);
+  }
+  gallery.appendChild(frag);
+  if (emptyEl) emptyEl.hidden = true;
+}
+
+function downloadImagine(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = url.split("/").pop() || "imagine.png";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+function openImagineLightbox(url) {
+  const existing = $("imagineLightbox");
+  if (existing) existing.remove();
+  const box = document.createElement("div");
+  box.className = "imagineLightbox";
+  box.id = "imagineLightbox";
+
+  const bar = document.createElement("div");
+  bar.className = "imagineLightboxBar";
+  const dl = document.createElement("button");
+  dl.type = "button";
+  dl.className = "btn sm";
+  dl.textContent = "下载";
+  dl.onclick = (e) => { e.stopPropagation(); downloadImagine(url); };
+  bar.appendChild(dl);
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "btn sm";
+  close.textContent = "关闭";
+  close.onclick = (e) => { e.stopPropagation(); box.remove(); };
+  bar.appendChild(close);
+  box.appendChild(bar);
+
+  const img = document.createElement("img");
+  img.src = url;
+  img.alt = "预览";
+  box.appendChild(img);
+
+  box.onclick = () => box.remove();
+  document.body.appendChild(box);
+}
+
+function clearImagineGallery() {
+  const gallery = $("imagineGallery");
+  if (gallery) gallery.innerHTML = "";
+  const emptyEl = $("imagineEmpty");
+  if (emptyEl) emptyEl.hidden = false;
+}

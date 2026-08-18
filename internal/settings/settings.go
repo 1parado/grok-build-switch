@@ -29,6 +29,10 @@ type Settings struct {
 	AgentDefaultCwd   string   `json:"agent_default_cwd,omitempty"`
 	ProviderOrder     []string `json:"provider_order"`
 	PinnedProviderIDs []string `json:"pinned_provider_ids"`
+	// ImageGenEnabled 是生图能力的全局开关：开启时向 Grok CLI 注册生图 MCP
+	// 服务器并接管 image_gen 请求（走账号池）；关闭时移除注册、不做接管，
+	// 模型回到无生图能力的原始状态。对所有供应商生效。
+	ImageGenEnabled bool `json:"image_gen_enabled"`
 }
 
 type Store struct {
@@ -59,6 +63,7 @@ func Default() Settings {
 		Autostart:       false,
 		SilentAutostart: true,
 		AutoOpenBrowser: true,
+		ImageGenEnabled: true,
 	}
 }
 

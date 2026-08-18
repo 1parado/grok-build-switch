@@ -188,11 +188,15 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, http.StatusBadGateway)
 		return
 	}
-	// 内置 image_gen / image_edit 工具走账号池，绕开官方额度限制。
-	// 生成（images/generations）由账号池引擎接管；编辑（images/edits）
-	// 需要参考图且当前引擎未实现编辑协议，返回明确错误引导模型改用
-	// 重新生成，避免 403 让模型困惑。
-	if s.Imagine != nil && s.Imagine.AccountCount() > 0 {
+	// 生图能力全局开关：开启且账号池可用时接管内置 image_gen / image_edit
+	// 与 chat/completions 工具注入；关闭时全部放行官方（原始行为）。
+	imageGenEnabled := true
+	if s.Settings != nil {
+		if current, err := s.Settings.Get(); err == nil {
+			imageGenEnabled = current.ImageGenEnabled
+		}
+	}
+	if imageGenEnabled && s.Imagine != nil && s.Imagine.AccountCount() > 0 {
 		if isImageGenProxyPath(r.URL.Path) {
 			if handled, engineErr := s.handleImageGenViaEngine(w, r); handled {
 				if engineErr != nil {

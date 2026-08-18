@@ -1126,6 +1126,27 @@ func (s *Server) handleImagineGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, res, http.StatusBadGateway)
 		return
 	}
+	// 额外复制一份到系统下载目录，方便用户直接使用。
+	savedPath := ""
+	if len(res.Images) > 0 {
+		if dlPath, dlErr := saveImageToDownloads(filepath.Join(s.Imagine.outputsDir, path.Base(res.Images[0]))); dlErr == nil {
+			savedPath = dlPath
+		} else {
+			fmt.Fprintf(os.Stderr, "grok_switch: save image to downloads: %v\n", dlErr)
+		}
+	}
+	if savedPath != "" {
+		writeJSON(w, map[string]any{
+			"ok":         true,
+			"images":     res.Images,
+			"model_name": res.ModelName,
+			"width":      res.Width,
+			"height":     res.Height,
+			"account":    res.Account,
+			"saved_to":   savedPath,
+		})
+		return
+	}
 	writeJSON(w, res)
 }
 

@@ -240,6 +240,7 @@ type ImagineResult struct {
 	Account    string   `json:"account"`
 	ErrCode    string   `json:"err_code,omitempty"`
 	ErrMsg     string   `json:"err_msg,omitempty"`
+	SavedTo    string   `json:"saved_to,omitempty"` // 额外复制到下载目录的路径
 }
 
 // Generate 使用账号轮询生成图片。prompt 为提示词，model 为 grok-imagine-image/quality，

@@ -145,3 +145,22 @@ body: {"model":"grok-imagine-image","prompt":"...","n":1,"size":"1024x1024"}
 实测：纯 API 请求（不带任何 tools）"Create an image of Superman" → 模型
 自动调用 `generate_image` → 返回 960x960 图片（base64 内嵌）；带自有
 工具 + 生图意图的请求 → 自有 `tool_calls` 保留、图片同时返回。
+
+## 生图能力全局开关
+
+旧的"独立生图供应商"表单（BaseURL / API Key / Backend / 模型 / 拉取模型）
+随账号池接管而废弃，替换为**全局开关**（`settings.image_gen_enabled`，
+默认开启，供应商表单与设置页均可切换）：
+
+- **开启**：注册 `[mcp_servers.image_generator]`（Grok CLI 原生 MCP）、代理
+  接管内置 image_gen / image_edit、chat/completions 注入 generate_image
+  工具——三条通道全部可用，走账号池。
+- **关闭**：移除 `[mcp_servers]` 注册、代理不接管、不注入任何工具声明——
+  模型回到无生图工具的原始状态（不注入任何"没有生图"说明，不做硬约束）。
+- 切换**即时生效**（`/api/settings` 更新时同步 config.toml 与代理行为），
+  无需重启；对所有供应商生效（生图是全局能力，与 profile 无关）。
+- 供应商表单的生图区域保留账号池状态展示与「测试生图」（走
+  `/api/imagine/generate` 账号池）。
+
+旧的 profile `image_generation` 字段（BaseURL/Key 等）不再由 UI 编辑，
+结构保留以兼容旧数据导入。

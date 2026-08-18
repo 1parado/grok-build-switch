@@ -34,6 +34,43 @@ func EnsureMcpServerToFile(path string, cfg McpServerConfig) error {
 	return atomicWrite(path, next)
 }
 
+// RemoveMcpServerToFile 从 config.toml 删除 [mcp_servers.<name>] 段
+// （生图能力关闭时移除注册，让模型回到无生图工具的原始状态）。
+func RemoveMcpServerToFile(path, name string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	next := RemoveMcpServerText(data, name)
+	if string(next) == string(data) {
+		return nil
+	}
+	return atomicWrite(path, next)
+}
+
+// RemoveMcpServerText 是 RemoveMcpServerToFile 的纯文本实现。
+func RemoveMcpServerText(data []byte, name string) []byte {
+	header := "mcp_servers." + name
+	lines := splitLines(string(data))
+	var out []string
+	for i := 0; i < len(lines); {
+		if parseHeader(lines[i]) == header {
+			i = skipSection(lines, i+1)
+			continue
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	result := strings.TrimRight(strings.Join(out, "\n"), "\n")
+	if result == "" {
+		return []byte{}
+	}
+	return []byte(result + "\n")
+}
+
 // EnsureMcpServerText 是 EnsureMcpServerToFile 的纯文本实现。
 // 幂等：已存在匹配段时更新它；重复段（异常情况）只保留第一个。
 // 同时清理 grok_switch 曾用过的旧服务器名（仅当命令指向同一可执行文件，

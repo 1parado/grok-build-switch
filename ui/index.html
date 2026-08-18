@@ -170,40 +170,16 @@
             <section class="mediaModelTools" aria-labelledby="imageGenTitle">
               <div class="rowBetween">
                 <div>
-                  <strong id="imageGenTitle">生图模型</strong>
-                  <p class="muted tiny">用于 Grok 的 /imagine 与 image_gen。启用后会经本机 /imagine/v1 代理注入独立 API Key（Grok 客户端本身会带聊天 Key），真实上游地址与 Key 写在下方。</p>
+                  <strong id="imageGenTitle">生图能力</strong>
+                  <p class="muted tiny">全局开关：开启后模型可通过 MCP 工具（generate_image）与内置 image_gen 生成图片，走本机账号池（无需官方订阅）；关闭后模型回到无生图能力的原始状态。对所有供应商生效。</p>
                 </div>
-                <label class="check"><input type="checkbox" id="imageGenEnabled"> 启用 /imagine</label>
+                <label class="check"><input type="checkbox" id="imageGenEnabled"> 启用生图</label>
               </div>
-              <fieldset id="imageGenFields" class="imageGenFields" disabled>
-                <div class="formGrid">
-                  <label class="field span2">生图服务地址
-                    <input id="imageGenBaseUrl" class="mono" placeholder="https://api.example.com/v1">
-                  </label>
-                  <label class="field span2">生图 API Key
-                    <div class="keyRow">
-                      <input id="imageGenApiKey" type="password" autocomplete="off" placeholder="粘贴生图服务的 API Key">
-                      <button type="button" id="toggleImageGenKey" class="btn sm">显示</button>
-                    </div>
-                  </label>
-                  <label class="field">API Backend
-                    <select id="imageGenApiBackend" class="mono">
-                      <option value="chat_completions">chat_completions</option>
-                      <option value="responses">responses</option>
-                      <option value="messages">messages</option>
-                    </select>
-                  </label>
-                  <label class="field">生图模型
-                    <input id="imageGenModel" class="mono" list="imageGenModelOptions" placeholder="拉取后选择或手动输入">
-                    <datalist id="imageGenModelOptions"></datalist>
-                  </label>
-                </div>
-                <div class="inlineActions wrap imageGenActions">
-                  <button type="button" id="fetchImageModelsBtn" class="btn sm">拉取生图模型</button>
-                  <button type="button" id="testImageModelBtn" class="btn sm">测试生图</button>
-                  <p id="imageGenStatus" class="connStatus" hidden></p>
-                </div>
-              </fieldset>
+              <div class="inlineActions wrap imageGenActions">
+                <span id="imageGenAccountStatus" class="muted tiny"></span>
+                <button type="button" id="testImageModelBtn" class="btn sm">测试生图</button>
+                <p id="imageGenStatus" class="connStatus" hidden></p>
+              </div>
             </section>
             <input id="modelSearchInput" class="mono search" placeholder="搜索上游模型…">
             <div id="modelSuggestions" class="chips"></div>

@@ -593,6 +593,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err, http.StatusInternalServerError)
 			return
 		}
+		// 生图开关变化时即时注册/移除 Grok CLI 原生 MCP 服务器，无需重启。
+		if updated.ImageGenEnabled != current.ImageGenEnabled {
+			if err := s.syncImageGenMcpServer(updated.ImageGenEnabled); err != nil {
+				fmt.Fprintf(os.Stderr, "grok_switch: sync image gen mcp server: %v\n", err)
+			}
+		}
 		s.changed()
 		writeJSON(w, updated)
 	default:
@@ -1209,6 +1215,22 @@ func (s *Server) imagineAccountCount() int {
 		return 0
 	}
 	return s.Imagine.AccountCount()
+}
+
+// syncImageGenMcpServer 按生图开关即时注册/移除 Grok CLI 原生 [mcp_servers]
+// 条目，让开关无需重启即生效（关闭时模型回到无生图工具的原始状态）。
+func (s *Server) syncImageGenMcpServer(enabled bool) error {
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", s.ActualPort)
+	cfg := grokconfig.McpServerConfig{
+		Name:    "image_generator",
+		Command: s.ExePath,
+		Args:    []string{"mcp"},
+		Env:     map[string]string{"GROK_SWITCH_BASE_URL": baseURL},
+	}
+	if enabled {
+		return grokconfig.EnsureMcpServerToFile(s.Paths.GrokConfig, cfg)
+	}
+	return grokconfig.RemoveMcpServerToFile(s.Paths.GrokConfig, "image_generator")
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

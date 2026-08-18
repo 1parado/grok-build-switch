@@ -152,16 +152,19 @@ func main() {
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 
-	// 通过 Grok CLI 原生的 [mcp_servers] 配置注册生图 MCP 服务器：Grok CLI
-	// 自己 spawn `grok_switch_gui mcp` 并把 generate_image 暴露给模型，
-	// 无需在 ACP 客户端侧注入。每次启动同步一次，保证可执行路径始终正确。
-	if err := grokconfig.EnsureMcpServerToFile(resolved.GrokConfig, grokconfig.McpServerConfig{
-		Name:    "image_generator",
-		Command: exePath,
-		Args:    []string{"mcp"},
-		Env:     map[string]string{"GROK_SWITCH_BASE_URL": url},
-	}); err != nil {
-		crash.Logf("register mcp server failed: %v", err)
+	// 生图能力全局开关：开启时通过 Grok CLI 原生 [mcp_servers] 注册生图
+	// MCP 服务器；关闭时移除注册，模型回到无生图工具的原始状态。
+	if currentSettings.ImageGenEnabled {
+		if err := grokconfig.EnsureMcpServerToFile(resolved.GrokConfig, grokconfig.McpServerConfig{
+			Name:    "image_generator",
+			Command: exePath,
+			Args:    []string{"mcp"},
+			Env:     map[string]string{"GROK_SWITCH_BASE_URL": url},
+		}); err != nil {
+			crash.Logf("register mcp server failed: %v", err)
+		}
+	} else if err := grokconfig.RemoveMcpServerToFile(resolved.GrokConfig, "image_generator"); err != nil {
+		crash.Logf("remove mcp server failed: %v", err)
 	}
 
 	if err := runWailsWindow(url, resolved.DataDir); err != nil {

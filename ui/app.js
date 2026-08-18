@@ -5135,15 +5135,11 @@ function fillForm(profile) {
   $("profileApiKey").value = profile.api_key || firstModelKey(profile) || "";
   $("upstreamFormat").value = upstreamFormatValue(profile.upstream_format);
   $("templateSelect").value = templateValue(profile);
-  const image = imageGenerationOf(profile);
-  $("imageGenEnabled").checked = image.enabled;
-  $("imageGenBaseUrl").value = image.base_url;
-  $("imageGenApiKey").value = image.api_key;
-  $("imageGenApiBackend").value = image.api_backend;
-  $("imageGenModel").value = image.model;
-  state.imageAvailableModels = unique([...(image.available_models || []), image.model]);
-  renderImageModelOptions();
+  // 生图能力是全局开关（settings），与单个供应商无关。
+  const imageGenEnabled = !!(state.settings && state.settings.image_gen_enabled);
+  if ($("imageGenEnabled")) $("imageGenEnabled").checked = imageGenEnabled;
   syncImageGenUI();
+  refreshImageGenAccountStatus();
   state.availableModels = unique([
     ...(profile.available_models || []),
     ...(profile.models || []).map((model) => model.name || model.model),
@@ -5337,8 +5333,23 @@ function isMediaModelID(value) {
 }
 
 function syncImageGenUI() {
+  // 生图能力是全局开关；切换后由 setImageGenEnabled 持久化到 settings。
   const enabled = !!$("imageGenEnabled")?.checked;
-  if ($("imageGenFields")) $("imageGenFields").disabled = !enabled;
+  if ($("imageGenFields")) $("imageGenFields").hidden = !enabled;
+}
+
+async function setImageGenEnabled(enabled) {
+  const next = { ...(state.settings || {}) };
+  next.image_gen_enabled = !!enabled;
+  state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify(next) });
+  toast(enabled ? "已启用生图（账号池 MCP 工具）" : "已关闭生图能力，模型回到无生图状态", "success");
+}
+
+function refreshImageGenAccountStatus() {
+  const el = $("imageGenAccountStatus");
+  if (!el) return;
+  const count = Number((state.status && state.status.imagine_accounts) || 0);
+  el.textContent = count > 0 ? `账号池：${count} 个可用账号` : "账号池：无可用账号，生图不可用";
 }
 
 function renderImageModelOptions() {
@@ -5691,14 +5702,6 @@ function readForm() {
       explore: $("subagentsExploreModel")?.value?.trim() || "",
       plan: $("subagentsPlanModel")?.value?.trim() || "",
     },
-    image_generation: {
-      enabled: !!$("imageGenEnabled")?.checked,
-      base_url: $("imageGenBaseUrl")?.value.trim() || "",
-      api_key: $("imageGenApiKey")?.value.trim() || "",
-      api_backend: $("imageGenApiBackend")?.value || "chat_completions",
-      model: $("imageGenModel")?.value.trim() || "",
-      available_models: unique(state.imageAvailableModels || []),
-    },
     models: rows.map((row) => {
       const get = (field) => row.querySelector(`[data-field="${field}"]`)?.value.trim() || "";
       const num = (field) => Number(get(field) || 0);
@@ -5764,11 +5767,6 @@ async function saveCurrentProfile() {
   const profile = readForm();
   if (!profile.name) throw new Error("请填写名称");
   if (!profile.base_url) throw new Error("请填写服务地址");
-  if (profile.image_generation?.enabled) {
-    if (!profile.image_generation.base_url) throw new Error("请填写生图服务地址");
-    if (!profile.image_generation.api_key) throw new Error("请填写生图 API Key");
-    if (!profile.image_generation.model) throw new Error("请选择或填写生图模型");
-  }
   const chatRoles = [
     profile.default_model,
     profile.web_search_model,
@@ -6078,62 +6076,29 @@ $("addModelBtn").onclick = () => {
   addModelCard();
   syncEnabledModelList();
 };
-$("imageGenEnabled")?.addEventListener("change", () => {
+$("imageGenEnabled")?.addEventListener("change", async () => {
   syncImageGenUI();
-  scheduleProviderPreview();
+  const enabled = !!$("imageGenEnabled")?.checked;
+  try {
+    await setImageGenEnabled(enabled);
+  } catch (err) {
+    $("imageGenEnabled").checked = !enabled;
+    syncImageGenUI();
+    toast(`切换失败：${err.message || err}`, "error");
+  }
 });
-["imageGenBaseUrl", "imageGenApiKey", "imageGenModel"].forEach((id) => {
-  $(id)?.addEventListener("input", () => {
-    scheduleProviderPreview();
-  });
-});
-$("imageGenApiBackend")?.addEventListener("change", scheduleProviderPreview);
-$("toggleImageGenKey")?.addEventListener("click", () => {
-  const input = $("imageGenApiKey");
-  input.type = input.type === "password" ? "text" : "password";
-  $("toggleImageGenKey").textContent = input.type === "password" ? "显示" : "隐藏";
-});
-$("fetchImageModelsBtn")?.addEventListener("click", () => run(async () => {
-  const image = readForm().image_generation;
-  if (!image.enabled) throw new Error("请先启用 /imagine");
-  if (!image.base_url) throw new Error("先填写生图服务地址");
-  if (!image.api_key) throw new Error("先填写生图 API Key");
-  const result = await api("/api/models/fetch", {
-    method: "POST",
-    body: JSON.stringify({
-      base_url: image.base_url,
-      api_key: image.api_key,
-      upstream_format: image.api_backend,
-    }),
-  });
-  state.imageAvailableModels = unique(result.models || []);
-  renderImageModelOptions();
-  showImageGenStatus(true, `已获取 ${state.imageAvailableModels.length} 个模型`);
-  toast(`获取到 ${state.imageAvailableModels.length} 个生图模型`, "success");
-}, { button: $("fetchImageModelsBtn"), busyLabel: "拉取中…" }));
 $("testImageModelBtn")?.addEventListener("click", () => run(async () => {
-  const image = readForm().image_generation;
-  if (!image.enabled) throw new Error("请先启用 /imagine");
-  if (!image.base_url) throw new Error("先填写生图服务地址");
-  if (!image.api_key) throw new Error("先填写生图 API Key");
-  if (!image.model) throw new Error("请选择或填写生图模型");
-  const result = await api("/api/connection/test", {
+  const result = await api("/api/imagine/generate", {
     method: "POST",
-    body: JSON.stringify({
-      base_url: image.base_url,
-      api_key: image.api_key,
-      api_backend: image.api_backend,
-      model: image.model,
-      purpose: "image_generation",
-    }),
+    body: JSON.stringify({ prompt: "测试生图：一只可爱的小猫", model: "grok-imagine-image", aspect_ratio: "1:1" }),
   });
   if (!result.ok) {
-    showImageGenStatus(false, `失败 ${result.latency_ms}ms：${result.error || "未知错误"}`);
-    throw new Error(result.error || "生图测试失败");
+    showImageGenStatus(false, `失败：${result.err_msg || "未知错误"}`);
+    throw new Error(result.err_msg || "生图测试失败");
   }
-  showImageGenStatus(true, `生图成功 · ${result.latency_ms}ms · ${result.model}`);
-  toast(`生图测试成功（${result.latency_ms}ms）`, "success");
-}, { button: $("testImageModelBtn"), busyLabel: "生成中…" }));
+  showImageGenStatus(true, `生图成功（${result.width}x${result.height}，账号 ${result.account}）`);
+  toast("生图测试成功", "success");
+}, { button: $("testImageModelBtn"), busyLabel: "生图中…" }));
 $("testConnectionBtn").onclick = () => run(async () => {
   const current = readForm();
   if (!current.base_url) throw new Error("先填写服务地址");

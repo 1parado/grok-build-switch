@@ -58,9 +58,9 @@ func TestIndependentImageGenerationControlsHaveClientHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 生图能力全局开关：开关 + 账号池状态 + 测试生图按钮。
 	for _, id := range []string{
-		"imageGenEnabled", "imageGenFields", "imageGenBaseUrl", "imageGenApiKey",
-		"imageGenApiBackend", "imageGenModel", "fetchImageModelsBtn", "testImageModelBtn",
+		"imageGenEnabled", "testImageModelBtn", "imageGenAccountStatus",
 	} {
 		if !bytes.Contains(htmlData, []byte(`id="`+id+`"`)) {
 			t.Fatalf("%s control not found", id)
@@ -69,20 +69,20 @@ func TestIndependentImageGenerationControlsHaveClientHandlers(t *testing.T) {
 			t.Fatalf("%s client handler not found", id)
 		}
 	}
+	// 已废弃的独立生图供应商控件（BaseURL/Key/Backend/模型/拉取）不得再出现。
 	for _, removed := range []string{
 		"featureImageGen", "featureImageEdit", "featureVideoGen",
 		"featureImageGenModel", "featureImageEditModel", "featureVideoGenModel",
 		"addImagineImageBtn", "addImagineImageQualityBtn", "addImagineVideoBtn",
+		"imageGenBaseUrl", "imageGenApiKey", "imageGenApiBackend",
+		"imageGenModel", "fetchImageModelsBtn",
 	} {
 		if bytes.Contains(htmlData, []byte(removed)) {
 			t.Fatalf("removed media preset control %s is still present", removed)
 		}
 	}
-	if !bytes.Contains(htmlData, []byte(`id="imageGenFields" class="imageGenFields" disabled`)) {
-		t.Fatal("independent image fields should be disabled by default")
-	}
-	if !bytes.Contains(appData, []byte(`purpose: "image_generation"`)) {
-		t.Fatal("image generation test must use the dedicated probe")
+	if !bytes.Contains(appData, []byte(`api("/api/imagine/generate"`)) {
+		t.Fatal("image generation test must use the account-pool endpoint")
 	}
 }
 

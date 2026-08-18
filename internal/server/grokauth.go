@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -185,6 +188,32 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, http.StatusBadGateway)
 		return
 	}
+	// 内置 image_gen / image_edit 工具走账号池，绕开官方额度限制。
+	// 生成（images/generations）由账号池引擎接管；编辑（images/edits）
+	// 需要参考图且当前引擎未实现编辑协议，返回明确错误引导模型改用
+	// 重新生成，避免 403 让模型困惑。
+	if s.Imagine != nil && s.Imagine.AccountCount() > 0 {
+		if isImageGenProxyPath(r.URL.Path) {
+			if handled, engineErr := s.handleImageGenViaEngine(w, r); handled {
+				if engineErr != nil {
+					writeError(w, engineErr, http.StatusBadGateway)
+				}
+				return
+			}
+		} else if isImageEditProxyPath(r.URL.Path) {
+			s.handleImageEditUnavailable(w)
+			return
+		} else if isChatCompletionsProxyPath(r.URL.Path) {
+			// OpenAI 兼容 Harness 场景：注入 generate_image 工具声明，
+			// 模型发起生图调用时代为执行并返回最终结果。
+			if handled, err := s.handleChatCompletionsWithImageGen(w, r, token); handled {
+				if err != nil {
+					writeError(w, err, http.StatusBadGateway)
+				}
+				return
+			}
+		}
+	}
 	target, err := url.Parse(grokauth.UpstreamURL())
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
@@ -234,6 +263,165 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	proxy.ServeHTTP(w, proxyRequest)
+}
+
+// isImageGenProxyPath 判断是否为内置 image_gen 工具的图片生成请求
+// （Grok CLI 以 OpenAI Images API 格式 POST /v1/images/generations）。
+func isImageGenProxyPath(requestPath string) bool {
+	suffix := strings.TrimPrefix(requestPath, "/grok/v1")
+	return strings.HasSuffix(suffix, "/images/generations")
+}
+
+// isImageEditProxyPath 判断是否为内置 image_edit 工具的图片编辑请求。
+func isImageEditProxyPath(requestPath string) bool {
+	suffix := strings.TrimPrefix(requestPath, "/grok/v1")
+	return strings.HasSuffix(suffix, "/images/edits")
+}
+
+// handleImageEditUnavailable 在账号池引擎不支持图片编辑协议时，返回可读的
+// 错误信息，引导模型改用 generate_image 重新生成，而不是撞官方额度 403。
+func (s *Server) handleImageEditUnavailable(w http.ResponseWriter) {
+	writeJSONStatus(w, map[string]string{
+		"code":  "image_edit_unavailable",
+		"error": "图片编辑（image_edit）当前不可用：本地账号池仅支持全新生成，不支持基于参考图的修改。请不要重试 image_edit，也不要查找、读取或传递任何参考图文件（不需要参考图）。请直接调用 generate_image 工具，撰写包含所需风格、氛围、构图等完整细节的新提示词重新生成图片；如需保留原图主体或构图，把这些描述写进新提示词即可。",
+	}, http.StatusUnprocessableEntity)
+}
+
+// handleImageGenViaEngine 用本地账号池（ImagineEngine）执行一次图片生成，
+// 并按 OpenAI Images API 格式返回，使内置 image_gen 工具无需官方额度。
+// 返回 handled=false 时表示未接管（视频模型或请求不完整），调用方应继续
+// 走官方代理；此时请求体已还原。
+func (s *Server) handleImageGenViaEngine(w http.ResponseWriter, r *http.Request) (bool, error) {
+	if r.Method != http.MethodPost || s.Imagine == nil {
+		return false, nil
+	}
+	var req struct {
+		Model       string `json:"model"`
+		Prompt      string `json:"prompt"`
+		N           int    `json:"n"`
+		Size        string `json:"size"`
+		AspectRatio string `json:"aspect_ratio"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	_ = r.Body.Close()
+	if err != nil {
+		return false, nil
+	}
+	// 非 JSON（如 multipart 图片编辑）不接管，还原后转发官方。
+	if !strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "json") {
+		restoreRequestBody(r, raw)
+		return false, nil
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		restoreRequestBody(r, raw)
+		return false, nil
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "grok-imagine-image"
+	}
+	// 视频生成仍走官方（当前账号池引擎仅支持静态图）。
+	if strings.Contains(strings.ToLower(model), "video") {
+		restoreRequestBody(r, raw)
+		return false, nil
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		return true, fmt.Errorf("prompt 不能为空")
+	}
+	aspect := strings.TrimSpace(req.AspectRatio)
+	if aspect == "" {
+		aspect = req.Size
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+	res := s.Imagine.Generate(ctx, prompt, model, imageSizeToAspectRatio(aspect))
+	if !res.OK {
+		return true, fmt.Errorf("%s: %s", res.ErrCode, res.ErrMsg)
+	}
+	if len(res.Images) == 0 {
+		return true, fmt.Errorf("未收到图片数据")
+	}
+	imageURL := res.Images[0]
+	data, readErr := os.ReadFile(filepath.Join(s.Imagine.outputsDir, path.Base(imageURL)))
+	if readErr != nil {
+		return true, fmt.Errorf("读取生成的图片失败: %w", readErr)
+	}
+	// 额外复制一份到系统下载目录，方便用户直接使用。
+	savedPath := ""
+	if dlPath, dlErr := saveImageToDownloads(filepath.Join(s.Imagine.outputsDir, path.Base(imageURL))); dlErr == nil {
+		savedPath = dlPath
+	} else {
+		fmt.Fprintf(os.Stderr, "grok_switch: save image to downloads: %v\n", dlErr)
+	}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", s.ActualPort)
+	writeJSON(w, map[string]any{
+		"created": time.Now().Unix(),
+		"data": []map[string]any{{
+			"url":      baseURL + imageURL,
+			"b64_json": base64.StdEncoding.EncodeToString(data),
+			"model":    res.ModelName,
+		}},
+		"saved_to": savedPath,
+	})
+	return true, nil
+}
+
+// saveImageToDownloads 把生成图片复制一份到系统默认下载目录
+// （~/Downloads，Windows 为 %USERPROFILE%\Downloads），文件名保持唯一。
+func saveImageToDownloads(srcPath string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	downloadDir := filepath.Join(home, "Downloads")
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", err
+	}
+	dst := filepath.Join(downloadDir, filepath.Base(srcPath))
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+func restoreRequestBody(r *http.Request, raw []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	r.ContentLength = int64(len(raw))
+	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(raw)))
+}
+
+// imageSizeToAspectRatio 把 OpenAI Images API 的 size 参数（比例字符串或
+// 像素尺寸）映射到引擎的 aspect ratio；不认识的尺寸回退 1:1。
+func imageSizeToAspectRatio(size string) string {
+	switch strings.ToLower(strings.TrimSpace(size)) {
+	case "16:9", "1792x1024", "1920x1080":
+		return "16:9"
+	case "9:16", "1024x1792", "1080x1920":
+		return "9:16"
+	case "4:3", "1280x960", "1152x896", "1440x1080":
+		return "4:3"
+	case "3:4", "896x1152", "960x1280", "1080x1440":
+		return "3:4"
+	case "3:2", "1344x896", "1536x1024", "1440x960":
+		return "3:2"
+	case "2:3", "896x1344", "1024x1536", "960x1440":
+		return "2:3"
+	case "4:5", "1152x1440", "896x1120":
+		return "4:5"
+	case "5:4", "1440x1152", "1120x896":
+		return "5:4"
+	case "21:9", "2560x1080", "1792x768":
+		return "21:9"
+	case "9:21", "1080x2560", "768x1792":
+		return "9:21"
+	default:
+		return "1:1"
+	}
 }
 
 // grokAuthModelsFetch is the payload returned by /api/models/fetch when the

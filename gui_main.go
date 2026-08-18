@@ -19,10 +19,12 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"grok_switch/internal/agentbridge"
+	grokconfig "grok_switch/internal/config"
 	"grok_switch/internal/cpamint"
 	"grok_switch/internal/crash"
 	"grok_switch/internal/grokauth"
 	"grok_switch/internal/grokpool"
+	"grok_switch/internal/mcpserver"
 	"grok_switch/internal/paths"
 	"grok_switch/internal/profiles"
 	"grok_switch/internal/registrar"
@@ -35,6 +37,10 @@ import (
 )
 
 func main() {
+	// MCP 子进程：由 Grok Agent 以 `grok_switch_gui mcp` 拉起，暴露生图工具。
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		os.Exit(mcpserver.Run(os.Args[2:]))
+	}
 	defer crash.RecoverMainThread()
 
 	resolved, err := paths.Resolve()
@@ -145,6 +151,19 @@ func main() {
 	}()
 
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+
+	// 通过 Grok CLI 原生的 [mcp_servers] 配置注册生图 MCP 服务器：Grok CLI
+	// 自己 spawn `grok_switch_gui mcp` 并把 generate_image 暴露给模型，
+	// 无需在 ACP 客户端侧注入。每次启动同步一次，保证可执行路径始终正确。
+	if err := grokconfig.EnsureMcpServerToFile(resolved.GrokConfig, grokconfig.McpServerConfig{
+		Name:    "image_generator",
+		Command: exePath,
+		Args:    []string{"mcp"},
+		Env:     map[string]string{"GROK_SWITCH_BASE_URL": url},
+	}); err != nil {
+		crash.Logf("register mcp server failed: %v", err)
+	}
+
 	if err := runWailsWindow(url, resolved.DataDir); err != nil {
 		guiFatal(err)
 	}

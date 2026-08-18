@@ -252,7 +252,7 @@ func IsMediaModel(model ModelDef) bool {
 	if id == "" {
 		id = strings.ToLower(strings.TrimSpace(model.Name))
 	}
-	return id == "grok-imagine-image" || id == "grok-imagine-image-quality" || id == "grok-imagine-video"
+	return id == "grok-imagine-image" || id == "grok-imagine-image-lite" || id == "grok-imagine-image-quality" || id == "grok-imagine-video"
 }
 
 func migrateImageGeneration(p Profile) *ImageGenerationConfig {

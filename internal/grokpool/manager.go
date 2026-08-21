@@ -22,6 +22,7 @@ func NewManager(dir string) (*Manager, error) {
 		dir:         dir,
 		indexPath:   filepath.Join(dir, "pool.json"),
 		accountsDir: filepath.Join(dir, "accounts"),
+		stickyPath:  filepath.Join(dir, "sticky.json"),
 		client:      &http.Client{Timeout: 25 * time.Second},
 		upstreamURL: grokauth.UpstreamURL(),
 		wake:        make(chan struct{}, 1),
@@ -34,6 +35,7 @@ func NewManager(dir string) (*Manager, error) {
 	if err := m.load(); err != nil {
 		return nil, err
 	}
+	m.loadSticky()
 	normalizedProxy, transport, err := netproxy.BuildTransport(m.state.Settings.ProxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("读取号池代理设置: %w", err)
@@ -57,6 +59,8 @@ func (m *Manager) Start() {
 	m.mu.Unlock()
 	go m.scheduler()
 	go m.watchLoop()
+	m.runWG.Add(1)
+	go m.stickyFlushLoop()
 	m.signalWake()
 }
 
@@ -85,6 +89,10 @@ func (m *Manager) Close() {
 	}
 	<-m.done
 	m.runWG.Wait()
+	// 兜底：刷盘循环停止后若仍有绑定写入（如关闭中的最后几个请求），补一次落盘。
+	if err := m.flushSticky(); err != nil {
+		fmt.Fprintf(os.Stderr, "grok_switch: flush sticky bindings on close: %v\n", err)
+	}
 }
 
 func (m *Manager) Status() Status {

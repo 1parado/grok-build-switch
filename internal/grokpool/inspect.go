@@ -141,6 +141,25 @@ func (m *Manager) ObserveResponse(id string, status int, body string) {
 	}
 	parsed := extractProbeError(body)
 	classified := classify(status, parsed.Code, parsed.Message, false)
+	m.recordObservation(id, classified, parsed, status)
+}
+
+// ObserveStreamError 记录 HTTP 200 响应中流式错误事件暴露的账号健康信号
+// （如免费额度耗尽、认证失效），让坏号即时隔离而不必等下一轮巡检。
+// 无法识别的错误归类为 unknown，不落库，避免把网络噪音当成账号问题。
+func (m *Manager) ObserveStreamError(id string, body string) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(body) == "" {
+		return
+	}
+	parsed := extractProbeError(body)
+	classified := classify(0, parsed.Code, parsed.Message, false)
+	if classified.Name == "unknown" {
+		return
+	}
+	m.recordObservation(id, classified, parsed, 0)
+}
+
+func (m *Manager) recordObservation(id string, classified classification, parsed probeError, status int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i := range m.state.Accounts {
@@ -151,7 +170,9 @@ func (m *Manager) ObserveResponse(id string, status int, body string) {
 		account.Classification = classified.Name
 		account.Action = classified.Action
 		account.Reason = classified.Reason
-		account.HTTPStatus = status
+		if status > 0 {
+			account.HTTPStatus = status
+		}
 		account.ErrorCode = parsed.Code
 		account.ErrorMessage = parsed.Message
 		account.LastInspected = time.Now().UTC()

@@ -54,13 +54,15 @@ type Server struct {
 	UpdateChecker *updatecheck.Checker
 	UpdateState   *updatecheck.PreferenceStore
 	ActualPort    int
-	onChanged     func()
-	listenerMu    sync.Mutex
-	listener      net.Listener
-	bindHost      string
-	httpServer    *http.Server
-	loginMu       sync.Mutex
-	loginFails    map[string]loginFailure
+	// GrokUpstream optionally overrides cli-chat-proxy for tests.
+	GrokUpstream string
+	onChanged    func()
+	listenerMu   sync.Mutex
+	listener     net.Listener
+	bindHost     string
+	httpServer   *http.Server
+	loginMu      sync.Mutex
+	loginFails   map[string]loginFailure
 
 	reloginMu   sync.Mutex
 	reloginSeq  int64

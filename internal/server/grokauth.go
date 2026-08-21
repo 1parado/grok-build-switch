@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -163,29 +161,35 @@ func (s *Server) handleGrokAuthRefresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
-	var token string
-	var poolAccountID string
-	var err error
-	authorized := false
-	if s.GrokPool != nil && s.GrokPool.Authorized(r) {
-		sessionID := firstNonEmptyServer(r.Header.Get("x-grok-conv-id"), r.Header.Get("x-session-id"))
-		token, poolAccountID, err = s.GrokPool.NextToken(r.Context(), sessionID)
-		if err != nil && s.singleGrokAuthConfigured() {
-			poolAccountID = ""
-			token, err = s.GrokAuth.Token(r.Context())
-		}
-		authorized = true
-	} else if s.GrokAuth != nil && s.GrokAuth.Authorized(r) {
-		token, err = s.GrokAuth.Token(r.Context())
-		authorized = true
-	}
-	if !authorized {
+	if !s.grokProxyAuthorized(r) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="grok_switch"`)
 		writeError(w, fmt.Errorf("无效的本地 API Key"), http.StatusUnauthorized)
 		return
 	}
+
+	var body []byte
+	if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+		raw, readErr := io.ReadAll(io.LimitReader(r.Body, grokProxyMaxBody+1))
+		_ = r.Body.Close()
+		if readErr != nil {
+			writeError(w, fmt.Errorf("读取请求体失败: %w", readErr), http.StatusBadRequest)
+			return
+		}
+		if len(raw) > grokProxyMaxBody {
+			writeError(w, fmt.Errorf("请求体过大"), http.StatusRequestEntityTooLarge)
+			return
+		}
+		body = raw
+		restoreRequestBody(r, body)
+	}
+
+	token, poolAccountID, lostContinuation, err := s.grokProxyToken(r.Context(), r, body)
 	if err != nil {
 		writeError(w, err, http.StatusBadGateway)
+		return
+	}
+	if isWebSocketUpgrade(r) {
+		writeError(w, fmt.Errorf("本地 Grok 代理不支持 WebSocket 升级请求，请使用 REST/SSE 接口"), http.StatusNotImplemented)
 		return
 	}
 	// 生图能力全局开关：开启且账号池可用时接管内置 image_gen / image_edit
@@ -218,55 +222,7 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	target, err := url.Parse(grokauth.UpstreamURL())
-	if err != nil {
-		writeError(w, err, http.StatusInternalServerError)
-		return
-	}
-
-	proxyRequest := r.Clone(r.Context())
-	suffix := strings.TrimPrefix(r.URL.Path, "/grok/v1")
-	if suffix == "" {
-		suffix = "/"
-	}
-	proxyRequest.URL.Path = suffix
-	proxyRequest.URL.RawPath = ""
-
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	if s.GrokPool != nil {
-		if transport := s.GrokPool.Transport(); transport != nil {
-			proxy.Transport = transport
-		}
-	}
-	originalDirector := proxy.Director
-	proxy.Director = func(out *http.Request) {
-		originalDirector(out)
-		out.Host = target.Host
-		out.Header.Del("x-api-key")
-		out.Header.Set("Authorization", "Bearer "+token)
-		out.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
-		out.Header.Set("x-grok-client-version", "0.2.93")
-		out.Header.Set("User-Agent", "xai-grok-workspace/0.2.93")
-	}
-	proxy.FlushInterval = -1
-	proxy.ModifyResponse = func(response *http.Response) error {
-		if s.GrokPool == nil || poolAccountID == "" || response.StatusCode < 400 {
-			return nil
-		}
-		raw, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-		if readErr != nil {
-			return nil
-		}
-		response.Body = io.NopCloser(io.MultiReader(bytes.NewReader(raw), response.Body))
-		s.GrokPool.ObserveResponse(poolAccountID, response.StatusCode, string(raw))
-		return nil
-	}
-	proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, proxyErr error) {
-		if !errors.Is(proxyErr, context.Canceled) {
-			writeError(writer, fmt.Errorf("Grok 上游请求失败: %w", proxyErr), http.StatusBadGateway)
-		}
-	}
-	proxy.ServeHTTP(w, proxyRequest)
+	s.forwardGrokUpstream(w, r, token, poolAccountID, body, lostContinuation)
 }
 
 // isImageGenProxyPath 判断是否为内置 image_gen 工具的图片生成请求

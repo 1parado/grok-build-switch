@@ -134,6 +134,7 @@ type Manager struct {
 	runWG          sync.WaitGroup
 	roundRobin     atomic.Uint64
 	stores         map[string]*grokauth.Store
+	sticky         map[string]stickyBinding
 
 	// Auth-dir hot-load state (in-memory fingerprints; re-scanned after restart).
 	watchHashes     map[string]string

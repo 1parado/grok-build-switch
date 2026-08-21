@@ -500,7 +500,6 @@ func (s *Service) runOne(ctx context.Context, jobID string, config Config, provi
 	// Release the gate so the next account can acquire it immediately.
 	gate.Release()
 
-
 	if err != nil {
 		if pool != nil && proxy != "" && shouldCoolProxy(proxy, pool, err) {
 			pool.ReportFailure(proxy)

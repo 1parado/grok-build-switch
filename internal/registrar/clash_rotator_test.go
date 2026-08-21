@@ -44,12 +44,12 @@ func TestClashRotatorSelectNodeNoopWhenUnavailable(t *testing.T) {
 
 func TestJSONStringEscapes(t *testing.T) {
 	cases := map[string]string{
-		`simple`:            `"simple"`,
-		`has"quote`:         `"has\"quote"`,
-		`back\slash`:        `"back\\slash"`,
-		`🇭🇰 香港`:            `"🇭🇰 香港"`,
-		"tab\there":         `"tab\there"`,
-		"\x01control":       `"\u0001control"`,
+		`simple`:      `"simple"`,
+		`has"quote`:   `"has\"quote"`,
+		`back\slash`:  `"back\\slash"`,
+		`🇭🇰 香港`:       `"🇭🇰 香港"`,
+		"tab\there":   `"tab\there"`,
+		"\x01control": `"\u0001control"`,
 	}
 	for in, want := range cases {
 		if got := jsonString(in); got != want {

@@ -82,7 +82,7 @@ type PlanEntry struct {
 // Prefer Path (server-side file from POST /api/agent/upload) for large payloads.
 // Images may still use inline base64 Data for tiny pastes; text_file may use Text.
 type Attachment struct {
-	Kind     string `json:"kind"` // "image" | "text_file" | "path"
+	Kind     string `json:"kind"`           // "image" | "text_file" | "path"
 	Data     string `json:"data,omitempty"` // base64 (no data: prefix) for images
 	MimeType string `json:"mime_type,omitempty"`
 	Name     string `json:"name,omitempty"`
@@ -114,11 +114,11 @@ type StartOptions struct {
 }
 
 type RewindResult struct {
-	OK             bool   `json:"ok"`
-	Soft           bool   `json:"soft,omitempty"`
-	Error          string `json:"error,omitempty"`
-	UserTurnCount  int    `json:"user_turn_count"`
-	TargetIndex    int    `json:"target_index,omitempty"`
+	OK            bool   `json:"ok"`
+	Soft          bool   `json:"soft,omitempty"`
+	Error         string `json:"error,omitempty"`
+	UserTurnCount int    `json:"user_turn_count"`
+	TargetIndex   int    `json:"target_index,omitempty"`
 }
 
 type PlanDecision struct {

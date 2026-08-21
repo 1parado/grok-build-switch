@@ -23,6 +23,17 @@ jobs:
           go-version: "1.26.x"
           cache: true
 
+      - name: Format
+        shell: pwsh
+        # gofmt is the merge gate for style; CI never closes Issues.
+        run: |
+          $unformatted = gofmt -l .
+          if ($unformatted) {
+            Write-Host "::error::Files not gofmt-formatted:"
+            Write-Host $unformatted
+            throw "gofmt check failed; run 'gofmt -w .' and commit the result"
+          }
+
       - name: Vet
         shell: pwsh
         # Explicit package roots avoid walking unrelated local directories.

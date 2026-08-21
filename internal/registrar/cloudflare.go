@@ -370,4 +370,3 @@ func messageRecipient(message map[string]any) string {
 	}
 	return ""
 }
-

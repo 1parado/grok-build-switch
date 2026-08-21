@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -30,6 +29,7 @@ func NewManager(dir string) (*Manager, error) {
 		done:        make(chan struct{}),
 		stores:      make(map[string]*grokauth.Store),
 		watchHashes: make(map[string]string),
+		sticky:      make(map[string]stickyBinding),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -515,34 +515,8 @@ func (m *Manager) Authorized(r *http.Request) bool {
 }
 
 func (m *Manager) NextToken(ctx context.Context, sessionID string) (string, string, error) {
-	m.mu.Lock()
-	accounts := make([]Account, 0, len(m.state.Accounts))
-	for _, account := range m.state.Accounts {
-		if accountAvailable(account) {
-			accounts = append(accounts, account)
-		}
-	}
-	m.mu.Unlock()
-	if len(accounts) == 0 {
-		return "", "", fmt.Errorf("Grok 号池没有可用账号")
-	}
-	sort.SliceStable(accounts, func(i, j int) bool { return accounts[i].ID < accounts[j].ID })
-	start := int(m.roundRobin.Add(1)-1) % len(accounts)
-	if strings.TrimSpace(sessionID) != "" {
-		hash := sha256.Sum256([]byte(sessionID))
-		start = int(hash[0]) % len(accounts)
-	}
-	var failures []string
-	for offset := 0; offset < len(accounts); offset++ {
-		account := accounts[(start+offset)%len(accounts)]
-		token, err := m.accountStore(account.ID).Token(ctx)
-		if err == nil {
-			return token, account.ID, nil
-		}
-		failures = append(failures, firstNonEmpty(account.Email, account.ID)+": "+err.Error())
-		m.recordTokenFailure(account.ID, err)
-	}
-	return "", "", fmt.Errorf("号池账号 token 均不可用: %s", strings.Join(failures, "; "))
+	token, accountID, _, err := m.NextTokenSticky(ctx, sessionID, "")
+	return token, accountID, err
 }
 
 func (m *Manager) recordTokenFailure(id string, tokenErr error) {

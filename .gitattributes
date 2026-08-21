@@ -1,0 +1,3 @@
+# gofmt 输出 LF；强制 Go 源码在所有平台检出时保持 LF，
+# 避免 Windows 上 autocrlf 把工作区转成 CRLF 导致 gofmt -l 全量误报。
+*.go text eol=lf

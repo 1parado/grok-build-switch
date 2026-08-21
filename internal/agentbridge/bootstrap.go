@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	HistoryBootstrapMaxMsgs      = 16
-	HistoryBootstrapPerMsgChars  = 2000
-	HistoryBootstrapMaxChars     = 14000
+	HistoryBootstrapMaxMsgs     = 16
+	HistoryBootstrapPerMsgChars = 2000
+	HistoryBootstrapMaxChars    = 14000
 )
 
 // BuildHistoryBootstrap builds a one-shot continuity preamble for the agent when

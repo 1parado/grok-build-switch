@@ -29,25 +29,25 @@ const (
 )
 
 type Session struct {
-	ID                       string    `json:"id"`
-	Status                   Status    `json:"status"`
-	UserCode                 string    `json:"user_code,omitempty"`
-	VerificationURI          string    `json:"verification_uri,omitempty"`
-	VerificationURIComplete  string    `json:"verification_uri_complete,omitempty"`
-	Email                    string    `json:"email,omitempty"`
-	Path                     string    `json:"path,omitempty"`
-	Error                    string    `json:"error,omitempty"`
-	BrowserOpened            bool      `json:"browser_opened"`
-	CreatedAt                time.Time `json:"created_at"`
-	UpdatedAt                time.Time `json:"updated_at"`
-	ExpiresAt                time.Time `json:"expires_at,omitempty,omitzero"`
+	ID                      string    `json:"id"`
+	Status                  Status    `json:"status"`
+	UserCode                string    `json:"user_code,omitempty"`
+	VerificationURI         string    `json:"verification_uri,omitempty"`
+	VerificationURIComplete string    `json:"verification_uri_complete,omitempty"`
+	Email                   string    `json:"email,omitempty"`
+	Path                    string    `json:"path,omitempty"`
+	Error                   string    `json:"error,omitempty"`
+	BrowserOpened           bool      `json:"browser_opened"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
+	ExpiresAt               time.Time `json:"expires_at,omitempty,omitzero"`
 }
 
 type StartOptions struct {
-	Email     string
-	AuthDir   string
-	ProxyURL  string
-	BaseURL   string
+	Email       string
+	AuthDir     string
+	ProxyURL    string
+	BaseURL     string
 	OpenBrowser bool
 }
 

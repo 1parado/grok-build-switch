@@ -122,7 +122,7 @@ func (r *ClashRotator) SelectNode(ctx context.Context, node string) error {
 		return nil
 	}
 	encoded := url.PathEscape(r.group)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, r.controller+"/proxies/"+encoded, strings.NewReader(`{"name":`+ jsonString(node)+`}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, r.controller+"/proxies/"+encoded, strings.NewReader(`{"name":`+jsonString(node)+`}`))
 	if err != nil {
 		return err
 	}
@@ -357,4 +357,3 @@ func isUsableNode(name string) bool {
 	}
 	return strings.TrimSpace(name) != ""
 }
-

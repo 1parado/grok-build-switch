@@ -13,4 +13,4 @@ func newGUITrayController(url string, icon []byte) *guiTrayController {
 func (t *guiTrayController) register()                            {}
 func (t *guiTrayController) startup(ctx context.Context)          {}
 func (t *guiTrayController) beforeClose(ctx context.Context) bool { return false }
-func (t *guiTrayController) shutdown()                             {}
+func (t *guiTrayController) shutdown()                            {}

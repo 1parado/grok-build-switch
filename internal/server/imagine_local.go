@@ -26,8 +26,8 @@ import (
 // 因此任何人运行都会自动使用自己的账号目录，无需硬编码。
 
 const (
-	imagineOutputSubdir  = "imagine_outputs"  // 本地磁盘目录名
-	imagineOutputURLPath = "imagine-output"   // HTTP 路由前缀（与 server.go 保持一致）
+	imagineOutputSubdir  = "imagine_outputs" // 本地磁盘目录名
+	imagineOutputURLPath = "imagine-output"  // HTTP 路由前缀（与 server.go 保持一致）
 )
 
 // imagineCookie 对应浏览器导出的单条 Cookie。
@@ -43,10 +43,10 @@ type imagineCookieFile struct {
 
 // imagineAccount 是一个本地生图账号（来自 registrar/cookies 下的一个 JSON 文件）。
 type imagineAccount struct {
-	id      string
-	file    string
-	cookies map[string]string // name -> value（仅 grok.com/x.ai 相关）
-	mu      sync.Mutex
+	id           string
+	file         string
+	cookies      map[string]string // name -> value（仅 grok.com/x.ai 相关）
+	mu           sync.Mutex
 	exhausted    bool
 	successCount int
 	failCount    int
@@ -232,15 +232,15 @@ func (e *ImagineEngine) refreshCookies(acc *imagineAccount) {
 
 // ImagineResult 是一次生图的聚合结果。
 type ImagineResult struct {
-	OK         bool     `json:"ok"`
-	Images     []string `json:"images"` // 保存后的文件 URL
-	ModelName  string   `json:"model_name"`
-	Width      int      `json:"width"`
-	Height     int      `json:"height"`
-	Account    string   `json:"account"`
-	ErrCode    string   `json:"err_code,omitempty"`
-	ErrMsg     string   `json:"err_msg,omitempty"`
-	SavedTo    string   `json:"saved_to,omitempty"` // 额外复制到下载目录的路径
+	OK        bool     `json:"ok"`
+	Images    []string `json:"images"` // 保存后的文件 URL
+	ModelName string   `json:"model_name"`
+	Width     int      `json:"width"`
+	Height    int      `json:"height"`
+	Account   string   `json:"account"`
+	ErrCode   string   `json:"err_code,omitempty"`
+	ErrMsg    string   `json:"err_msg,omitempty"`
+	SavedTo   string   `json:"saved_to,omitempty"` // 额外复制到下载目录的路径
 }
 
 // Generate 使用账号轮询生成图片。prompt 为提示词，model 为 grok-imagine-image/quality，
@@ -268,13 +268,13 @@ func (e *ImagineEngine) Generate(ctx context.Context, prompt, model, aspectRatio
 
 // imagineGenInner 是单次生图的内部结果（图片仍是 base64）。
 type imagineGenInner struct {
-	OK       bool
-	Blobs    []imagineBlob
+	OK        bool
+	Blobs     []imagineBlob
 	ModelName string
-	Width    int
-	Height   int
-	ErrCode  string
-	ErrMsg   string
+	Width     int
+	Height    int
+	ErrCode   string
+	ErrMsg    string
 }
 
 type imagineBlob struct {
@@ -391,9 +391,9 @@ func (e *ImagineEngine) wsGenerate(ctx context.Context, acc *imagineAccount, pro
 			Item: imagineItem{
 				Type: "message",
 				Content: []imagineContent{{
-					Type:      "input_text",
-					RequestID: reqID,
-					Text:      prompt,
+					Type:       "input_text",
+					RequestID:  reqID,
+					Text:       prompt,
 					Properties: inp,
 				}},
 			},
@@ -478,22 +478,22 @@ func imagineProps(model, aspectRatio string, isInitial bool) map[string]any {
 		res = "1k"
 	}
 	return map[string]any{
-		"is_initial":            isInitial,
-		"image_model_name":      model,
-		"enable_side_by_side":   false,
-		"enable_pro":            quality,
-		"resolution_name":       res,
-		"aspect_ratio":          aspectRatio,
-		"num_generations":       1,
+		"is_initial":          isInitial,
+		"image_model_name":    model,
+		"enable_side_by_side": false,
+		"enable_pro":          quality,
+		"resolution_name":     res,
+		"aspect_ratio":        aspectRatio,
+		"num_generations":     1,
 	}
 }
 
 // ---- 小工具 ----
 
 type imagineEnvelope struct {
-	Type      string        `json:"type"`
-	Timestamp int64         `json:"timestamp"`
-	Item      imagineItem    `json:"item"`
+	Type      string      `json:"type"`
+	Timestamp int64       `json:"timestamp"`
+	Item      imagineItem `json:"item"`
 }
 
 type imagineItem struct {
@@ -509,16 +509,16 @@ type imagineContent struct {
 }
 
 type imagineInbound struct {
-	Type         string `json:"type"`
-	Blob         string `json:"blob"`
-	ImageID      string `json:"image_id"`
-	Order        int    `json:"order"`
-	ModelName    string `json:"model_name"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	ErrCode      string `json:"err_code"`
-	ErrMsg       string `json:"err_msg"`
-	ErrMessage   string `json:"err_message"`
+	Type          string `json:"type"`
+	Blob          string `json:"blob"`
+	ImageID       string `json:"image_id"`
+	Order         int    `json:"order"`
+	ModelName     string `json:"model_name"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	ErrCode       string `json:"err_code"`
+	ErrMsg        string `json:"err_msg"`
+	ErrMessage    string `json:"err_message"`
 	CurrentStatus string `json:"current_status"`
 }
 

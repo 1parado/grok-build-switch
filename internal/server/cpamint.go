@@ -25,9 +25,9 @@ func (s *Server) handleGrokPoolImportDir(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var request struct {
-		Path      string `json:"path"`
-		Recursive *bool  `json:"recursive"`
-		UseAuthDir bool  `json:"use_auth_dir"`
+		Path       string `json:"path"`
+		Recursive  *bool  `json:"recursive"`
+		UseAuthDir bool   `json:"use_auth_dir"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, fmt.Errorf("读取导入目录请求: %w", err), http.StatusBadRequest)

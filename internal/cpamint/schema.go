@@ -34,8 +34,8 @@ const (
 	// response omits verification_uri.
 	VerificationURIDefault = "https://accounts.x.ai/oauth2/device"
 	// Protocol mint (SSO cookie) still uses these auth.x.ai form endpoints.
-	DeviceVerifyURL  = "https://auth.x.ai/oauth2/device/verify"
-	DeviceApproveURL = "https://auth.x.ai/oauth2/device/approve"
+	DeviceVerifyURL    = "https://auth.x.ai/oauth2/device/verify"
+	DeviceApproveURL   = "https://auth.x.ai/oauth2/device/approve"
 	DefaultBaseURL     = "https://cli-chat-proxy.grok.com/v1"
 	DefaultRedirectURI = "http://127.0.0.1:56121/callback"
 	Scope              = "openid profile email offline_access grok-cli:access api:access"

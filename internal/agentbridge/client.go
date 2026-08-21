@@ -63,9 +63,9 @@ func (b *Bridge) handleSessionUpdateExtension(params json.RawMessage) (any, erro
 
 func (b *Bridge) handleExitPlanMode(ctx context.Context, params json.RawMessage) (any, error) {
 	var payload struct {
-		SessionID   string `json:"sessionId"`
-		ToolCallID  string `json:"toolCallId"`
-		PlanContent string `json:"planContent"`
+		SessionID    string `json:"sessionId"`
+		ToolCallID   string `json:"toolCallId"`
+		PlanContent  string `json:"planContent"`
 		PlanContent2 string `json:"plan_content"`
 	}
 	if err := json.Unmarshal(params, &payload); err != nil {

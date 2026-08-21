@@ -2171,6 +2171,28 @@ function bindChatEmptyActions() {
   });
 }
 
+// friendlyAgentError 把后端错误里内嵌的 JSON（如 RPC -32000 响应）解析成
+// 可读文案，并为常见错误补充可操作指引；无法解析时原样返回。
+function friendlyAgentError(text) {
+  const raw = (text || "").trim();
+  if (!raw) return raw;
+  const start = raw.indexOf("{");
+  if (start >= 0) {
+    try {
+      const parsed = JSON.parse(raw.slice(start));
+      const message = parsed?.message || parsed?.error?.message || "";
+      if (message) {
+        let prefix = raw.slice(0, start).trim().replace(/[:：\s]+$/, "");
+        if (/authentication required/i.test(message) || /no auth method/i.test(parsed?.data || "")) {
+          return `${prefix ? prefix + "：" : ""}Grok CLI 未登录或凭据不可用。请在终端运行 grok 登录后重试。`;
+        }
+        return prefix ? `${prefix}：${message}` : message;
+      }
+    } catch (e) { /* 不是合法 JSON，按原文展示 */ }
+  }
+  return raw;
+}
+
 function renderChatEmptyState(status = state.agentStatus) {
   const empty = $("chatEmpty");
   if (!empty || !empty.isConnected) return;
@@ -2182,7 +2204,7 @@ function renderChatEmptyState(status = state.agentStatus) {
   if (status && status.available === false) {
     empty.dataset.state = "missing";
     title.textContent = "未找到 Grok Build";
-    desc.textContent = status.error || "本机未检测到 grok 可执行文件。请先安装并登录 Grok CLI，然后重试。";
+    desc.textContent = friendlyAgentError(status.error) || "本机未检测到 grok 可执行文件。请先安装并登录 Grok CLI，然后重试。";
     if (actions) {
       actions.innerHTML = `
         <button type="button" id="chatEmptyRetryBtn" class="btn sm primary">重新检测</button>
@@ -2195,7 +2217,7 @@ function renderChatEmptyState(status = state.agentStatus) {
   if (status && (status.state === "dead" || status.error) && !agentIsRunning(status)) {
     empty.dataset.state = "error";
     title.textContent = "Agent 未就绪";
-    desc.textContent = status.error || "连接异常，请检查工作目录后重新启动 Agent。";
+    desc.textContent = friendlyAgentError(status.error) || "连接异常，请检查工作目录后重新启动 Agent。";
     if (actions) {
       actions.innerHTML = `
         <button type="button" id="chatEmptyStartBtn" class="btn sm primary">启动 Agent</button>

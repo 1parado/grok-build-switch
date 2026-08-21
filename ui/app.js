@@ -531,6 +531,54 @@ async function run(fn, { button, busyLabel, success } = {}) {
   }
 }
 
+// ---- 界面主题（light / dark / auto）----
+// 设置持久化在 settings.theme；localStorage 仅用于首屏防闪烁的即时恢复。
+const THEME_STORAGE_KEY = "gs_theme_v1";
+const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+const THEME_ICONS = {
+  light: '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="4.2" fill="currentColor"/><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="10" y1="1.6" x2="10" y2="3.6"/><line x1="10" y1="16.4" x2="10" y2="18.4"/><line x1="1.6" y1="10" x2="3.6" y2="10"/><line x1="16.4" y1="10" x2="18.4" y2="10"/><line x1="4" y1="4" x2="5.4" y2="5.4"/><line x1="14.6" y1="14.6" x2="16" y2="16"/><line x1="4" y1="16" x2="5.4" y2="14.6"/><line x1="14.6" y1="5.4" x2="16" y2="4"/></g></svg>',
+  dark: '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M17.2 12.4A7.6 7.6 0 0 1 7.6 2.8 7.6 7.6 0 1 0 17.2 12.4Z"/></svg>',
+  auto: '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="7.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path fill="currentColor" d="M10 2.4a7.6 7.6 0 0 1 0 15.2Z"/></svg>',
+};
+const THEME_TITLES = {
+  light: "主题：亮色（点击切换为暗色）",
+  dark: "主题：暗色（点击切换为跟随系统）",
+  auto: "主题：跟随系统（点击切换为亮色）",
+};
+
+function themeSetting() {
+  const value = (state.settings && state.settings.theme) ||
+    localStorage.getItem(THEME_STORAGE_KEY) || "light";
+  return value === "dark" || value === "auto" ? value : "light";
+}
+
+function applyTheme() {
+  const setting = themeSetting();
+  const resolved = setting === "auto" && themeMedia.matches ? "dark" : setting === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = resolved;
+  localStorage.setItem(THEME_STORAGE_KEY, setting);
+  const button = $("themeToggleBtn");
+  if (button) {
+    button.innerHTML = THEME_ICONS[setting];
+    button.title = THEME_TITLES[setting];
+    button.setAttribute("aria-label", THEME_TITLES[setting]);
+  }
+}
+
+async function cycleTheme() {
+  const order = ["light", "dark", "auto"];
+  const next = order[(order.indexOf(themeSetting()) + 1) % order.length];
+  state.settings = await api("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify({ ...(state.settings || {}), theme: next }),
+  });
+  applyTheme();
+}
+
+themeMedia.addEventListener("change", () => {
+  if (themeSetting() === "auto") applyTheme();
+});
+
 async function refreshAll() {
   const [status, profiles, backups, settings, grokAuth, grokPool, registrar, lanAccess] = await Promise.all([
     api("/api/status"),
@@ -551,6 +599,7 @@ async function refreshAll() {
   state.registrar = registrar;
   state.lanAccess = lanAccess;
   composerConfigLoaded = false;
+  applyTheme();
   // Coerce to strict boolean for UI.
   if (state.status && typeof state.status.config_matches_active !== "boolean") {
     state.status.config_matches_active = true;
@@ -4212,7 +4261,6 @@ function renderProfiles() {
 				</div>
 				<div class="providerFlags">
 					${profile.pinned ? '<span class="pinBadge">已置顶</span>' : ""}
-					${profile.is_active ? '<span class="badge">当前启用</span>' : ""}
 				</div>
 			</div>
 			<div class="providerActions">
@@ -4829,8 +4877,8 @@ function renderAccountFilterChips(summary) {
   const counts = {
     "": summary.total || 0,
     healthy: summary.healthy || 0,
-    quota_exhausted: summary.quota || 0,
-    permission_denied: summary.permission || 0,
+    quota_exhausted: summary.quota_exhausted || 0,
+    permission_denied: summary.permission_denied || 0,
     reauth: summary.reauth || 0,
     abnormal: summary.abnormal || 0,
     uninspected: summary.uninspected || 0,
@@ -6185,6 +6233,10 @@ $("activateCurrentBtn").onclick = () => run(async () => {
   success: "已保存并启用。新开 grok 会话生效。",
 });
 
+$("themeToggleBtn").onclick = () => run(async () => {
+  await cycleTheme();
+});
+
 $("settingsForm").onsubmit = (event) => {
   event.preventDefault();
   run(async () => {
@@ -6194,7 +6246,7 @@ $("settingsForm").onsubmit = (event) => {
       silent_autostart: $("silentAutostart").checked,
       auto_open_browser: $("autoOpenBrowser").checked,
       lan_access_enabled: $("lanAccessEnabled").checked,
-      theme: "light",
+      theme: themeSetting(),
       port: Number($("port").value || 17878),
     };
     await api("/api/settings", { method: "PUT", body: JSON.stringify(settings) });

@@ -188,7 +188,12 @@ func normalize(s Settings) Settings {
 	if s.Theme == "" {
 		s.Theme = "light"
 	}
-	s.Theme = "light"
+	// theme 三态：light / dark / auto（跟随系统）；未知值回退 light。
+	switch s.Theme {
+	case "light", "dark", "auto":
+	default:
+		s.Theme = "light"
+	}
 	if s.Autostart {
 		s.SilentAutostart = true
 	}

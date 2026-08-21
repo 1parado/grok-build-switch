@@ -17,11 +17,59 @@
   --warn-soft: #fffbeb;
   --warn-border: #fcd34d;
   --success: #16a34a;
+  --success-soft: #f0faf3;
+  --success-border: #b9d8c3;
+  --success-strong: #174b2a;
+  --success-muted: #4e765a;
+  --tone-blue: #2563eb;
+  --tone-blue-soft: #eff6ff;
+  --tone-teal: #0f766e;
+  --tone-teal-soft: #f0fdfa;
+  --tone-teal-chip: #99f6e4;
+  --tone-violet: #7c3aed;
+  --tone-violet-soft: #f5f3ff;
+  --tone-violet-border: #ddd6fe;
   --radius: 12px;
   --radius-sm: 8px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.04);
   --font: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+}
+
+/* 暗色主题：app.js 按设置（light/dark/auto）解析后写到 <html data-theme>。
+   只覆盖变量；对话工作台保留其独立主题系统，不受影响。 */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f0f12;
+  --surface: #17171b;
+  --surface-2: #1e1e24;
+  --text: #e6e6ea;
+  --muted: #94949e;
+  --line: #26262d;
+  --line-strong: #36363f;
+  --primary: #5b93f5;
+  --primary-fg: #ffffff;
+  --primary-soft: #17233a;
+  --primary-border: #2c4a7d;
+  --danger: #ef4444;
+  --danger-soft: #2a1518;
+  --warn: #d97706;
+  --warn-soft: #291d0d;
+  --warn-border: #574315;
+  --success: #34d377;
+  --success-soft: #12241a;
+  --success-border: #24513a;
+  --success-strong: #86dba9;
+  --success-muted: #74b18d;
+  --tone-blue: #6ba1f7;
+  --tone-blue-soft: #17233a;
+  --tone-teal: #34b3a7;
+  --tone-teal-soft: #0f2320;
+  --tone-teal-chip: #134e48;
+  --tone-violet: #a78bfa;
+  --tone-violet-soft: #221a38;
+  --tone-violet-border: #3f3266;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 * { box-sizing: border-box; }
@@ -978,7 +1026,7 @@ body {
 .chatNode.active {
   border-color: var(--primary);
   background: var(--primary);
-  color: #fff;
+  color: var(--primary-fg);
 }
 
 .chatNode.hasTool {
@@ -1093,6 +1141,8 @@ body {
   font-size: 22px;
   font-weight: 650;
   letter-spacing: -0.02em;
+  /* 窄屏下标题保持整词显示，不折行 */
+  white-space: nowrap;
 }
 
 .pageDesc {
@@ -1530,7 +1580,7 @@ textarea:focus,
   width: min(220px, 100%);
   aspect-ratio: 1;
   margin: 0 auto;
-  border: 8px solid #fff;
+  border: 8px solid var(--surface);
   border-radius: var(--radius-sm);
   box-shadow: 0 0 0 1px var(--line);
   image-rendering: pixelated;
@@ -1771,13 +1821,13 @@ textarea:focus,
 }
 
 .registrarChallengeStatus.is-ok {
-  border-color: color-mix(in srgb, #22c55e 45%, var(--line));
-  background: color-mix(in srgb, #22c55e 12%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--success) 45%, var(--line));
+  background: color-mix(in srgb, var(--success) 12%, var(--surface-2));
 }
 
 .registrarChallengeStatus.is-fail {
-  border-color: color-mix(in srgb, #ef4444 45%, var(--line));
-  background: color-mix(in srgb, #ef4444 12%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface-2));
 }
 
 .registrarResults {
@@ -2344,6 +2394,8 @@ textarea {
   font-weight: 500;
   font-size: 13px;
   cursor: pointer;
+  /* 窄屏下按钮文字保持整词，不折成竖排 */
+  white-space: nowrap;
 }
 
 .btn:hover, .ghostBtn:hover {
@@ -2433,9 +2485,9 @@ textarea {
   gap: 14px;
   margin: 0 0 14px;
   padding: 11px 13px;
-  border: 1px solid #b9d8c3;
+  border: 1px solid var(--success-border);
   border-radius: 8px;
-  background: #f0faf3;
+  background: var(--success-soft);
   color: #245d37;
 }
 
@@ -2462,8 +2514,8 @@ textarea {
   min-width: 0;
 }
 
-.updateCopy strong { color: #174b2a; }
-.updateCopy span { color: #4e765a; font-size: 12px; overflow-wrap: anywhere; }
+.updateCopy strong { color: var(--success-strong); }
+.updateCopy span { color: var(--success-muted); font-size: 12px; overflow-wrap: anywhere; }
 .updateActions { flex: 0 0 auto; }
 
 @media (max-width: 640px) {
@@ -4884,22 +4936,22 @@ body.resizingChatPanels * {
 }
 
 .skillsSourceChip[data-tone="agents"] {
-  border-color: color-mix(in srgb, #2563eb 28%, var(--line));
-  background: color-mix(in srgb, #eff6ff 70%, var(--surface));
+  border-color: color-mix(in srgb, var(--tone-blue) 28%, var(--line));
+  background: color-mix(in srgb, var(--tone-blue-soft) 70%, var(--surface));
 }
-.skillsSourceChip[data-tone="agents"] .skillsSourceChipLabel { color: #2563eb; }
+.skillsSourceChip[data-tone="agents"] .skillsSourceChipLabel { color: var(--tone-blue); }
 
 .skillsSourceChip[data-tone="user"] {
-  border-color: color-mix(in srgb, #7c3aed 28%, var(--line));
-  background: color-mix(in srgb, #f5f3ff 70%, var(--surface));
+  border-color: color-mix(in srgb, var(--tone-violet) 28%, var(--line));
+  background: color-mix(in srgb, var(--tone-violet-soft) 70%, var(--surface));
 }
-.skillsSourceChip[data-tone="user"] .skillsSourceChipLabel { color: #7c3aed; }
+.skillsSourceChip[data-tone="user"] .skillsSourceChipLabel { color: var(--tone-violet); }
 
 .skillsSourceChip[data-tone="bundled"] {
-  border-color: color-mix(in srgb, #0f766e 28%, var(--line));
-  background: color-mix(in srgb, #f0fdfa 70%, var(--surface));
+  border-color: color-mix(in srgb, var(--tone-teal) 28%, var(--line));
+  background: color-mix(in srgb, var(--tone-teal-soft) 70%, var(--surface));
 }
-.skillsSourceChip[data-tone="bundled"] .skillsSourceChipLabel { color: #0f766e; }
+.skillsSourceChip[data-tone="bundled"] .skillsSourceChipLabel { color: var(--tone-teal); }
 
 .skillsSourceHintNote {
   margin: 0;
@@ -5033,21 +5085,21 @@ body.resizingChatPanels * {
 }
 
 .skillsGroup[data-tone="agents"] .skillsGroupCount {
-  color: #2563eb;
+  color: var(--tone-blue);
   background: var(--primary-soft);
   border-color: var(--primary-border);
 }
 
 .skillsGroup[data-tone="user"] .skillsGroupCount {
-  color: #7c3aed;
-  background: #f5f3ff;
-  border-color: #ddd6fe;
+  color: var(--tone-violet);
+  background: var(--tone-violet-soft);
+  border-color: var(--tone-violet-border);
 }
 
 .skillsGroup[data-tone="bundled"] .skillsGroupCount {
-  color: #0f766e;
-  background: #f0fdfa;
-  border-color: #99f6e4;
+  color: var(--tone-teal);
+  background: var(--tone-teal-soft);
+  border-color: var(--tone-teal-chip);
 }
 
 .skillsItems {
@@ -5081,7 +5133,7 @@ body.resizingChatPanels * {
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: #f7f9fc;
+  background: var(--surface-2);
   border: 1px solid var(--line);
 }
 
@@ -5149,9 +5201,9 @@ body.resizingChatPanels * {
 .skillReadonlyBadge {
   font-size: 11px;
   font-weight: 600;
-  color: #0f766e;
-  background: #f0fdfa;
-  border: 1px solid #99f6e4;
+  color: var(--tone-teal);
+  background: var(--tone-teal-soft);
+  border: 1px solid var(--tone-teal-chip);
   border-radius: 999px;
   padding: 4px 8px;
 }
@@ -5228,7 +5280,7 @@ body.resizingChatPanels * {
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, #fafafa, #f4f4f5);
+  background: linear-gradient(180deg, var(--surface-2), var(--bg));
 }
 
 .skillsPopupHeadLeft {

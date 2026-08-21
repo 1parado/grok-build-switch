@@ -62,3 +62,20 @@ func assertOneCorruptBackup(t *testing.T, path string) {
 		t.Fatalf("corrupt backups = %#v, want one", matches)
 	}
 }
+
+func TestNormalizeThemeAcceptsThreeStates(t *testing.T) {
+	cases := map[string]string{
+		"light": "light",
+		"dark":  "dark",
+		"auto":  "auto",
+		"":      "light",
+		"blue":  "light",
+		"DARK":  "light",
+	}
+	for input, want := range cases {
+		got := normalize(Settings{Theme: input}).Theme
+		if got != want {
+			t.Errorf("normalize(Settings{Theme:%q}).Theme = %q, want %q", input, got, want)
+		}
+	}
+}

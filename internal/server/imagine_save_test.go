@@ -10,7 +10,11 @@ import (
 )
 
 // TestImagineGenerateOne 验证 generateOne 全链路：生图 + 过滤缩略图 + 落盘 + 返回 URL。
+// 活体测试会真实调用 grok.com 并消耗账号额度，仅在显式开启时运行。
 func TestImagineGenerateOne(t *testing.T) {
+	if os.Getenv("GROK_SWITCH_LIVE_IMAGINE") == "" {
+		t.Skip("live test consumes real quota; set GROK_SWITCH_LIVE_IMAGINE=1 to enable")
+	}
 	dataDir := imagineTestDataDir(t)
 	eng := NewImagineEngine(dataDir)
 	if eng.AccountCount() == 0 {

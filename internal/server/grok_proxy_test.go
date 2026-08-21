@@ -279,6 +279,12 @@ func TestGrokProxyFailsOverToNextPoolAccountOnRateLimit(t *testing.T) {
 	if len(upstreamAuths) != 2 || upstreamAuths[0] == upstreamAuths[1] {
 		t.Fatalf("upstream calls = %v, want two different bearer tokens", upstreamAuths)
 	}
+	if got := recorder.Header().Get("X-Grok-Switch-Account"); len(got) != 8 {
+		t.Fatalf("X-Grok-Switch-Account = %q, want 8-char short id", got)
+	}
+	if got := recorder.Header().Get("X-Grok-Switch-Failovers"); got != "1" {
+		t.Fatalf("X-Grok-Switch-Failovers = %q, want 1", got)
+	}
 
 	// 成功后粘性绑定应落到新账号：连续两次按 resp_ok 取号必须命中同一账号。
 	_, firstBound, _, err := pool.NextTokenSticky(t.Context(), "", "resp_ok")
@@ -324,6 +330,12 @@ func TestGrokProxyPassesThroughWhenNoAlternativeAccount(t *testing.T) {
 	}
 	if upstreamCalls != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (no alternative account)", upstreamCalls)
+	}
+	if got := recorder.Header().Get("X-Grok-Switch-Account"); len(got) != 8 {
+		t.Fatalf("X-Grok-Switch-Account = %q, want 8-char short id", got)
+	}
+	if got := recorder.Header().Get("X-Grok-Switch-Failovers"); got != "" {
+		t.Fatalf("X-Grok-Switch-Failovers = %q, want empty (no failover happened)", got)
 	}
 }
 

@@ -2,6 +2,7 @@ package grokpool
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -175,5 +176,88 @@ func TestNextTokenStickyExcludingReportsLostContinuationForExcludedPin(t *testin
 	}
 	if nextID == pinnedID {
 		t.Fatal("excluded pinned account was selected")
+	}
+}
+
+func TestStickyBindingsSurviveRestart(t *testing.T) {
+	dir := t.TempDir()
+	m1, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, err := m1.Import([]ImportFile{
+		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
+		{Name: "b.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-b","expired":%q,"email":"b@example.com"}`, expiry)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, boundID, _, err := m1.NextTokenSticky(t.Context(), "sess-restart", "")
+	if err != nil || boundID == "" {
+		t.Fatalf("NextTokenSticky() = %q err=%v", boundID, err)
+	}
+	m1.BindSession("sess-restart", boundID)
+	m1.BindResponse("resp_restart", boundID)
+	// 直接注入一条过期绑定，验证加载时剪除。
+	m1.mu.Lock()
+	m1.sticky["resp:stale"] = stickyBinding{AccountID: boundID, ExpiresAt: time.Now().Add(-time.Minute)}
+	m1.stickyDirty = true
+	m1.mu.Unlock()
+	if err := m1.flushSticky(); err != nil {
+		t.Fatal(err)
+	}
+
+	m2, err := NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, id, lost, err := m2.NextTokenSticky(t.Context(), "sess-restart", "")
+	if err != nil || lost || token == "" {
+		t.Fatalf("after restart NextTokenSticky() = %q lost=%v err=%v", id, lost, err)
+	}
+	if id != boundID {
+		t.Fatalf("session affinity lost after restart: got %q want %q", id, boundID)
+	}
+	_, respID, lostResp, err := m2.NextTokenSticky(t.Context(), "", "resp_restart")
+	if err != nil || lostResp || respID != boundID {
+		t.Fatalf("response affinity lost after restart: id=%q lost=%v err=%v", respID, lostResp, err)
+	}
+	m2.mu.Lock()
+	_, staleExists := m2.sticky["resp:stale"]
+	m2.mu.Unlock()
+	if staleExists {
+		t.Fatal("expired binding survived reload")
+	}
+}
+
+func TestNoAvailableAccountErrorExplainsReasons(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, err := manager.Import([]ImportFile{
+		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
+		{Name: "b.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-b","expired":%q,"email":"b@example.com"}`, expiry)},
+		{Name: "c.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-c","expired":%q,"email":"c@example.com"}`, expiry)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ids := manager.Status().Accounts
+	if _, err := manager.SetDisabled(ids[0].ID, true); err != nil {
+		t.Fatal(err)
+	}
+	manager.ObserveResponse(ids[1].ID, 429, `{"code":"free-usage-exhausted","message":"You have used all the included free usage"}`)
+	manager.ObserveResponse(ids[2].ID, 401, `{"code":"unauthorized","error":"token has been invalidated"}`)
+
+	_, _, _, err = manager.NextTokenSticky(t.Context(), "", "")
+	if err == nil {
+		t.Fatal("expected error when every account is unavailable")
+	}
+	message := err.Error()
+	for _, want := range []string{"共 3 个账号", "1 个已手动停用", "1 个免费额度耗尽", "1 个待重新登录"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q missing %q", message, want)
+		}
 	}
 }

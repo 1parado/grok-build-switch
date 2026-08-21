@@ -135,6 +135,8 @@ type Manager struct {
 	roundRobin     atomic.Uint64
 	stores         map[string]*grokauth.Store
 	sticky         map[string]stickyBinding
+	stickyPath     string
+	stickyDirty    bool
 
 	// Auth-dir hot-load state (in-memory fingerprints; re-scanned after restart).
 	watchHashes     map[string]string

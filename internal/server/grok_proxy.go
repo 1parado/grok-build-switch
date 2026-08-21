@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"grok_switch/internal/grokauth"
@@ -128,6 +129,22 @@ func grokShouldFailover(statusCode int) bool {
 	return statusCode >= 500
 }
 
+// setGrokSwitchHeaders 暴露号池服务账号与换号次数，方便用户在客户端
+// 侧排查"请求被哪个账号服务、是否发生过故障转移"。仅池模式调用。
+func setGrokSwitchHeaders(w http.ResponseWriter, accountID string, failovers int) {
+	if accountID == "" {
+		return
+	}
+	short := accountID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	w.Header().Set("X-Grok-Switch-Account", short)
+	if failovers > 0 {
+		w.Header().Set("X-Grok-Switch-Failovers", strconv.Itoa(failovers))
+	}
+}
+
 func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, token, accountID string, body []byte, lostContinuation bool) {
 	hints := parseGrokRequestHints(body)
 	attemptBody := body
@@ -144,6 +161,7 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 	}
 	excluded := make(map[string]bool)
 	sessionKey := grokSessionKey(r, hints)
+	failovers := 0
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		resp, err := s.doGrokUpstream(r, token, attemptBody, hints.Model)
@@ -180,12 +198,14 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 				nextToken, nextID, _, pickErr := s.GrokPool.NextTokenStickyExcluding(r.Context(), sessionKey, hints.PreviousResponseID, excluded)
 				if pickErr != nil || nextID == "" {
 					// 没有备选账号：透传原始上游错误。
+					setGrokSwitchHeaders(w, accountID, failovers)
 					copyHeaderSkippingHop(w.Header(), resp.Header)
 					w.WriteHeader(resp.StatusCode)
 					_, _ = w.Write(raw)
 					return
 				}
 				fmt.Fprintf(os.Stderr, "grok_switch: grok 代理故障转移 (HTTP %d)，更换账号重试\n", resp.StatusCode)
+				failovers++
 				token = nextToken
 				accountID = nextID
 				// 新账号不认识旧续接引用，能安全丢弃就先丢，省一次往返。
@@ -196,12 +216,14 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 				}
 				continue
 			}
+			setGrokSwitchHeaders(w, accountID, failovers)
 			copyHeaderSkippingHop(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			_, _ = w.Write(raw)
 			return
 		}
 
+		setGrokSwitchHeaders(w, accountID, failovers)
 		copyHeaderSkippingHop(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		responseID, streamError := copyGrokUpstreamBody(w, resp)

@@ -8,12 +8,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"grok_switch/internal/grokauth"
 )
 
 const grokProxyMaxBody = 32 << 20
+
+// 单次客户端请求的最多上游尝试次数：非池模式保留一次同账号内容修复重试；
+// 池模式额外允许跨账号故障转移（最多换 2 个号）。
+const (
+	grokProxyMaxAttemptsSingle = 2
+	grokProxyMaxAttemptsPool   = 3
+)
 
 var grokHopHeaders = map[string]bool{
 	"connection":          true,
@@ -67,13 +75,7 @@ func (s *Server) grokProxyAuthorized(r *http.Request) bool {
 
 func (s *Server) grokProxyToken(ctx context.Context, r *http.Request, body []byte) (token, accountID string, lostContinuation bool, err error) {
 	hints := parseGrokRequestHints(body)
-	sessionID := firstNonEmptyServer(
-		r.Header.Get("x-grok-conv-id"),
-		r.Header.Get("x-grok-session-id"),
-		r.Header.Get("x-session-id"),
-		r.Header.Get("x-grok-agent-id"),
-		hints.PromptCacheKey,
-	)
+	sessionID := grokSessionKey(r, hints)
 	if s.GrokPool != nil && s.GrokPool.Authorized(r) {
 		token, accountID, lostContinuation, err = s.GrokPool.NextTokenSticky(ctx, sessionID, hints.PreviousResponseID)
 		if err != nil && s.singleGrokAuthConfigured() {
@@ -90,24 +92,40 @@ func (s *Server) grokProxyToken(ctx context.Context, r *http.Request, body []byt
 	return "", "", false, fmt.Errorf("无效的本地 API Key")
 }
 
-func (s *Server) rememberGrokProxySticky(r *http.Request, body []byte, accountID, responseID string) {
-	if s.GrokPool == nil || accountID == "" {
-		return
-	}
-	hints := parseGrokRequestHints(body)
-	sessionID := firstNonEmptyServer(
+// grokSessionKey 提取请求的会话亲和键：优先 Grok CLI 的会话头，其次
+// OpenAI 兼容客户端写在 prompt_cache_key 里的会话标识。
+func grokSessionKey(r *http.Request, hints grokRequestHints) string {
+	return firstNonEmptyServer(
 		r.Header.Get("x-grok-conv-id"),
 		r.Header.Get("x-grok-session-id"),
 		r.Header.Get("x-session-id"),
 		r.Header.Get("x-grok-agent-id"),
 		hints.PromptCacheKey,
 	)
-	if sessionID != "" {
+}
+
+func (s *Server) rememberGrokProxySticky(r *http.Request, body []byte, accountID, responseID string) {
+	if s.GrokPool == nil || accountID == "" {
+		return
+	}
+	hints := parseGrokRequestHints(body)
+	if sessionID := grokSessionKey(r, hints); sessionID != "" {
 		s.GrokPool.BindSession(sessionID, accountID)
 	}
 	if responseID != "" {
 		s.GrokPool.BindResponse(responseID, accountID)
 	}
+}
+
+// grokShouldFailover 判断上游状态码是否值得换号重试：认证失效、额度/权限
+// 拒绝、限流与服务端故障都可能是单账号问题；400 类由同账号内容修复处理，
+// 404 通常是模型级确定性错误，换号无意义。
+func grokShouldFailover(statusCode int) bool {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	}
+	return statusCode >= 500
 }
 
 func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, token, accountID string, body []byte, lostContinuation bool) {
@@ -119,7 +137,15 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 		}
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	poolMode := s.GrokPool != nil && accountID != ""
+	maxAttempts := grokProxyMaxAttemptsSingle
+	if poolMode {
+		maxAttempts = grokProxyMaxAttemptsPool
+	}
+	excluded := make(map[string]bool)
+	sessionKey := grokSessionKey(r, hints)
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		resp, err := s.doGrokUpstream(r, token, attemptBody, hints.Model)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
@@ -131,22 +157,44 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 		if resp.StatusCode >= 400 {
 			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			_ = resp.Body.Close()
-			if s.GrokPool != nil && accountID != "" {
+			if poolMode {
 				s.GrokPool.ObserveResponse(accountID, resp.StatusCode, string(raw))
 			}
-			if attempt == 0 {
-				if isGrokInvalidEncryptedContent(resp.StatusCode, raw) {
-					if next, ok := stripEncryptedReasoning(attemptBody); ok {
-						attemptBody = next
-						continue
-					}
+			// 同账号内容修复：加密推理失效 / 续接引用丢失时剔除后重发。
+			if isGrokInvalidEncryptedContent(resp.StatusCode, raw) {
+				if next, ok := stripEncryptedReasoning(attemptBody); ok {
+					attemptBody = next
+					continue
 				}
-				if isPreviousResponseNotFound(resp.StatusCode, raw) && !hints.HasToolOutput {
+			}
+			if isPreviousResponseNotFound(resp.StatusCode, raw) && !hints.HasToolOutput {
+				if next, ok := dropPreviousResponseID(attemptBody); ok {
+					attemptBody = next
+					continue
+				}
+			}
+			// 跨账号透明故障转移：换健康号重发，客户端无感。全部尝试都
+			// 发生在向客户端写出任何字节之前，重试是安全的。
+			if poolMode && attempt+1 < maxAttempts && grokShouldFailover(resp.StatusCode) {
+				excluded[accountID] = true
+				nextToken, nextID, _, pickErr := s.GrokPool.NextTokenStickyExcluding(r.Context(), sessionKey, hints.PreviousResponseID, excluded)
+				if pickErr != nil || nextID == "" {
+					// 没有备选账号：透传原始上游错误。
+					copyHeaderSkippingHop(w.Header(), resp.Header)
+					w.WriteHeader(resp.StatusCode)
+					_, _ = w.Write(raw)
+					return
+				}
+				fmt.Fprintf(os.Stderr, "grok_switch: grok 代理故障转移 (HTTP %d)，更换账号重试\n", resp.StatusCode)
+				token = nextToken
+				accountID = nextID
+				// 新账号不认识旧续接引用，能安全丢弃就先丢，省一次往返。
+				if !hints.HasToolOutput {
 					if next, ok := dropPreviousResponseID(attemptBody); ok {
 						attemptBody = next
-						continue
 					}
 				}
+				continue
 			}
 			copyHeaderSkippingHop(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
@@ -156,8 +204,11 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 
 		copyHeaderSkippingHop(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		responseID := copyGrokUpstreamBody(w, resp)
+		responseID, streamError := copyGrokUpstreamBody(w, resp)
 		_ = resp.Body.Close()
+		if poolMode && streamError != "" {
+			s.GrokPool.ObserveStreamError(accountID, streamError)
+		}
 		if resp.StatusCode < 300 {
 			s.rememberGrokProxySticky(r, body, accountID, responseID)
 		}
@@ -204,12 +255,16 @@ func (s *Server) doGrokUpstream(r *http.Request, token string, body []byte, mode
 	return client.Do(req)
 }
 
-func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) string {
+// copyGrokUpstreamBody 流式回传上游响应，同时从已收集前缀里提取
+// resp_ ID 与流内错误事件负载。流内错误（HTTP 200 但事件报错）返回给
+// 调用方做账号健康观测；正常完成时第二个返回值为空串。
+func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) (string, string) {
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	var collected []byte
 	collectCap := 1 << 16
 	responseID := ""
+	streamError := ""
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
@@ -226,6 +281,9 @@ func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) string {
 				if responseID == "" {
 					responseID = extractGrokResponseID(collected)
 				}
+				if streamError == "" {
+					streamError = extractGrokStreamError(collected)
+				}
 			}
 		}
 		if err != nil {
@@ -235,7 +293,44 @@ func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) string {
 	if responseID == "" {
 		responseID = extractGrokResponseID(collected)
 	}
-	return responseID
+	if streamError == "" {
+		streamError = extractGrokStreamError(collected)
+	}
+	return responseID, streamError
+}
+
+// extractGrokStreamError 在已收集的响应前缀里找 SSE 错误事件
+// （type=error / response.failed），返回可归类的错误负载文本。
+func extractGrokStreamError(raw []byte) string {
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		}
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var payload map[string]any
+		if json.Unmarshal(line, &payload) != nil {
+			continue
+		}
+		switch strings.ToLower(stringValue(payload["type"])) {
+		case "error", "response.failed":
+		default:
+			continue
+		}
+		code, message := grokErrorCodeFromMap(payload)
+		if nested, ok := payload["response"].(map[string]any); ok {
+			nestedCode, nestedMessage := grokErrorCodeFromMap(nested)
+			code = firstNonEmptyServer(code, nestedCode)
+			message = firstNonEmptyServer(message, nestedMessage)
+		}
+		if combined := strings.TrimSpace(code + " " + message); combined != "" {
+			return truncateTextServer(combined, 1000)
+		}
+		return truncateTextServer(string(line), 1000)
+	}
+	return ""
 }
 
 func parseGrokRequestHints(body []byte) grokRequestHints {
@@ -407,6 +502,10 @@ func grokErrorCodeMessage(body []byte) (string, string) {
 	if json.Unmarshal(body, &payload) != nil {
 		return "", string(body)
 	}
+	return grokErrorCodeFromMap(payload)
+}
+
+func grokErrorCodeFromMap(payload map[string]any) (string, string) {
 	code := stringValue(payload["code"])
 	switch errNode := payload["error"].(type) {
 	case string:

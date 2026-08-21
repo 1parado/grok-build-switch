@@ -91,6 +91,13 @@ func (m *Manager) accountAvailableByIDLocked(id string) bool {
 // available — callers should drop previous_response_id before sending to a
 // replacement account.
 func (m *Manager) NextTokenSticky(ctx context.Context, sessionID, previousResponseID string) (token, accountID string, lostContinuation bool, err error) {
+	return m.NextTokenStickyExcluding(ctx, sessionID, previousResponseID, nil)
+}
+
+// NextTokenStickyExcluding 与 NextTokenSticky 相同，但跳过 exclude 中的账号
+// （透明故障转移：本轮请求里已经失败过的号不再复用）。被排除的续接绑定
+// 视为 lostContinuation；全部候选被排除时返回与无可用账号相同的错误。
+func (m *Manager) NextTokenStickyExcluding(ctx context.Context, sessionID, previousResponseID string, exclude map[string]bool) (token, accountID string, lostContinuation bool, err error) {
 	sessionID = strings.TrimSpace(sessionID)
 	previousResponseID = strings.TrimSpace(previousResponseID)
 
@@ -99,20 +106,23 @@ func (m *Manager) NextTokenSticky(ctx context.Context, sessionID, previousRespon
 	preferred := ""
 	if previousResponseID != "" {
 		if id := m.lookupStickyLocked("resp:"+previousResponseID, now); id != "" {
-			if m.accountAvailableByIDLocked(id) {
-				preferred = id
-			} else {
+			if exclude[id] || !m.accountAvailableByIDLocked(id) {
 				lostContinuation = true
+			} else {
+				preferred = id
 			}
 		}
 	}
 	if preferred == "" && sessionID != "" {
-		if id := m.lookupStickyLocked("sess:"+sessionID, now); id != "" && m.accountAvailableByIDLocked(id) {
+		if id := m.lookupStickyLocked("sess:"+sessionID, now); id != "" && !exclude[id] && m.accountAvailableByIDLocked(id) {
 			preferred = id
 		}
 	}
 	accounts := make([]Account, 0, len(m.state.Accounts))
 	for _, account := range m.state.Accounts {
+		if exclude[account.ID] {
+			continue
+		}
 		if accountAvailable(account) {
 			accounts = append(accounts, account)
 		}

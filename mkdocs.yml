@@ -22,6 +22,7 @@ theme:
 nav:
   - 首页: index.md
   - 使用教程: usage.md
+  - Build Remote Agent: gbr.md
   - 博客: blog/index.md
   - 联系方式: contact.md
 

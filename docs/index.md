@@ -5,6 +5,7 @@
 ## 快速入口
 
 - [使用教程](usage.md)
+- [Build Remote Agent 配对](gbr.md) — 桌面 Grok Build 会话的手机 spectator（`gbr/1`，不是本工具的局域网面板）
 - [项目仓库](https://github.com/1parado/grok-build-switch)
 - [联系方式](contact.md)
 

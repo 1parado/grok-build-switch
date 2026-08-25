@@ -47,12 +47,17 @@ type imagineAccount struct {
 	file         string
 	cookies      map[string]string // name -> value（仅 grok.com/x.ai 相关）
 	mu           sync.Mutex
-	exhausted    bool
+	busy         bool      // 正在执行一次生图（并行任务跳过，避免触发上游并发限制）
+	exhausted    bool      // 额度耗尽；exhaustedAt 超过 TTL 后自动恢复重试
+	exhaustedAt  time.Time // 零值表示非耗尽状态
 	successCount int
 	failCount    int
 	lastError    string
 	lastUsed     int64
 }
+
+// imagineExhaustedTTL 之后自动重新尝试已耗尽的账号（额度通常按日/按小时恢复）。
+const imagineExhaustedTTL = time.Hour
 
 // ImagineEngine 管理账号池并负责单次生图。
 type ImagineEngine struct {
@@ -98,6 +103,31 @@ func (e *ImagineEngine) AccountCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.accounts)
+}
+
+// ReloadAccounts 重新扫描 cookie 目录：新注册的账号无需重启即可参与生图。
+// 已知账号的成功/失败统计与耗尽状态会被保留。
+func (e *ImagineEngine) ReloadAccounts() {
+	fresh := &ImagineEngine{dataDir: e.dataDir, outputsDir: e.outputsDir}
+	fresh.loadAccounts()
+	if len(fresh.accounts) == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	known := make(map[string]*imagineAccount, len(e.accounts))
+	for _, acc := range e.accounts {
+		known[acc.id] = acc
+	}
+	merged := make([]*imagineAccount, 0, len(fresh.accounts))
+	for _, acc := range fresh.accounts {
+		if old, ok := known[acc.id]; ok {
+			merged = append(merged, old)
+			continue
+		}
+		merged = append(merged, acc)
+	}
+	e.accounts = merged
 }
 
 // loadAccounts 扫描 <dataDir>/registrar/cookies/*.json。
@@ -146,25 +176,67 @@ func (e *ImagineEngine) loadAccounts() {
 	fmt.Fprintf(os.Stderr, "[imagine] loaded %d accounts from %s\n", len(e.accounts), cookieDir)
 }
 
-// next 返回一个未耗尽的账号并推进游标；全部耗尽返回 nil。
-func (e *ImagineEngine) next() *imagineAccount {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+// nextLocked 返回一个可立即使用的账号并推进游标；找不到返回 nil。
+// 跳过 busy（正在生图）的账号；exhausted 账号超过 TTL 后自动恢复。
+// 调用方必须持有 e.mu。
+func (e *ImagineEngine) nextLocked() *imagineAccount {
 	if len(e.accounts) == 0 {
 		return nil
 	}
+	now := time.Now()
 	start := e.index
 	for {
 		acc := e.accounts[e.index]
 		e.index = (e.index + 1) % len(e.accounts)
-		if !acc.exhausted {
+		eligible := false
+		acc.mu.Lock()
+		if acc.exhausted && !acc.exhaustedAt.IsZero() && now.Sub(acc.exhaustedAt) > imagineExhaustedTTL {
+			acc.exhausted = false
+			acc.exhaustedAt = time.Time{}
+		}
+		if !acc.exhausted && !acc.busy {
+			eligible = true
+		}
+		acc.mu.Unlock()
+		if eligible {
 			return acc
 		}
 		if e.index == start {
-			break
+			return nil
 		}
 	}
-	return nil
+}
+
+// waitForAccount 等待一个空闲账号：批量生图的并发数可能超过账号数，
+// 多出的任务在此排队，而不是误报「全部耗尽」。若所有账号都因额度耗尽
+// （且没有任务占用）则立即返回 nil。
+func (e *ImagineEngine) waitForAccount(ctx context.Context) *imagineAccount {
+	for {
+		e.mu.Lock()
+		acc := e.nextLocked()
+		e.mu.Unlock()
+		if acc != nil {
+			return acc
+		}
+		e.mu.Lock()
+		idleUnavailable := true
+		for _, a := range e.accounts {
+			a.mu.Lock()
+			if a.busy && !a.exhausted {
+				idleUnavailable = false // 还有任务在跑，等它释放
+			}
+			a.mu.Unlock()
+		}
+		e.mu.Unlock()
+		if idleUnavailable {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(400 * time.Millisecond):
+		}
+	}
 }
 
 func (e *ImagineEngine) markResult(acc *imagineAccount, ok bool, code, msg string) {
@@ -179,6 +251,7 @@ func (e *ImagineEngine) markResult(acc *imagineAccount, ok bool, code, msg strin
 		switch code {
 		case "usage_pool_exhausted", "usage_limit_reached", "concurrency_limit":
 			acc.exhausted = true
+			acc.exhaustedAt = time.Now()
 			fmt.Fprintf(os.Stderr, "[imagine] account %s marked exhausted: %s\n", acc.id, code)
 		}
 	}
@@ -243,20 +316,33 @@ type ImagineResult struct {
 	SavedTo   string   `json:"saved_to,omitempty"` // 额外复制到下载目录的路径
 }
 
-// Generate 使用账号轮询生成图片。prompt 为提示词，model 为 grok-imagine-image/quality，
-// aspectRatio 形如 "1:1"/"16:9"/"9:16"/"4:3"。
+// Generate 使用账号轮询生成一张图片。prompt 为提示词，model 为
+// grok-imagine-image/quality，aspectRatio 形如 "1:1"/"16:9"/"9:16"/"4:3"。
+// 可安全并发调用：并发数超过账号数时，多出的调用在 waitForAccount 排队，
+// 不会把同一账号同时打到上游（避免触发并发限制误标耗尽）。
 func (e *ImagineEngine) Generate(ctx context.Context, prompt, model, aspectRatio string) ImagineResult {
-	if len(e.accounts) == 0 {
+	e.mu.Lock()
+	total := len(e.accounts)
+	e.mu.Unlock()
+	if total == 0 {
 		return ImagineResult{OK: false, ErrCode: "no_accounts", ErrMsg: "未找到任何可用账号（registrar/cookies 为空或无效）"}
 	}
-	attempts := len(e.accounts)
-	for i := 0; i < attempts; i++ {
-		acc := e.next()
+	for attempt := 0; attempt < total; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return ImagineResult{OK: false, ErrCode: "canceled", ErrMsg: "生图已取消或超时"}
+		}
+		acc := e.waitForAccount(ctx)
 		if acc == nil {
 			return ImagineResult{OK: false, ErrCode: "all_exhausted", ErrMsg: "所有账号均已耗尽额度"}
 		}
+		acc.mu.Lock()
+		acc.busy = true
+		acc.mu.Unlock()
 		res := e.generateOne(ctx, acc, prompt, model, aspectRatio)
 		e.markResult(acc, res.OK, res.ErrCode, res.ErrMsg)
+		acc.mu.Lock()
+		acc.busy = false
+		acc.mu.Unlock()
 		if res.OK {
 			return res
 		}
@@ -323,6 +409,7 @@ func (e *ImagineEngine) generateOne(ctx context.Context, acc *imagineAccount, pr
 	if err := os.WriteFile(outPath, keep.buf, 0o644); err != nil {
 		return ImagineResult{OK: false, ErrCode: "write_error", ErrMsg: err.Error(), Account: acc.id}
 	}
+	writeImagineSidecar(outPath, prompt, model, aspectRatio, inner, acc.id)
 	saved = append(saved, "/"+imagineOutputURLPath+"/"+filename)
 	return ImagineResult{
 		OK:        true,
@@ -489,6 +576,36 @@ func imagineProps(model, aspectRatio string, isInitial bool) map[string]any {
 }
 
 // ---- 小工具 ----
+
+// ImagineMeta 是随图片一起落盘的元数据 sidecar（<图片文件名>.json），
+// 画廊刷新后据此恢复提示词、模型等信息。
+type ImagineMeta struct {
+	Prompt    string    `json:"prompt"`
+	Model     string    `json:"model,omitempty"`
+	Aspect    string    `json:"aspect,omitempty"`
+	Account   string    `json:"account,omitempty"`
+	Width     int       `json:"width,omitempty"`
+	Height    int       `json:"height,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func writeImagineSidecar(imagePath, prompt, model, aspect string, inner imagineGenInner, accountID string) {
+	modelName := orEmpty(inner.ModelName, model)
+	meta := ImagineMeta{
+		Prompt:    prompt,
+		Model:     modelName,
+		Aspect:    aspect,
+		Account:   accountID,
+		Width:     inner.Width,
+		Height:    inner.Height,
+		CreatedAt: time.Now().UTC(),
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(imagePath+".json", data, 0o644)
+}
 
 type imagineEnvelope struct {
 	Type      string      `json:"type"`

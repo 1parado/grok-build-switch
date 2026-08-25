@@ -5528,6 +5528,45 @@ body.resizingChatPanels * {
   margin-top: 18px;
 }
 
+/* 进行中任务条：位于画廊上方，每张待出图占一格。 */
+.imagineActive {
+  margin-top: 16px;
+}
+
+.imagineCard.imaginePending {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 165px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: default;
+}
+
+.imagineCard.imaginePending:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.imagineCard.imagineFailed {
+  color: var(--danger);
+}
+
+.imagineSpinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--primary);
+  animation: imagineSpin 0.9s linear infinite;
+}
+
+@keyframes imagineSpin {
+  to { transform: rotate(360deg); }
+}
+
 .imagineCard {
   position: relative;
   border: 1px solid var(--line);
@@ -5592,4 +5631,21 @@ body.resizingChatPanels * {
   right: 16px;
   display: flex;
   gap: 8px;
+}
+
+.imagineLightboxMeta {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  max-width: 86vw;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }

@@ -1029,7 +1029,7 @@
     <main id="viewImagine" class="view imagineView" hidden>
       <div class="pageHead">
         <h1 class="pageTitle">生图</h1>
-        <p class="pageDesc">基于 grok.com /imagine 协议，自动轮换可用账号生成图片</p>
+        <p class="pageDesc">基于 grok.com /imagine 协议，多账号并行生成；后台任务不受切换页面/刷新影响</p>
       </div>
 
       <section class="formCard imagineComposer">
@@ -1053,6 +1053,14 @@
               <option value="3:4">3:4</option>
             </select>
           </label>
+          <label class="field">张数
+            <select id="imagineCount">
+              <option value="1" selected>1 张</option>
+              <option value="2">2 张</option>
+              <option value="4">4 张 · 抽卡</option>
+              <option value="6">6 张 · 抽卡</option>
+            </select>
+          </label>
         </div>
 
         <div class="inlineActions">
@@ -1062,6 +1070,7 @@
         <p id="imagineStatus" class="muted tiny imagineStatus" hidden></p>
       </section>
 
+      <div id="imagineActive" class="imagineGallery imagineActive" hidden></div>
       <div id="imagineGallery" class="imagineGallery"></div>
       <div id="imagineEmpty" class="empty" hidden>
         <p>还没有图片。输入提示词，点击「生成图片」试试。</p>

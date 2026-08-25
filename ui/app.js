@@ -972,7 +972,7 @@ function showView(name) {
     loadSkills().catch((err) => toast(err.message, "error"));
   }
   if (name === "imagine") {
-    refreshImagineStatus().catch(() => {});
+    loadImagineView().catch(() => {});
   }
   if (name === "chat") {
     openAgentView().catch((err) => toast(err.message, "error"));
@@ -7459,6 +7459,24 @@ document.addEventListener("click", (event) => {
 });
 
 // ===== Imagine (生图) =====
+
+// imaginePoll：全局任务轮询状态。轮询独立于视图——切换页面、刷新后
+// 重新进入生图页都会续接后台任务进度，生成不会因此中断。
+const imaginePoll = {
+  timer: null,
+  seen: new Map(), // job.id -> { ok, state }
+};
+
+// 进入生图页：引擎状态 + 服务端画廊 + 续接后台任务。
+async function loadImagineView() {
+  refreshImagineStatus().catch(() => {});
+  await refreshImagineGallery().catch(() => {});
+  try {
+    await pollImagineJobsOnce();
+  } catch {}
+  startImaginePolling();
+}
+
 async function refreshImagineStatus() {
   const statusEl = $("imagineStatus");
   const emptyEl = $("imagineEmpty");
@@ -7467,11 +7485,11 @@ async function refreshImagineStatus() {
     const ready = !!(data && data.imagine_ready);
     const count = (data && Number(data.imagine_accounts)) || 0;
     if (statusEl) {
-      statusEl.hidden = false;
-      statusEl.className = "muted tiny imagineStatus" + (ready ? " ok" : "");
-      statusEl.textContent = ready
+      statusEl.dataset.engine = ready
         ? `生图引擎就绪 · 可用账号 ${count} 个`
         : "生图引擎未就绪：registrar/cookies 中未找到可用账号";
+      statusEl.dataset.ready = ready ? "1" : "0";
+      updateImagineStatusLine();
     }
   } catch {
     if (statusEl) {
@@ -7486,12 +7504,32 @@ async function refreshImagineStatus() {
   }
 }
 
+function updateImagineStatusLine(activeJobs) {
+  const statusEl = $("imagineStatus");
+  if (!statusEl) return;
+  const engine = statusEl.dataset.engine || "";
+  const ready = statusEl.dataset.ready === "1";
+  if (Array.isArray(activeJobs) && activeJobs.length) {
+    const pending = activeJobs.reduce(
+      (sum, j) => sum + Math.max(0, (j.count || 0) - (j.ok_count || 0) - (j.fail_count || 0)),
+      0,
+    );
+    statusEl.hidden = false;
+    statusEl.className = "muted tiny imagineStatus busy";
+    statusEl.textContent = `${engine ? engine + " · " : ""}后台生成中 ${activeJobs.length} 批 · 待出图 ${pending} 张（切换页面不受影响，可继续提交新任务）`;
+    return;
+  }
+  if (!engine) return;
+  statusEl.hidden = false;
+  statusEl.className = "muted tiny imagineStatus" + (ready ? " ok" : "");
+  statusEl.textContent = engine;
+}
+
 async function generateImagine() {
   const promptEl = $("imaginePrompt");
   const modelEl = $("imagineModel");
   const ratioEl = $("imagineRatio");
-  const statusEl = $("imagineStatus");
-  const btn = $("imagineGenerateBtn");
+  const countEl = $("imagineCount");
   const prompt = (promptEl && promptEl.value || "").trim();
   if (!prompt) {
     toast("请先输入提示词", "error");
@@ -7500,82 +7538,178 @@ async function generateImagine() {
   }
   const model = modelEl ? modelEl.value : "grok-imagine-image";
   const ratio = ratioEl ? ratioEl.value : "1:1";
-
-  if (statusEl) {
-    statusEl.hidden = false;
-    statusEl.className = "muted tiny imagineStatus busy";
-    statusEl.textContent = "正在生成，自动轮换账号中…";
-  }
-  setBusy(btn, true, "生成中…");
+  const count = Math.min(6, Math.max(1, Number(countEl && countEl.value) || 1));
   try {
-    const res = await fetch("/api/imagine/generate", {
+    const res = await api("/api/imagine/generate", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, model, aspect_ratio: ratio }),
+      body: JSON.stringify({ prompt, model, aspect_ratio: ratio, count }),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.ok) {
-      const msg = data.err_msg || data.error || res.statusText || "生图失败";
-      throw new Error(msg);
-    }
-    const images = Array.isArray(data.images) ? data.images : [];
-    if (images.length === 0) {
-      throw new Error("未返回任何图片");
-    }
-    renderImagineImages(images, data);
-    if (statusEl) {
-      statusEl.hidden = false;
-      statusEl.className = "muted tiny imagineStatus ok";
-      const meta = [data.model_name, data.width && data.height ? `${data.width}x${data.height}` : null, data.account ? `账号 ${data.account}` : null]
-        .filter(Boolean).join(" · ");
-      statusEl.textContent = `生成成功（${images.length} 张）${meta ? " · " + meta : ""}`;
-    }
-    toast(`生成成功，${images.length} 张图片`, "success");
+    if (!res.ok || !res.job) throw new Error(res.error || res.err_msg || "任务创建失败");
+    imaginePoll.seen.set(res.job.id, { ok: 0, state: "running" });
+    toast(count > 1 ? `已提交 ${count} 张，后台并行生成中…` : "已提交，后台生成中…", "success");
+    updateImagineStatusLine([res.job]);
+    startImaginePolling();
   } catch (err) {
-    if (statusEl) {
-      statusEl.hidden = false;
-      statusEl.className = "muted tiny imagineStatus error";
-      statusEl.textContent = "生成失败：" + (err.message || err);
-    }
-    toast("生图失败：" + (err.message || err), "error");
-  } finally {
-    setBusy(btn, false);
+    toast("提交失败：" + (err.message || err), "error");
   }
 }
 
-function renderImagineImages(images, data) {
+// 画廊从服务端加载（imagine_outputs 目录扫描 + 元数据 sidecar），
+// 刷新页面后依然完整恢复。
+async function refreshImagineGallery() {
+  const data = await api("/api/imagine/gallery?limit=120").catch(() => ({ items: [] }));
+  renderImagineGallery(Array.isArray(data.items) ? data.items : []);
+}
+
+function renderImagineGallery(items) {
   const gallery = $("imagineGallery");
   const emptyEl = $("imagineEmpty");
   if (!gallery) return;
+  gallery.innerHTML = "";
   const frag = document.createDocumentFragment();
-  for (const url of images) {
-    const card = document.createElement("div");
-    card.className = "imagineCard";
-
-    const img = document.createElement("img");
-    img.src = url;
-    img.alt = (data && data.model_name ? data.model_name + " " : "") + "生成图片";
-    img.loading = "lazy";
-    card.appendChild(img);
-
-    const actions = document.createElement("div");
-    actions.className = "imagineCardActions";
-    const dl = document.createElement("button");
-    dl.type = "button";
-    dl.className = "btn sm";
-    dl.textContent = "下载";
-    dl.onclick = (e) => {
-      e.stopPropagation();
-      downloadImagine(url);
-    };
-    actions.appendChild(dl);
-    card.appendChild(actions);
-
-    card.onclick = () => openImagineLightbox(url);
-    frag.appendChild(card);
-  }
+  for (const item of items) frag.appendChild(buildImagineCard(item));
   gallery.appendChild(frag);
-  if (emptyEl) emptyEl.hidden = true;
+  if (emptyEl) emptyEl.hidden = items.length > 0;
+}
+
+function buildImagineCard(item) {
+  const card = document.createElement("div");
+  card.className = "imagineCard";
+  if (item.prompt) card.title = item.prompt;
+
+  const img = document.createElement("img");
+  img.src = item.url;
+  img.alt = (item.prompt || "生成图片").slice(0, 60);
+  img.loading = "lazy";
+  card.appendChild(img);
+
+  const actions = document.createElement("div");
+  actions.className = "imagineCardActions";
+  const dl = document.createElement("button");
+  dl.type = "button";
+  dl.className = "btn sm";
+  dl.textContent = "下载";
+  dl.onclick = (e) => {
+    e.stopPropagation();
+    downloadImagine(item.url);
+  };
+  actions.appendChild(dl);
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "btn sm";
+  del.textContent = "删除";
+  del.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      await api("/api/imagine/gallery/delete", { method: "POST", body: JSON.stringify({ file: item.file }) });
+    } catch (err) {
+      toast("删除失败：" + (err.message || err), "error");
+      return;
+    }
+    card.remove();
+    const gallery = $("imagineGallery");
+    const emptyEl = $("imagineEmpty");
+    if (emptyEl && gallery && gallery.children.length === 0) emptyEl.hidden = false;
+  };
+  actions.appendChild(del);
+  card.appendChild(actions);
+
+  card.onclick = () => openImagineLightbox(item);
+  return card;
+}
+
+// 进行中任务条：每张待出图占一格（旋转指示），失败占位标红。
+function renderImagineActive(jobs) {
+  const strip = $("imagineActive");
+  if (!strip) return;
+  const running = jobs.filter((j) => j.state === "running");
+  strip.hidden = running.length === 0;
+  strip.innerHTML = "";
+  for (const job of running) {
+    const pending = Math.max(0, (job.count || 0) - (job.ok_count || 0) - (job.fail_count || 0));
+    for (let i = 0; i < pending; i++) {
+      const card = document.createElement("div");
+      card.className = "imagineCard imaginePending";
+      card.title = job.prompt || "";
+      const spinner = document.createElement("div");
+      spinner.className = "imagineSpinner";
+      card.appendChild(spinner);
+      const label = document.createElement("span");
+      label.textContent = "生成中…";
+      card.appendChild(label);
+      strip.appendChild(card);
+    }
+    for (let i = 0; i < (job.fail_count || 0); i++) {
+      const card = document.createElement("div");
+      card.className = "imagineCard imaginePending imagineFailed";
+      const label = document.createElement("span");
+      label.textContent = "本张失败，重试下一账号中…";
+      card.appendChild(label);
+      strip.appendChild(card);
+    }
+  }
+}
+
+// 全局轮询：有运行中的任务时每 1.5s 拉一次 /api/imagine/jobs；
+// 新图落盘即刷新画廊，全部结束后停表并汇总提示。与当前视图无关。
+function startImaginePolling() {
+  if (imaginePoll.timer) return;
+  const tick = async () => {
+    let finished = true;
+    try {
+      finished = await pollImagineJobsOnce();
+    } catch {
+      // 网络抖动：保持轮询，下一轮重试。
+      finished = false;
+    }
+    if (finished) stopImaginePolling();
+  };
+  imaginePoll.timer = setInterval(tick, 1500);
+  tick();
+}
+
+function stopImaginePolling() {
+  if (imaginePoll.timer) clearInterval(imaginePoll.timer);
+  imaginePoll.timer = null;
+}
+
+async function pollImagineJobsOnce() {
+  const data = await api("/api/imagine/jobs");
+  const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+  const running = jobs.filter((j) => j.state === "running");
+  let galleryDirty = false;
+  const liveIds = new Set();
+  for (const job of jobs) {
+    liveIds.add(job.id);
+    const prev = imaginePoll.seen.get(job.id);
+    if (!prev) {
+      imaginePoll.seen.set(job.id, { ok: job.ok_count || 0, state: job.state });
+      if (job.state !== "running") galleryDirty = true;
+      continue;
+    }
+    if ((job.ok_count || 0) > prev.ok) {
+      galleryDirty = true;
+      const added = (job.ok_count || 0) - prev.ok;
+      toast(`新图片已生成（+${added}）`, "success");
+    }
+    if (prev.state === "running" && job.state !== "running") {
+      if (job.state === "error") {
+        toast("本批生图失败：" + (job.error || "所有账号均失败"), "error");
+      } else {
+        toast(`本批完成：成功 ${job.ok_count} 张${job.fail_count ? `，失败 ${job.fail_count} 张` : ""}`, job.fail_count ? "warn" : "success");
+      }
+    }
+    imaginePoll.seen.set(job.id, { ok: job.ok_count || 0, state: job.state });
+  }
+  if (imaginePoll.seen.size > 80) {
+    for (const id of imaginePoll.seen.keys()) {
+      if (!liveIds.has(id)) imaginePoll.seen.delete(id);
+    }
+  }
+  renderImagineActive(jobs);
+  updateImagineStatusLine(running);
+  if (galleryDirty) await refreshImagineGallery();
+  return running.length === 0;
 }
 
 function downloadImagine(url) {
@@ -7587,7 +7721,8 @@ function downloadImagine(url) {
   a.remove();
 }
 
-function openImagineLightbox(url) {
+function openImagineLightbox(item) {
+  const url = typeof item === "string" ? item : item.url;
   const existing = $("imagineLightbox");
   if (existing) existing.remove();
   const box = document.createElement("div");
@@ -7602,6 +7737,24 @@ function openImagineLightbox(url) {
   dl.textContent = "下载";
   dl.onclick = (e) => { e.stopPropagation(); downloadImagine(url); };
   bar.appendChild(dl);
+  if (item && typeof item === "object" && item.file) {
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "btn sm";
+    del.textContent = "删除";
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await api("/api/imagine/gallery/delete", { method: "POST", body: JSON.stringify({ file: item.file }) });
+      } catch (err) {
+        toast("删除失败：" + (err.message || err), "error");
+        return;
+      }
+      box.remove();
+      refreshImagineGallery().catch(() => {});
+    };
+    bar.appendChild(del);
+  }
   const close = document.createElement("button");
   close.type = "button";
   close.className = "btn sm";
@@ -7615,13 +7768,39 @@ function openImagineLightbox(url) {
   img.alt = "预览";
   box.appendChild(img);
 
+  if (item && typeof item === "object") {
+    const bits = [
+      item.prompt,
+      item.model,
+      item.width && item.height ? `${item.width}x${item.height}` : "",
+      item.aspect,
+      formatImagineTime(item.created_at),
+    ].filter(Boolean);
+    if (bits.length) {
+      const meta = document.createElement("div");
+      meta.className = "imagineLightboxMeta";
+      meta.textContent = bits.join("  ·  ");
+      box.appendChild(meta);
+    }
+  }
+
   box.onclick = () => box.remove();
   document.body.appendChild(box);
 }
 
-function clearImagineGallery() {
-  const gallery = $("imagineGallery");
-  if (gallery) gallery.innerHTML = "";
-  const emptyEl = $("imagineEmpty");
-  if (emptyEl) emptyEl.hidden = false;
+function formatImagineTime(value) {
+  const t = new Date(value);
+  if (!value || Number.isNaN(t.getTime())) return "";
+  return t.toLocaleString();
+}
+
+async function clearImagineGallery() {
+  if (!confirm("确定清空画廊？所有已生成的图片文件将被删除。")) return;
+  try {
+    await api("/api/imagine/gallery/clear", { method: "POST" });
+    await refreshImagineGallery();
+    toast("画廊已清空", "success");
+  } catch (err) {
+    toast("清空失败：" + (err.message || err), "error");
+  }
 }

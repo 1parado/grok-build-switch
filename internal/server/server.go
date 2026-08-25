@@ -71,6 +71,9 @@ type Server struct {
 
 	// Imagine 是基于 grok.com 网页端 /imagine 协议的本地生图引擎（走 registrar 账号 Cookie 轮询）。
 	Imagine *ImagineEngine
+
+	imagineMu   sync.Mutex
+	imagineJobs *imagineJobList
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -279,6 +282,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/imagine/v1", s.handleImagineProxy)
 	mux.HandleFunc("/imagine/v1/", s.handleImagineProxy)
 	mux.HandleFunc("/api/imagine/generate", s.handleImagineGenerate)
+	mux.HandleFunc("/api/imagine/jobs", s.handleImagineJobs)
+	mux.HandleFunc("/api/imagine/gallery", s.handleImagineGallery)
+	mux.HandleFunc("/api/imagine/gallery/clear", s.handleImagineGalleryClear)
+	mux.HandleFunc("/api/imagine/gallery/delete", s.handleImagineGalleryDelete)
 	mux.HandleFunc("/imagine-output/", s.handleImagineOutput)
 	mux.HandleFunc("/", s.handleStatic)
 }
@@ -1097,66 +1104,42 @@ func uniqueStrings(in []string) []string {
 }
 
 // handleImagineGenerate 接收 {prompt, model, aspect_ratio}，用本地账号池轮询生图。
+// handleImagineGenerate POST /api/imagine/generate —— 创建异步生图任务并立即返回。
+// 生成在后台并发执行（count 张并行，引擎按账号排队），前端经 /api/imagine/jobs
+// 轮询进度；切换视图或刷新页面不影响后台任务。
 func (s *Server) handleImagineGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if s.Imagine == nil {
-		writeError(w, fmt.Errorf("生图引擎未初始化"), http.StatusInternalServerError)
 		return
 	}
 	var req struct {
 		Prompt      string `json:"prompt"`
 		Model       string `json:"model"`
 		AspectRatio string `json:"aspect_ratio"`
+		Count       int    `json:"count"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	prompt := strings.TrimSpace(req.Prompt)
-	if prompt == "" {
-		writeError(w, fmt.Errorf("prompt 不能为空"), http.StatusBadRequest)
-		return
-	}
-	model := req.Model
-	if model == "" {
-		model = "grok-imagine-image"
-	}
-	aspect := req.AspectRatio
-	if aspect == "" {
-		aspect = "1:1"
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-	defer cancel()
-	res := s.Imagine.Generate(ctx, prompt, model, aspect)
-	if !res.OK {
-		writeJSONStatus(w, res, http.StatusBadGateway)
-		return
-	}
-	// 额外复制一份到系统下载目录，方便用户直接使用。
-	savedPath := ""
-	if len(res.Images) > 0 {
-		if dlPath, dlErr := saveImageToDownloads(filepath.Join(s.Imagine.outputsDir, path.Base(res.Images[0]))); dlErr == nil {
-			savedPath = dlPath
-		} else {
-			fmt.Fprintf(os.Stderr, "grok_switch: save image to downloads: %v\n", dlErr)
+	job, status, err := s.startImagineJob(req.Prompt, req.Model, req.AspectRatio, req.Count)
+	if err != nil {
+		code := "no_accounts"
+		switch status {
+		case http.StatusBadRequest:
+			code = "invalid_prompt"
+		case http.StatusInternalServerError:
+			code = "engine_unavailable"
 		}
-	}
-	if savedPath != "" {
-		writeJSON(w, map[string]any{
-			"ok":         true,
-			"images":     res.Images,
-			"model_name": res.ModelName,
-			"width":      res.Width,
-			"height":     res.Height,
-			"account":    res.Account,
-			"saved_to":   savedPath,
-		})
+		writeJSONStatus(w, map[string]any{
+			"ok":       false,
+			"err_code": code,
+			"err_msg":  err.Error(),
+			"error":    err.Error(),
+		}, status)
 		return
 	}
-	writeJSON(w, res)
+	writeJSON(w, map[string]any{"ok": true, "job": job})
 }
 
 // handleImagineOutput 提供生成的图片文件（位于 <DataDir>/imagine_outputs/）。
@@ -1175,13 +1158,9 @@ func (s *Server) handleImagineOutput(w http.ResponseWriter, r *http.Request) {
 	if ct := mime.TypeByExtension(path.Ext(full)); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
-	data, err := os.ReadFile(full)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Write(data)
+	// ServeFile 支持条件请求与 Range，避免每次全量读入内存。
+	http.ServeFile(w, r, full)
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {

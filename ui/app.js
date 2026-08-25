@@ -493,9 +493,10 @@ function isAbortError(err) {
 function toast(message, type = "info") {
   const el = $("toast");
   el.textContent = message;
-  el.classList.remove("error", "success", "show");
+  el.classList.remove("error", "success", "warn", "show");
   if (type === "error") el.classList.add("error");
   if (type === "success") el.classList.add("success");
+  if (type === "warn") el.classList.add("warn");
   requestAnimationFrame(() => el.classList.add("show"));
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("show"), type === "error" ? 4200 : 2800);
@@ -2049,7 +2050,22 @@ function connectAgentSocket() {
   };
 }
 
+// 切换会话后，旧会话的流式事件仍可能在 WS 上晚到（服务端补发/重连回放同理）；
+// 凡带 session_id 且与当前活动会话不符的内容事件一律丢弃，避免串话污染新记录。
+const STALE_SESSION_EVENT_TYPES = new Set([
+  "assistant_chunk", "thought_chunk", "assistant_media",
+  "tool_call", "tool_update", "turn_done", "error",
+]);
+
 function handleAgentEvent(event) {
+  const activeSessionId = state.activeAgentSession?.id || "";
+  if (
+    event.session_id && activeSessionId &&
+    event.session_id !== activeSessionId &&
+    STALE_SESSION_EVENT_TYPES.has(event.type)
+  ) {
+    return;
+  }
   switch (event.type) {
     case "agent_status": {
       const current = state.agentStatus || {};
@@ -2131,7 +2147,7 @@ function clearAgentTranscript(showEmpty = true) {
   state.lastUserMessage = "";
   state.chatStickToBottom = true;
   resetChatNodes();
-  clearChatAttachments();
+  clearChatAttachments(true);
   if ($("permissionBar")) $("permissionBar").hidden = true;
   if ($("planBar")) $("planBar").hidden = true;
   historyRenderedStart = 0;
@@ -3372,9 +3388,12 @@ function renderAgentTool(tool, isUpdate, sessionID = "") {
   }
   // Always force collapsed during history mount / streaming updates unless user opened it.
   if (!details.dataset.userOpened) details.open = false;
-  details.addEventListener("toggle", () => {
-    if (details.open) details.dataset.userOpened = "1";
-  }, { once: true });
+  if (!details.dataset.userOpenedBound) {
+    details.dataset.userOpenedBound = "1";
+    details.addEventListener("toggle", () => {
+      if (details.open) details.dataset.userOpened = "1";
+    });
+  }
 
   const title = tool.title || details.querySelector(".agentToolTitle").textContent || "工具调用";
   const status = tool.status || details.dataset.status || (isUpdate ? "更新" : "等待");
@@ -3823,13 +3842,29 @@ function renderChatAttachments() {
     remove.className = "chatAttachmentRemove";
     remove.textContent = "×";
     remove.setAttribute("aria-label", `移除 ${att.name || "附件"}`);
-    remove.onclick = () => { state.pendingAttachments.splice(index, 1); renderChatAttachments(); updateChatComposerState(); };
+    remove.onclick = () => {
+      releaseAttachmentPreview(state.pendingAttachments[index]);
+      state.pendingAttachments.splice(index, 1);
+      renderChatAttachments();
+      updateChatComposerState();
+    };
     chip.append(remove);
     wrap.append(chip);
   });
 }
 
-function clearChatAttachments() {
+// blob 预览 URL 只在移除附件或整段会话记录被丢弃时释放；发送后消息气泡
+// 仍引用同一 URL，那里不能提前 revoke。
+function releaseAttachmentPreview(att) {
+  if (att?.previewUrl && String(att.previewUrl).startsWith("blob:")) {
+    URL.revokeObjectURL(att.previewUrl);
+    att.previewUrl = "";
+    att.dataUrl = "";
+  }
+}
+
+function clearChatAttachments(revoke = false) {
+  if (revoke) state.pendingAttachments.forEach(releaseAttachmentPreview);
   state.pendingAttachments = [];
   renderChatAttachments();
 }
@@ -4937,6 +4972,9 @@ async function loadAccountsList({ silent = false, append = false } = {}) {
   const container = $("grokPoolAccounts");
   if (!container || accountListInFlight) return;
   accountListInFlight = true;
+  // 页码自增放在 in-flight 检查之后：连点时不会先跳页再把请求吞掉，
+  // 加载失败则回退页码。
+  if (append) accountListPage += 1;
   try {
     const params = new URLSearchParams({
       page: String(accountListPage),
@@ -4956,6 +4994,7 @@ async function loadAccountsList({ silent = false, append = false } = {}) {
       meta.textContent = `共 ${accountListTotal} 个账号 · 已加载 ${loadedUpTo}`;
     }
   } catch (err) {
+    if (append) accountListPage -= 1;
     if (!silent) toast(err.message, "error");
   } finally {
     accountListInFlight = false;
@@ -5866,7 +5905,6 @@ $("backFromSettingsBtn").onclick = () => showView("home");
 $("backFromAccountsBtn").onclick = () => showView("home");
 $("goAccountsFromSettingsBtn").onclick = () => showView("accounts");
 $("accountLoadMoreBtn").onclick = () => {
-  accountListPage += 1;
   loadAccountsList({ append: true }).catch((err) => toast(err.message, "error"));
 };
 $("accountSort").onchange = () => {
@@ -6385,7 +6423,7 @@ $("registrarClashAutoDetectBtn")?.addEventListener("click", async () => {
       if (data.controller && $("registrarClashController")) $("registrarClashController").value = data.controller;
       if (data.group && $("registrarClashSelectorGroup")) $("registrarClashSelectorGroup").value = data.group;
       const portInfo = data.mixed_port ? `（mixed-port=${data.mixed_port}）` : "";
-      hint.innerHTML = `✅ 已检测到 Clash 核心 v${data.core_version}，控制器=<code>${data.controller}</code>，选择器组=<code>${data.group || "未找到"}</code>（${data.group_node_count || 0} 个可用节点）${portInfo}。配置已自动填入。`;
+      hint.innerHTML = `✅ 已检测到 Clash 核心 v${escapeHtml(String(data.core_version ?? ""))}，控制器=<code>${escapeHtml(String(data.controller ?? ""))}</code>，选择器组=<code>${escapeHtml(String(data.group || "未找到"))}</code>（${Number(data.group_node_count) || 0} 个可用节点）${portInfo}。配置已自动填入。`;
       registrarFormDirty = true;
     } else {
       hint.innerHTML = "❌ 未检测到正在运行的 Clash/mihomo 控制器。请确认 FlClash / ClashVerge / ClashX 已启动并开启了外部控制器（默认端口 9090）。";

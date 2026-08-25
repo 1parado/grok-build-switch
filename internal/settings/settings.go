@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"grok_switch/internal/recovery"
 )
@@ -38,6 +39,14 @@ type Settings struct {
 type Store struct {
 	path string
 	mu   sync.Mutex
+
+	// 热路径缓存：Get() 位于每个本地代理请求的路径上，逐次读盘 + JSON 解析
+	// 是纯开销。settings.json 只由本进程写入（单实例），用 mtime+size 判断
+	// 是否需要重新读取即可。
+	cacheValid bool
+	cacheValue Settings
+	cacheMod   time.Time
+	cacheSize  int64
 }
 
 type ValidationError struct {
@@ -104,6 +113,16 @@ func (s *Store) readLocked() (Settings, error) {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return Settings{}, err
 	}
+	var modTime time.Time
+	var size int64
+	cacheHit := false
+	if info, err := os.Stat(s.path); err == nil {
+		modTime, size = info.ModTime(), info.Size()
+		cacheHit = s.cacheValid && modTime.Equal(s.cacheMod) && size == s.cacheSize
+	}
+	if cacheHit {
+		return s.cacheValue, nil
+	}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		def := Default()
@@ -129,6 +148,10 @@ func (s *Store) readLocked() (Settings, error) {
 		}
 		return s.recoverLocked(fmt.Errorf("invalid settings: %w", err), repaired)
 	}
+	s.cacheValid = true
+	s.cacheValue = current
+	s.cacheMod = modTime
+	s.cacheSize = size
 	return current, nil
 }
 
@@ -174,6 +197,15 @@ func (s *Store) writeLocked(current Settings) error {
 			return os.Rename(tmpName, s.path)
 		}
 		return err
+	}
+	// 写入成功后同步缓存；Stat 失败则失效缓存，下次读取时重建。
+	s.cacheValue = normalize(current)
+	if info, err := os.Stat(s.path); err == nil {
+		s.cacheValid = true
+		s.cacheMod = info.ModTime()
+		s.cacheSize = info.Size()
+	} else {
+		s.cacheValid = false
 	}
 	return nil
 }

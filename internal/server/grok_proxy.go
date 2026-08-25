@@ -74,8 +74,7 @@ func (s *Server) grokProxyAuthorized(r *http.Request) bool {
 	return s.GrokAuth != nil && s.GrokAuth.Authorized(r)
 }
 
-func (s *Server) grokProxyToken(ctx context.Context, r *http.Request, body []byte) (token, accountID string, lostContinuation bool, err error) {
-	hints := parseGrokRequestHints(body)
+func (s *Server) grokProxyToken(ctx context.Context, r *http.Request, hints grokRequestHints) (token, accountID string, lostContinuation bool, err error) {
 	sessionID := grokSessionKey(r, hints)
 	if s.GrokPool != nil && s.GrokPool.Authorized(r) {
 		token, accountID, lostContinuation, err = s.GrokPool.NextTokenSticky(ctx, sessionID, hints.PreviousResponseID)
@@ -105,11 +104,10 @@ func grokSessionKey(r *http.Request, hints grokRequestHints) string {
 	)
 }
 
-func (s *Server) rememberGrokProxySticky(r *http.Request, body []byte, accountID, responseID string) {
+func (s *Server) rememberGrokProxySticky(r *http.Request, hints grokRequestHints, accountID, responseID string) {
 	if s.GrokPool == nil || accountID == "" {
 		return
 	}
-	hints := parseGrokRequestHints(body)
 	if sessionID := grokSessionKey(r, hints); sessionID != "" {
 		s.GrokPool.BindSession(sessionID, accountID)
 	}
@@ -145,8 +143,9 @@ func setGrokSwitchHeaders(w http.ResponseWriter, accountID string, failovers int
 	}
 }
 
-func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, token, accountID string, body []byte, lostContinuation bool) {
-	hints := parseGrokRequestHints(body)
+// forwardGrokUpstream 的 hints 由调用方（handleGrokProxy）解析一次后传入，
+// 避免对最大 32MB 的请求体重复做全量 JSON 解析。
+func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, token, accountID string, body []byte, lostContinuation bool, hints grokRequestHints) {
 	attemptBody := body
 	if lostContinuation && !hints.HasToolOutput {
 		if next, ok := dropPreviousResponseID(attemptBody); ok {
@@ -232,7 +231,7 @@ func (s *Server) forwardGrokUpstream(w http.ResponseWriter, r *http.Request, tok
 			s.GrokPool.ObserveStreamError(accountID, streamError)
 		}
 		if resp.StatusCode < 300 {
-			s.rememberGrokProxySticky(r, body, accountID, responseID)
+			s.rememberGrokProxySticky(r, hints, accountID, responseID)
 		}
 		return
 	}

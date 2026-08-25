@@ -72,6 +72,22 @@ func TestGrokProxyFallsBackToSingleAuthWhenPoolHasNoAvailableAccount(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Import 会立刻触发后台巡检：先把上游指向本地 httptest，巡检结束后
+	// 才允许下面对 http.DefaultTransport 全局变量做替换，避免数据竞争。
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"grok-4.5"}]}`)
+		case "/responses":
+			_, _ = io.WriteString(w, `{"id":"ok"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	pool.SetUpstreamURL(upstream.URL)
+
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	_, err = pool.Import([]grokpool.ImportFile{{
 		Name:    "disabled.json",
@@ -88,6 +104,7 @@ func TestGrokProxyFallsBackToSingleAuthWhenPoolHasNoAvailableAccount(t *testing.
 	if _, err := single.Import([]byte(fmt.Sprintf(`{"type":"xai","access_token":"single-access","expired":%q}`, expiry))); err != nil {
 		t.Fatal(err)
 	}
+	waitForInspection(t, pool)
 
 	previousTransport := http.DefaultTransport
 	var upstreamAuthorization string
@@ -120,4 +137,18 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+// waitForInspection 等待 Import 触发的后台巡检完成（分类离开 uninspected）。
+func waitForInspection(t *testing.T, pool *grokpool.Manager) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		status := pool.Status()
+		if len(status.Accounts) > 0 && status.Accounts[0].Classification != "uninspected" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("background inspection did not finish in time")
 }

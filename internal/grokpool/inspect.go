@@ -123,14 +123,22 @@ func (m *Manager) recordInspection(result Account) {
 		if m.state.Accounts[i].ID != result.ID {
 			continue
 		}
-		result.Disabled = m.state.Accounts[i].Disabled
-		result.FileName = firstNonEmpty(result.FileName, m.state.Accounts[i].FileName)
-		result.ImportedAt = m.state.Accounts[i].ImportedAt
-		m.state.Accounts[i] = result
+		current := &m.state.Accounts[i]
+		result.Disabled = current.Disabled
+		result.FileName = firstNonEmpty(result.FileName, current.FileName)
+		result.ImportedAt = current.ImportedAt
+		// result.LastInspected 是探测开始的时间。一轮巡检可能持续数分钟，
+		// 期间的实时观测（recordObservation / recordTokenFailure）或凭据
+		// 热更新已写入更新的状态；旧快照不允许整体回滚这些新状态。
+		stale := current.LastInspected.After(result.LastInspected) ||
+			current.ImportedAt.After(result.LastInspected)
+		if !stale {
+			*current = result
+			_ = m.saveLocked()
+		}
 		break
 	}
 	m.doneCount++
-	_ = m.saveLocked()
 }
 
 // ObserveResponse lets the live proxy react before the next scheduled sweep.
@@ -287,7 +295,7 @@ func (m *Manager) doProbe(ctx context.Context, method, rawURL, token string, bod
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := m.client.Do(req)
+	resp, err := m.client.Load().Do(req)
 	if err != nil {
 		return probeResponse{}, err
 	}

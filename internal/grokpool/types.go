@@ -115,8 +115,10 @@ type Manager struct {
 	dir         string
 	indexPath   string
 	accountsDir string
-	client      *http.Client
-	transport   *http.Transport
+	// client/transport 会在运行中被 UpdateSettings 替换，而探测与代理请求
+	// 不持有 m.mu，因此用原子指针读写，避免数据竞争。
+	client      atomic.Pointer[http.Client]
+	transport   atomic.Pointer[http.Transport]
 	upstreamURL string
 
 	mu             sync.Mutex

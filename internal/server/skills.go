@@ -22,22 +22,14 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	home, _ := os.UserHomeDir()
-	agentsDir := filepath.Join(home, ".agents")
-	grokDir := s.Paths.GrokHome
-	if grokDir == "" {
-		grokDir = filepath.Join(home, ".grok")
-	}
+	roots := s.skillRoots()
 
 	var skills []SkillEntry
 	seen := make(map[string]bool)
 
-	// Scan ~/.agents/skills/ — agent-specific skills
-	scanSkillsDir(filepath.Join(agentsDir, "skills"), "agents/skills", &skills, seen)
-	// Scan ~/.grok/skills/ — user-installed skills
-	scanSkillsDir(filepath.Join(grokDir, "skills"), "grok/skills", &skills, seen)
-	// Scan ~/.grok/bundled/skills/ — bundled/packaged skills
-	scanSkillsDir(filepath.Join(grokDir, "bundled", "skills"), "grok/bundled", &skills, seen)
+	scanSkillsDir(roots[0], "agents/skills", &skills, seen)
+	scanSkillsDir(roots[1], "grok/skills", &skills, seen)
+	scanSkillsDir(roots[2], "grok/bundled", &skills, seen)
 
 	sort.Slice(skills, func(i, j int) bool {
 		if skills[i].Source != skills[j].Source {
@@ -226,6 +218,23 @@ func formatSkillPrompt(name, content, remainder string) string {
 	return b.String()
 }
 
+// skillRoots returns the three directories whose contents the skills page may
+// list and delete. Deletion is restricted to these subtrees so a stray request
+// can never remove ~/.grok/config.toml, auth.json or session data.
+func (s *Server) skillRoots() []string {
+	home, _ := os.UserHomeDir()
+	agentsDir := filepath.Join(home, ".agents")
+	grokDir := s.Paths.GrokHome
+	if grokDir == "" {
+		grokDir = filepath.Join(home, ".grok")
+	}
+	return []string{
+		filepath.Join(agentsDir, "skills"),
+		filepath.Join(grokDir, "skills"),
+		filepath.Join(grokDir, "bundled", "skills"),
+	}
+}
+
 func (s *Server) handleSkillsDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
@@ -234,7 +243,7 @@ func (s *Server) handleSkillsDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
@@ -243,35 +252,38 @@ func (s *Server) handleSkillsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Security: prevent path traversal by resolving and verifying the path
-	// is within allowed directories (~/.agents or ~/.grok).
+	// Security: resolve symlinks and verify the target really lives inside one
+	// of the skill roots before removing anything.
 	absPath, err := filepath.Abs(req.Path)
 	if err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	home, _ := os.UserHomeDir()
-	agentsDir := filepath.Join(home, ".agents")
-	grokDir := s.Paths.GrokHome
-	if grokDir == "" {
-		grokDir = filepath.Join(home, ".grok")
+	resolved := filepath.Clean(absPath)
+	if resolvedPath, err := filepath.EvalSymlinks(absPath); err == nil {
+		resolved = resolvedPath
+	} else if !os.IsNotExist(err) {
+		writeError(w, err, http.StatusInternalServerError)
+		return
 	}
 	allowed := false
-	for _, dir := range []string{agentsDir, grokDir} {
-		if dir != "" {
-			rel, err := filepath.Rel(dir, absPath)
-			if err == nil && len(rel) > 0 && rel[0] != '.' {
-				allowed = true
-				break
-			}
+	for _, root := range s.skillRoots() {
+		rootResolved := filepath.Clean(root)
+		if rootResolvedAbs, err := filepath.Abs(rootResolved); err == nil {
+			rootResolved = rootResolvedAbs
+		}
+		rel, err := filepath.Rel(rootResolved, resolved)
+		if err == nil && rel != "" && rel != "." && rel[0] != '.' && !filepath.IsAbs(rel) {
+			allowed = true
+			break
 		}
 	}
 	if !allowed {
-		writeError(w, fmt.Errorf("path is outside allowed directories"), http.StatusForbidden)
+		writeError(w, fmt.Errorf("只能删除 Skills 目录下的条目"), http.StatusForbidden)
 		return
 	}
 
-	if err := os.RemoveAll(absPath); err != nil {
+	if err := os.RemoveAll(resolved); err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return
 	}

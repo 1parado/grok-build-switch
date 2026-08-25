@@ -23,7 +23,6 @@ func NewManager(dir string) (*Manager, error) {
 		indexPath:   filepath.Join(dir, "pool.json"),
 		accountsDir: filepath.Join(dir, "accounts"),
 		stickyPath:  filepath.Join(dir, "sticky.json"),
-		client:      &http.Client{Timeout: 25 * time.Second},
 		upstreamURL: grokauth.UpstreamURL(),
 		wake:        make(chan struct{}, 1),
 		stop:        make(chan struct{}),
@@ -32,6 +31,7 @@ func NewManager(dir string) (*Manager, error) {
 		watchHashes: make(map[string]string),
 		sticky:      make(map[string]stickyBinding),
 	}
+	m.client.Store(&http.Client{Timeout: 25 * time.Second})
 	if err := m.load(); err != nil {
 		return nil, err
 	}
@@ -41,8 +41,8 @@ func NewManager(dir string) (*Manager, error) {
 		return nil, fmt.Errorf("读取号池代理设置: %w", err)
 	}
 	m.state.Settings.ProxyURL = normalizedProxy
-	m.transport = transport
-	m.client = clientForTransport(transport)
+	m.transport.Store(transport)
+	m.client.Store(clientForTransport(transport))
 	if err := m.saveLocked(); err != nil {
 		return nil, err
 	}
@@ -294,8 +294,8 @@ func (m *Manager) UpdateSettings(settings Settings) (Status, error) {
 	}
 	m.mu.Lock()
 	m.state.Settings = settings
-	m.transport = transport
-	m.client = clientForTransport(transport)
+	m.transport.Store(transport)
+	m.client.Store(clientForTransport(transport))
 	for _, store := range m.stores {
 		_ = store.SetProxyURL(settings.ProxyURL)
 	}
@@ -572,12 +572,18 @@ func (m *Manager) accountStore(id string) *grokauth.Store {
 }
 
 func (m *Manager) Transport() http.RoundTripper {
+	if t := m.transport.Load(); t != nil {
+		return t
+	}
+	return nil
+}
+
+// SetUpstreamURL 覆盖巡检探测的上游地址。测试用：把探测指向本地 httptest
+// 服务，避免单测期间访问生产环境。
+func (m *Manager) SetUpstreamURL(url string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.transport == nil {
-		return nil
-	}
-	return m.transport
+	m.upstreamURL = url
 }
 
 // clientForTransport builds an HTTP client for pool inspection.

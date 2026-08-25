@@ -63,6 +63,7 @@ type Server struct {
 	httpServer   *http.Server
 	loginMu      sync.Mutex
 	loginFails   map[string]loginFailure
+	projectsMu   sync.Mutex
 
 	reloginMu   sync.Mutex
 	reloginSeq  int64

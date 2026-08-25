@@ -111,20 +111,50 @@ body {
   flex-wrap: wrap;
 }
 
+/* 头部右侧的透明图标位（GitHub 链接）。显式重置 UA 原生样式，
+   hover 用 --primary 与 .btn:hover 保持同一套语言（--accent 未在
+   :root 定义，此前引用会静默失效）。 */
 .navGithubBtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 36px;
   height: 36px;
+  padding: 0;
+  border: none;
+  background: transparent;
   border-radius: var(--radius-sm, 8px);
   color: var(--text);
   text-decoration: none;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 .navGithubBtn:hover {
   background: var(--surface-2);
-  color: var(--accent);
+  color: var(--primary);
+}
+
+/* 主题切换按钮：与同排 .btn 完全一致的边框/底色/hover 语言，
+   仅以正方形图标形态出现。 */
+.themeToggleBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  flex: 0 0 36px;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.themeToggleBtn:hover,
+.themeToggleBtn:focus-visible {
+  border-color: var(--primary);
+  color: var(--primary);
+  outline: none;
 }
 
 .brand {

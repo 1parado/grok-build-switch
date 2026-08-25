@@ -45,7 +45,11 @@ func TestImagineProxyConnectivity(t *testing.T) {
 
 // TestImagineGenerate 调用带账号轮询的 Generate：自动跳过被限流的账号，
 // 验证 Go WS 协议端到端可用。
+// 活体测试会真实调用 grok.com 并消耗账号额度，仅在显式开启时运行。
 func TestImagineGenerate(t *testing.T) {
+	if os.Getenv("GROK_SWITCH_LIVE_IMAGINE") == "" {
+		t.Skip("live test consumes real quota; set GROK_SWITCH_LIVE_IMAGINE=1 to enable")
+	}
 	dataDir := imagineTestDataDir(t)
 	eng := NewImagineEngine(dataDir)
 	if eng.AccountCount() == 0 {

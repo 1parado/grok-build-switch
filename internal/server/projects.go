@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -25,10 +25,9 @@ type chatProject struct {
 	PathOK       bool      `json:"path_ok"`
 }
 
-type projectsStore struct {
-	mu   sync.Mutex
-	path string
-}
+// projectsMu 保护 projects.json 的整个「读-改-写」流程：所有 handler 必须
+// 先持有 s.projectsMu 再调用 loadProjects / saveProjects，否则并发请求会
+// 相互覆盖更新。
 
 func (s *Server) projectsFile() string {
 	return filepath.Join(s.Paths.DataDir, "projects.json")
@@ -76,17 +75,43 @@ func (s *Server) loadProjects() ([]chatProject, error) {
 }
 
 func (s *Server) saveProjects(list []chatProject) error {
-	if err := os.MkdirAll(filepath.Dir(s.projectsFile()), 0o755); err != nil {
+	path := s.projectsFile()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.projectsFile(), data, 0o600)
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		if runtime.GOOS == "windows" {
+			// Windows 不允许 rename 覆盖已存在文件。
+			if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+				return err
+			}
+			return os.Rename(tmpName, path)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Server) handleAgentProjects(w http.ResponseWriter, r *http.Request) {
+	s.projectsMu.Lock()
+	defer s.projectsMu.Unlock()
 	switch r.Method {
 	case http.MethodGet:
 		list, err := s.loadProjects()
@@ -160,6 +185,8 @@ func (s *Server) handleAgentProjectAction(w http.ResponseWriter, r *http.Request
 		methodNotAllowed(w)
 		return
 	}
+	s.projectsMu.Lock()
+	defer s.projectsMu.Unlock()
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/agent/projects/"), "/")
 	var req struct {
 		ID     string `json:"id"`

@@ -161,7 +161,14 @@ func (s *Store) ClearActive() error {
 }
 
 func (s *Store) EnsureDir() error {
-	return os.MkdirAll(filepath.Dir(s.path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	// 旧版本可能以 0755 创建了目录；profile 内含明文 API Key，尽力收紧权限。
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(filepath.Dir(s.path), 0o700)
+	}
+	return nil
 }
 
 func (s *Store) readLocked() ([]Profile, error) {
@@ -207,7 +214,7 @@ func (s *Store) writeLocked(profiles []Profile) error {
 }
 
 func atomicWrite(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
@@ -216,7 +223,16 @@ func atomicWrite(path string, data []byte) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
+		tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	// rename 前把数据块刷盘，避免掉电时目标文件变成空文件或残缺内容。
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
 	}

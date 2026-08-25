@@ -183,7 +183,10 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 		restoreRequestBody(r, body)
 	}
 
-	token, poolAccountID, lostContinuation, err := s.grokProxyToken(r.Context(), r, body)
+	// 请求体最多 32MB：hints 只在这里全量解析一次，后续 token 选择、
+	// 粘性绑定与上游转发全部复用，避免重复 JSON 解析。
+	hints := parseGrokRequestHints(body)
+	token, poolAccountID, lostContinuation, err := s.grokProxyToken(r.Context(), r, hints)
 	if err != nil {
 		writeError(w, err, http.StatusBadGateway)
 		return
@@ -222,7 +225,7 @@ func (s *Server) handleGrokProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.forwardGrokUpstream(w, r, token, poolAccountID, body, lostContinuation)
+	s.forwardGrokUpstream(w, r, token, poolAccountID, body, lostContinuation, hints)
 }
 
 // isImageGenProxyPath 判断是否为内置 image_gen 工具的图片生成请求
@@ -792,7 +795,11 @@ func cloneModelDefs(models []profiles.ModelDef, baseURL, apiKey string) []profil
 		out[i] = model
 		out[i].BaseURL = baseURL
 		out[i].APIKey = apiKey
-		out[i].APIBackend = "responses"
+		// 仅在缺失时补默认后端；保留上游 /models 上报的 api_backend，
+		// 避免把 messages/chat_completions 后端的模型错误标记为 responses。
+		if strings.TrimSpace(out[i].APIBackend) == "" {
+			out[i].APIBackend = "responses"
+		}
 		if model.ExtraHeaders != nil {
 			out[i].ExtraHeaders = make(map[string]string, len(model.ExtraHeaders))
 			for key, value := range model.ExtraHeaders {

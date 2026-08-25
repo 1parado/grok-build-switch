@@ -250,7 +250,7 @@ func (s *Server) buildChatCompletionsFinal(chatResp map[string]any, executedCall
 		if data, err := os.ReadFile(filepath.Join(s.Imagine.outputsDir, path.Base(res.Images[0]))); err == nil {
 			b64 = base64.StdEncoding.EncodeToString(data)
 		}
-		url := "http://127.0.0.1:17878" + res.Images[0]
+		url := fmt.Sprintf("http://127.0.0.1:%d%s", s.ActualPort, res.Images[0])
 		msg := fmt.Sprintf("图片已生成：%dx%d，模型 %s。", res.Width, res.Height, res.ModelName)
 		if b64 != "" {
 			msg += "\n\n![generated image](data:image/jpeg;base64," + b64 + ")"

@@ -127,6 +127,11 @@ func atomicWrite(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
+	// rename 前把数据块刷盘，避免掉电时丢失刚轮换的 refresh_token 等关键凭据。
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}

@@ -2476,6 +2476,7 @@ textarea {
 }
 
 .toast.error { background: #b91c1c; }
+.toast.warn { background: var(--warn); }
 .toast.success { background: #15803d; }
 
 .updateBanner {

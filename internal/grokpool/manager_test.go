@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -80,7 +81,7 @@ func TestAutomaticInspectionClassifiesAndRoutesOnlyAvailableAccount(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.client = upstream.Client()
+	manager.client.Store(upstream.Client())
 	manager.upstreamURL = upstream.URL
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	_, err = manager.Import([]ImportFile{
@@ -341,9 +342,9 @@ func TestProbeErrorTextIsBounded(t *testing.T) {
 }
 
 func TestInspectionUsesConfiguredHTTPProxy(t *testing.T) {
-	var proxyCalls int
+	var proxyCalls atomic.Int64
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxyCalls++
+		proxyCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/models":
@@ -381,8 +382,8 @@ func TestInspectionUsesConfiguredHTTPProxy(t *testing.T) {
 	}
 	manager.runWG.Wait()
 	status := manager.Status()
-	if proxyCalls < 2 || status.Accounts[0].Classification != "healthy" {
-		t.Fatalf("proxy calls = %d, status = %#v", proxyCalls, status)
+	if proxyCalls.Load() < 2 || status.Accounts[0].Classification != "healthy" {
+		t.Fatalf("proxy calls = %d, status = %#v", proxyCalls.Load(), status)
 	}
 	if status.Settings.ProxyURL != proxy.URL {
 		t.Fatalf("stored proxy URL = %q", status.Settings.ProxyURL)

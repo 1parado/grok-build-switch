@@ -543,7 +543,7 @@ const THEME_ICONS = {
 };
 const THEME_TITLES = {
   light: "主题：亮色（点击切换为暗色）",
-  dark: "主题：暗色（点击切换为跟随系统）",
+  dark: "主题：暗色（点击切换为亮色）",
   auto: "主题：跟随系统（点击切换为亮色）",
 };
 
@@ -567,11 +567,12 @@ function applyTheme() {
 }
 
 async function cycleTheme() {
-  const order = ["light", "dark", "auto"];
-  const next = order[(order.indexOf(themeSetting()) + 1) % order.length];
+  // 二态切换：按「当前实际渲染的主题」取反。旧的循环里夹着"跟随系统"，
+  // 系统本身是深色时从暗色点一下仍是深色，用户要点两下才能回到亮色。
+  const resolved = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   state.settings = await api("/api/settings", {
     method: "PUT",
-    body: JSON.stringify({ ...(state.settings || {}), theme: next }),
+    body: JSON.stringify({ ...(state.settings || {}), theme: resolved }),
   });
   applyTheme();
 }

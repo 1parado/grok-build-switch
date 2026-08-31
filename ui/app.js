@@ -489,6 +489,95 @@ function isAbortError(err) {
   return !!err && (err.name === "AbortError" || err.code === "aborted");
 }
 
+// ── 统一确认/输入对话框（替代 window.confirm / window.prompt） ──
+// Promise 风格：await appConfirm(...) / await appPrompt(...)；Esc=取消，
+// Enter=确定，危险操作传 { danger: true } 让确认钮变红。
+const appDialogState = { resolve: null };
+
+function appDialogElements() {
+  return {
+    dialog: $("appDialog"),
+    title: $("appDialogTitle"),
+    message: $("appDialogMessage"),
+    input: $("appDialogInput"),
+    ok: $("appDialogOk"),
+    cancel: $("appDialogCancel"),
+  };
+}
+
+function appDialogFinish(result) {
+  const { dialog, input } = appDialogElements();
+  const resolve = appDialogState.resolve;
+  appDialogState.resolve = null;
+  if (dialog.open) dialog.close();
+  if (input) input.value = "";
+  resolve?.(result);
+}
+
+function appDialogKeyDown(event) {
+  if (event.key !== "Enter" || event.target?.id !== "appDialogInput") return;
+  event.preventDefault();
+  const { input } = appDialogElements();
+  appDialogFinish(appDialogState.mode === "prompt" ? (input?.value.trim() || "") : true);
+}
+
+function openAppDialog({ title, message = "", value = null, okLabel = "确定", cancelLabel = "取消", danger = false }) {
+  const { dialog, title: titleEl, message: msgEl, input, ok, cancel } = appDialogElements();
+  if (!dialog || appDialogState.resolve) {
+    // 已有弹窗在等待或元素缺失：退回原生，保证调用方语义不变。
+    return null;
+  }
+  appDialogState.mode = value === null ? "confirm" : "prompt";
+  titleEl.textContent = title;
+  msgEl.textContent = message;
+  msgEl.hidden = !message;
+  input.hidden = value === null;
+  if (value !== null) input.value = value;
+  ok.textContent = okLabel;
+  cancel.textContent = cancelLabel;
+  dialog.classList.toggle("danger", !!danger);
+  return new Promise((resolve) => {
+    appDialogState.resolve = resolve;
+    dialog.showModal();
+    if (value !== null) {
+      input.focus();
+      input.select();
+    } else {
+      ok.focus();
+    }
+  });
+}
+
+async function appConfirm(title, message = "", { danger = false, okLabel = "确定", cancelLabel = "取消" } = {}) {
+  const result = await openAppDialog({ title, message, okLabel, cancelLabel, danger });
+  return result === null ? window.confirm(message ? `${title}\n\n${message}` : title) : result === true;
+}
+
+async function appPrompt(title, value = "", message = "") {
+  const result = await openAppDialog({ title, message, value: value ?? "", okLabel: "确定" });
+  if (result === null) return window.prompt(title, value);
+  return typeof result === "string" ? result : null;
+}
+
+function bindAppDialog() {
+  const { dialog, ok, cancel } = appDialogElements();
+  if (!dialog || dialog.dataset.bound === "1") return;
+  dialog.dataset.bound = "1";
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    appDialogFinish(null);
+  });
+  dialog.addEventListener("keydown", appDialogKeyDown);
+  ok.addEventListener("click", () => {
+    const { input } = appDialogElements();
+    appDialogFinish(appDialogState.mode === "prompt" ? (input?.value.trim() || "") : true);
+  });
+  cancel.addEventListener("click", () => appDialogFinish(null));
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) appDialogFinish(null);
+  });
+}
+
 const TOAST_MAX_STACK = 3;
 function toast(message, type = "info") {
   // 堆叠队列：单例覆盖式 toast 会让连续错误互相顶掉，只剩最后一条。
@@ -807,7 +896,7 @@ function renderSkillsList() {
     btn.onclick = async () => {
       const name = btn.dataset.name;
       const path = btn.dataset.path;
-      if (!confirm(`确定要删除 "${name}" 吗？\n\n路径: ${path}\n\n此操作不可恢复。`)) {
+      if (!(await appConfirm(`删除 "${name}"`, `路径: ${path}\n此操作不可恢复。`, { danger: true }))) {
         return;
       }
       btn.disabled = true;
@@ -1543,7 +1632,7 @@ function formatSessionTime(value) {
 
 async function startRenameSession(session) {
   if (!session?.id) return;
-  const next = window.prompt("重命名会话", session.title || "");
+  const next = await appPrompt("重命名会话", session.title || "");
   if (next === null) return;
   const title = next.trim();
   if (title === (session.title || "").trim() && title !== "") return;
@@ -1568,7 +1657,7 @@ async function startRenameSession(session) {
 async function deleteAgentSession(session) {
   if (!session?.id) return;
   const label = session.title || session.id;
-  if (!confirm(`删除会话「${label}」？\n本地历史将被移除，且不可恢复。`)) return;
+  if (!(await appConfirm(`删除会话「${label}」`, "本地历史将被移除，且不可恢复。", { danger: true }))) return;
   await api("/api/agent/session/delete", {
     method: "POST",
     body: JSON.stringify({ session_id: session.id }),
@@ -3657,7 +3746,7 @@ function showAgentPlan(plan, waiting) {
   scrollChatToBottom(true);
 }
 
-function respondAgentPlan(outcome) {
+async function respondAgentPlan(outcome) {
   const plan = state.agentPlan;
   if (!plan?.request_id) {
     if ($("planBar")) $("planBar").hidden = true;
@@ -3665,7 +3754,7 @@ function respondAgentPlan(outcome) {
   }
   let feedback = "";
   if (outcome === "cancelled") {
-    feedback = prompt("请说明希望如何修改计划（可留空）", "") || "";
+    feedback = (await appPrompt("请求修改计划", "", "请说明希望如何修改计划（可留空）")) || "";
   }
   if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
     toast("对话连接已断开，请稍后重试", "error");
@@ -3715,7 +3804,7 @@ async function startAgent() {
   const cwd = $("agentCwd").value.trim();
   if (!cwd) throw new Error("请提供工作目录");
   const alwaysApprove = $("agentAlwaysApprove").checked;
-  if (alwaysApprove && !state.agentAutoRestoring && !confirm("自动批准会允许 Grok Build 无需确认即可修改文件和执行命令。确定启动？")) return false;
+  if (alwaysApprove && !state.agentAutoRestoring && !(await appConfirm("开启自动批准？", "自动批准会允许 Grok Build 无需确认即可修改文件和执行命令。", { danger: true, okLabel: "确定启动" }))) return false;
   const wasRunning = agentIsRunning();
   if (wasRunning) {
     await api("/api/agent/stop", { method: "POST", body: "{}" });
@@ -3768,7 +3857,7 @@ async function newAgentSession(projectOrNull) {
   }
   const matched = projectPathKeys().get(normalizePathKey(cwd));
   if (matched && !matched.trusted) {
-    if (!confirm(`项目「${matched.name}」尚未信任，创建会话前需要信任该目录。继续？`)) {
+    if (!(await appConfirm(`信任项目「${matched.name}」？`, "创建会话前需要信任该目录，以允许 Agent 读写。", { okLabel: "信任并继续" }))) {
       return false;
     }
     await api("/api/agent/projects/trust", { method: "POST", body: JSON.stringify({ id: matched.id }) });
@@ -3813,7 +3902,7 @@ async function activateProjectWorkspace(project, { createSession = false } = {})
     project = (state.projects || []).find((p) => p.id === project.id) || project;
   }
   if (!project.trusted) {
-    if (!confirm(`首次打开项目「${project.name}」需要信任该目录，以允许 Agent 读写。继续？`)) return false;
+    if (!(await appConfirm(`信任项目「${project.name}」？`, "首次打开需要信任该目录，以允许 Agent 读写。", { okLabel: "信任并继续" }))) return false;
     await api("/api/agent/projects/trust", { method: "POST", body: JSON.stringify({ id: project.id }) });
     project.trusted = true;
   }
@@ -4292,7 +4381,7 @@ async function sendAgentMessage() {
     // Keep local history; engine already has a fresh session with bootstrap armed.
     setAgentEngineState("attached");
   } else if (state.agentEngineState === "readonly") {
-    if (!confirm("当前仅显示本地历史，原会话上下文没有恢复。发送这条消息将开启新对话，是否继续？")) return;
+    if (!(await appConfirm("发送将开启新对话", "当前仅显示本地历史，原会话上下文没有恢复。继续发送这条消息？"))) return;
     const status = state.agentStatus;
     if (state.agentFallbackSessionReady && status?.state === "ready" && status?.session_id) {
       clearAgentTranscript();
@@ -4493,7 +4582,7 @@ function renderProfiles() {
 			};
 			el.querySelector('[data-action="export"]').onclick = () => exportProfile(profile);
 			el.querySelector('[data-action="delete"]').onclick = () => run(async () => {
-				if (!confirm(`删除「${profile.name}」？不可撤销。`)) return false;
+				if (!(await appConfirm(`删除「${profile.name}」`, "此操作不可撤销。", { danger: true }))) return false;
 				await api(`/api/profiles/${profile.id}`, { method: "DELETE" });
 				await refreshAll();
 				showView("home");
@@ -4613,7 +4702,7 @@ function renderBackups(backups) {
     `;
     const btn = el.querySelector("button");
     btn.onclick = () => run(async () => {
-      if (!confirm(`还原 ${backup.file}？当前配置会先自动备份。`)) return false;
+      if (!(await appConfirm(`还原备份 ${backup.file}`, "当前配置会先自动备份。"))) return false;
       await api(`/api/backups/${encodeURIComponent(backup.file)}/restore`, { method: "POST" });
       await refreshAll();
     }, { button: btn, busyLabel: "还原中…", success: "已还原备份" });
@@ -5249,7 +5338,7 @@ function buildAccountRow(account) {
   }, { button: toggle, busyLabel: "处理中…", success: account.disabled ? "账号已启用" : "账号已禁用" });
   const remove = row.querySelector('[data-action="delete"]');
   remove.onclick = () => run(async () => {
-    if (!confirm(`删除号池账号 ${title}？此操作会删除 grok_switch 保存的凭据副本。`)) return false;
+    if (!(await appConfirm(`删除号池账号 ${title}`, "此操作会删除 grok_switch 保存的凭据副本。", { danger: true }))) return false;
     await api(`/api/grok-pool/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
     await Promise.all([loadGrokPool(), loadAccountsList({ silent: true })]);
   }, { button: remove, busyLabel: "删除中…", success: "号池账号已删除" });
@@ -5310,7 +5399,9 @@ async function batchRefreshAccounts(button) {
     toast("号池中还没有账号", "error");
     return;
   }
-  if (!confirm(`确定批量刷新 ${total} 个号池账号？\n将逐个处理：先用现有 refresh_token 直接续期（秒级、不弹浏览器）；续期失败（吊销/过期）才回退浏览器重新登录铸造（每个约 40~90 秒）。\n没有在 registrar 账本（accounts_cli.txt）中保存密码的账号会被跳过。`)) return;
+  if (!(await appConfirm(`批量刷新 ${total} 个号池账号？`,
+    "将逐个处理：先用现有 refresh_token 直接续期（秒级、不弹浏览器）；续期失败（吊销/过期）才回退浏览器重新登录铸造（每个约 40~90 秒）。\n没有在 registrar 账本（accounts_cli.txt）中保存密码的账号会被跳过。",
+    { okLabel: "开始刷新" }))) return;
   batchRefreshRunning = true;
   if (button) {
     button.disabled = true;
@@ -5513,8 +5604,8 @@ function stripSecrets(profile, includeKey) {
   return out;
 }
 
-function exportProfile(profile) {
-  const includeKey = confirm("导出是否包含 API Key？\n\n取消 = 仅结构（适合分享）\n确定 = 含密钥（仅私用）");
+async function exportProfile(profile) {
+  const includeKey = await appConfirm("导出包含 API Key？", "确定 = 含密钥（仅私用）\n取消 = 仅结构（适合分享）", { okLabel: "含密钥导出", cancelLabel: "仅结构" });
   const payload = {
     format: "grok_switch_profile",
     version: 1,
@@ -6017,7 +6108,7 @@ function showConnectionStatus(ok, text) {
 }
 
 async function importCurrentConfig(button) {
-  const name = prompt("供应商名称", "Imported");
+  const name = await appPrompt("导入供应商", "Imported", "为从 config.toml 导入的配置起一个名称：");
   if (!name) return;
   await run(async () => {
     await api("/api/import", { method: "POST", body: JSON.stringify({ name, active: false }) });
@@ -6129,6 +6220,7 @@ $("composerProjectBtn")?.addEventListener("click", () => pickWorkingDirectory().
 $("composerAccessSelect")?.addEventListener("change", () => applyComposerAccessSelect());
 bindChatPanelResizer("left");
 bindChatPanelResizer("right");
+bindAppDialog();
 // agentCwd is a hidden state field; updates go through pickWorkingDirectory / openProjectById.
 $("permissionAllowBtn").onclick = () => respondAgentPermission(true, false);
 $("permissionSessionBtn") && ($("permissionSessionBtn").onclick = () => respondAgentPermission(true, true));
@@ -6561,7 +6653,7 @@ $("activateGrokAuthBtn").onclick = () => {
 };
 
 $("deleteGrokAuthBtn").onclick = () => run(async () => {
-  if (!confirm("删除已导入的 Grok OAuth 凭据和本地代理 profile？")) return false;
+  if (!(await appConfirm("删除 Grok OAuth 凭据？", "已导入的凭据和本地代理 profile 将被移除。", { danger: true }))) return false;
   await api("/api/grok-auth", { method: "DELETE" });
   $("grokAuthApiKey").type = "password";
   $("toggleGrokAuthKeyBtn").textContent = "显示";
@@ -6697,8 +6789,8 @@ $("openGrokPoolAuthDirBtn").onclick = () => run(
   { button: $("openGrokPoolAuthDirBtn"), busyLabel: "打开中…" },
 );
 
-$("importGrokPoolPathBtn").onclick = () => {
-  const path = prompt("输入服务器本机上的认证目录绝对路径：", $("grokPoolAuthDir").value.trim());
+$("importGrokPoolPathBtn").onclick = async () => {
+  const path = await appPrompt("导入认证目录", $("grokPoolAuthDir").value.trim(), "输入服务器本机上的认证目录绝对路径：");
   if (!path?.trim()) return;
   run(async () => {
     const response = await api("/api/grok-pool/import-dir", {
@@ -6813,7 +6905,7 @@ async function bulkGrokPoolAction(action, button) {
   }
   const verb = action === "delete" ? "删除" : "禁用";
   const extra = action === "delete" ? "删除后需要重新导入才能恢复。" : "原凭据仍会保留。";
-  if (!confirm(`确定批量${verb} ${abnormal.length} 个异常账号？\n${extra}`)) return;
+  if (!(await appConfirm(`批量${verb} ${abnormal.length} 个异常账号？`, extra, { danger: action === "delete" }))) return;
   await run(async () => {
     const response = await api("/api/grok-pool/bulk", {
       method: "POST",
@@ -6899,7 +6991,7 @@ $("updateDismissBtn")?.addEventListener("click", () => {
 $("updateSkipBtn")?.addEventListener("click", () => run(async () => {
   const version = state.update?.latest_version;
   if (!version) return false;
-  if (!confirm(`跳过 ${version}？下一个更高版本仍会提醒。`)) return false;
+  if (!(await appConfirm(`跳过 ${version}？`, "下一个更高版本仍会提醒。"))) return false;
   const info = await api("/api/update", {
     method: "POST",
     body: JSON.stringify({ action: "skip", version }),
@@ -7104,7 +7196,7 @@ function hideSkillsPopup() {
   skillsPopupVisible = [];
 }
 
-function selectSkillsPopupItem(index) {
+async function selectSkillsPopupItem(index) {
   const items = skillsPopupVisible;
   if (index < 0 || index >= items.length) return;
   const item = items[index];
@@ -7141,7 +7233,7 @@ function selectSkillsPopupItem(index) {
     return;
   }
   if (item.action === "compact") {
-    if (!confirm("向 Agent 发送 /compact 以压缩上下文？")) return;
+    if (!(await appConfirm("压缩上下文？", "向 Agent 发送 /compact 以压缩长对话历史。"))) return;
     insertSlashLine("/compact");
     hideSkillsPopup();
     sendAgentMessage().catch((err) => toast(err.message, "error"));
@@ -7445,7 +7537,7 @@ async function addProjectFromPrompt() {
   try {
     path = await pickDirectoryPath($("agentCwd")?.value || "");
   } catch (err) {
-    path = prompt("项目目录绝对路径（文件夹选择器不可用时手动输入）", $("agentCwd")?.value || "") || "";
+    path = (await appPrompt("手动输入项目目录", $("agentCwd")?.value || "", "文件夹选择器不可用，请输入项目目录绝对路径：")) || "";
     if (!path && err?.message) toast(err.message, "error");
   }
   if (!path) return;
@@ -7959,7 +8051,7 @@ function formatImagineTime(value) {
 }
 
 async function clearImagineGallery() {
-  if (!confirm("确定清空画廊？所有已生成的图片文件将被删除。")) return;
+  if (!(await appConfirm("清空画廊？", "所有已生成的图片文件将被删除。", { danger: true }))) return;
   try {
     await api("/api/imagine/gallery/clear", { method: "POST" });
     await refreshImagineGallery();

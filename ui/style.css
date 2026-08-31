@@ -3563,6 +3563,63 @@ body.resizingChatPanels * {
   backdrop-filter: blur(3px);
 }
 
+/* ── 统一确认/输入对话框（替代原生 confirm/prompt） ── */
+.appDialog {
+  width: min(400px, calc(100vw - 28px));
+  padding: 20px 22px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 28px 90px rgba(20, 20, 24, .28);
+}
+.appDialog[open] { animation: dialogPop 180ms var(--ease-out, ease); }
+@keyframes dialogPop {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+.appDialog::backdrop {
+  background: rgba(21, 23, 29, .44);
+  backdrop-filter: blur(2px);
+}
+.appDialogTitle { margin: 0 0 6px; font-size: 16px; font-weight: 650; }
+.appDialogMessage {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.appDialogInput {
+  width: 100%;
+  margin: 4px 0 14px;
+  min-height: 38px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+.appDialogInput:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+.appDialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.appDialog.danger .appDialogOk {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.appDialog.danger .appDialogOk:not(:disabled):hover {
+  background: color-mix(in srgb, var(--danger) 88%, #000);
+  box-shadow: 0 2px 8px -2px color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
 .chatThemeHead {
   display: flex;
   align-items: flex-start;

@@ -46,12 +46,16 @@ type responsesStreamState struct {
 	callIndex map[int64]int
 	// callBegin 已通告过的 output_index，避免重复 ToolCallBegin。
 	callBegin map[int64]bool
+	// callArgs 按 output_index 原样累积 function_call_arguments.delta；
+	// 存字符串而不是直接写 RawMessage，保证中间态非法 JSON 也不影响回放序列化。
+	callArgs map[int64]string
 }
 
 func newResponsesStreamState() *responsesStreamState {
 	return &responsesStreamState{
 		callIndex: map[int64]int{},
 		callBegin: map[int64]bool{},
+		callArgs:  map[int64]string{},
 	}
 }
 
@@ -68,7 +72,8 @@ type responseCompleted struct {
 
 // outputItemDone 携带单个 output 条目（function_call 的兜底路径）。
 type outputItemDone struct {
-	Item struct {
+	OutputIndex int64 `json:"output_index"`
+	Item        struct {
 		Type      string `json:"type"`
 		CallID    string `json:"call_id"`
 		Name      string `json:"name"`
@@ -105,18 +110,22 @@ func (s *responsesStreamState) handle(data []byte, onDelta func(StreamedPart)) e
 		var e struct {
 			OutputIndex int64 `json:"output_index"`
 			Item        struct {
-				Type   string `json:"type"`
-				CallID string `json:"call_id"`
-				Name   string `json:"name"`
+				Type      string `json:"type"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
 			} `json:"item"`
 		}
 		if json.Unmarshal(data, &e) == nil && e.Item.Type == "function_call" {
 			idx := len(s.msg.ToolCalls)
 			s.callIndex[e.OutputIndex] = idx
+			// added 自带部分 arguments 时以它为初值；不要预设 "{}"——
+			// 否则后续 delta 追加会拼出 {}{...} 的非法 JSON。
+			s.callArgs[e.OutputIndex] = e.Item.Arguments
 			s.msg.ToolCalls = append(s.msg.ToolCalls, ToolCall{
 				ID:        e.Item.CallID,
 				Name:      e.Item.Name,
-				Arguments: json.RawMessage("{}"),
+				Arguments: json.RawMessage(e.Item.Arguments),
 			})
 			if !s.callBegin[e.OutputIndex] {
 				s.callBegin[e.OutputIndex] = true
@@ -130,16 +139,24 @@ func (s *responsesStreamState) handle(data []byte, onDelta func(StreamedPart)) e
 		}
 		if json.Unmarshal(data, &e) == nil && e.Delta != "" {
 			if idx, ok := s.callIndex[e.OutputIndex]; ok {
-				s.msg.ToolCalls[idx].Arguments = json.RawMessage(string(s.msg.ToolCalls[idx].Arguments) + e.Delta)
+				s.callArgs[e.OutputIndex] += e.Delta
+				s.msg.ToolCalls[idx].Arguments = json.RawMessage(s.callArgs[e.OutputIndex])
 				onDelta(ToolCallDelta{CallIndex: idx, ArgumentsDelta: e.Delta})
 			}
 		}
 	case "response.output_item.done":
 		var e outputItemDone
 		if json.Unmarshal(data, &e) == nil && e.Item.Type == "function_call" {
-			// 兜底：若 added 事件缺失（部分代理实现），在此补齐。
-			if s.findCall(e.Item.CallID) < 0 {
+			// done 携带完整 arguments：无论 added/delta 走过没有，都以它为准，
+			// 修正部分代理增量流不完整或缺失的中间态。
+			if idx := s.findCall(e.Item.CallID); idx >= 0 {
+				s.callArgs[e.OutputIndex] = e.Item.Arguments
+				s.msg.ToolCalls[idx].Arguments = json.RawMessage(orEmptyJSON(e.Item.Arguments))
+			} else {
+				// 兜底：若 added 事件缺失（部分代理实现），在此补齐。
 				idx := len(s.msg.ToolCalls)
+				s.callIndex[e.OutputIndex] = idx
+				s.callArgs[e.OutputIndex] = e.Item.Arguments
 				s.msg.ToolCalls = append(s.msg.ToolCalls, ToolCall{
 					ID:        e.Item.CallID,
 					Name:      e.Item.Name,

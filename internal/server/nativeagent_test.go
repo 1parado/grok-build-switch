@@ -533,3 +533,71 @@ func TestNativeServiceRejectsMissingCwd(t *testing.T) {
 		t.Fatal("失效路径不应写入状态")
 	}
 }
+
+// 回归：turn 挂起审批时状态为 busy，旧实现 NewSession 保留 busy 不复位，
+// 一次无人应答的审批会把服务永久锁死（UI 无限转圈），新建会话也被吞掉。
+// 修复后 NewSession 应取消进行中的 turn 并复位到 ready。
+func TestNativeServiceNewSessionUnblocksBusy(t *testing.T) {
+	// write 工具需要审批：turn 停在 permission_request 上，不会自己结束。
+	prov := &stubProvider{steps: []llm.StreamResult{
+		toolStep("c1", "write", `{"path":"out.txt","content":"x"}`),
+		textStep("写完了"),
+	}}
+	svc := newTestNativeService(t, prov)
+	sub := subscribeNative(t, svc)
+	_ = svc.Start(t.Context(), agentbridge.StartOptions{Cwd: t.TempDir()})
+	<-sub.events
+
+	if err := svc.Prompt("写个文件", nil); err != nil {
+		t.Fatal(err)
+	}
+	// 等到 permission_request（此时 state=busy）。
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev := <-sub.events:
+			if ev.Type == "permission_request" {
+				goto busyConfirmed
+			}
+		case <-deadline:
+			t.Fatal("未收到审批请求")
+		}
+	}
+busyConfirmed:
+	for {
+		if svc.Status().State == "busy" {
+			break
+		}
+		select {
+		case <-sub.events:
+		case <-deadline:
+			t.Fatal("turn 未进入 busy")
+		}
+	}
+
+	// busy 期间新建会话：应成功并复位 ready，而不是静默保留 busy。
+	cwd2 := t.TempDir()
+	if err := svc.NewSession(t.Context(), cwd2); err != nil {
+		t.Fatalf("busy 期间新建会话失败: %v", err)
+	}
+	if st := svc.Status(); st.State != "ready" {
+		t.Fatalf("NewSession 后状态应为 ready, got %s (err=%s)", st.State, st.Error)
+	}
+	if st := svc.Status(); st.SessionID == "" || st.Cwd != cwd2 {
+		t.Fatalf("NewSession 后应指向新会话: %+v", st)
+	}
+	// 旧 turn 已被取消：transcript 收到配对的取消结果，turn_done 收口。
+	final := waitTurnDone(t, sub, 10*time.Second)
+	if final.Type != "turn_done" {
+		t.Fatalf("被放弃的 turn 应收口: %+v", final)
+	}
+	// 服务恢复可用：新会话能正常发起 turn。
+	prov.steps = []llm.StreamResult{textStep("新的会话")}
+	if err := svc.Prompt("你好", nil); err != nil {
+		t.Fatalf("新会话 Prompt 失败: %v", err)
+	}
+	final = waitTurnDone(t, sub, 10*time.Second)
+	if final.Type != "turn_done" {
+		t.Fatalf("新会话 turn 应正常完成: %+v", final)
+	}
+}

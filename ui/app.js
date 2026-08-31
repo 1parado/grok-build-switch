@@ -43,7 +43,6 @@ const state = {
 const OFFICIAL_PROVIDER_KEY = "official";
 
 const $ = (id) => document.getElementById(id);
-let toastTimer = null;
 let refreshTimer = null;
 let grokPoolPollTimer = null;
 let registrarPollTimer = null;
@@ -490,16 +489,34 @@ function isAbortError(err) {
   return !!err && (err.name === "AbortError" || err.code === "aborted");
 }
 
+const TOAST_MAX_STACK = 3;
 function toast(message, type = "info") {
-  const el = $("toast");
-  el.textContent = message;
-  el.classList.remove("error", "success", "warn", "show");
-  if (type === "error") el.classList.add("error");
-  if (type === "success") el.classList.add("success");
-  if (type === "warn") el.classList.add("warn");
-  requestAnimationFrame(() => el.classList.add("show"));
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), type === "error" ? 4200 : 2800);
+  // 堆叠队列：单例覆盖式 toast 会让连续错误互相顶掉，只剩最后一条。
+  const host = $("toast");
+  if (!host) return;
+  const item = document.createElement("div");
+  item.className = `toastItem ${type === "error" || type === "success" || type === "warn" ? type : "info"}`;
+  const icon = document.createElement("span");
+  icon.className = "toastIcon";
+  icon.setAttribute("aria-hidden", "true");
+  const ICONS = {
+    error: '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10" cy="10" r="7.4"/><path d="M10 6.4v4.4"/><circle cx="10" cy="13.8" r="0.5" fill="currentColor" stroke="none"/></svg>',
+    success: '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.4"/><path d="m6.6 10.2 2.3 2.3 4.5-4.8"/></svg>',
+    warn: '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5 17.5 16h-15L10 3.5Z"/><path d="M10 8.6v3.2"/></svg>',
+    info: '<svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10" cy="10" r="7.4"/><path d="M10 9.2v4.4"/><circle cx="10" cy="6.4" r="0.5" fill="currentColor" stroke="none"/></svg>',
+  };
+  icon.innerHTML = ICONS[type] || ICONS.info;
+  const text = document.createElement("span");
+  text.className = "toastText";
+  text.textContent = message;
+  item.append(icon, text);
+  host.append(item);
+  while (host.children.length > TOAST_MAX_STACK) host.firstElementChild?.remove();
+  requestAnimationFrame(() => item.classList.add("show"));
+  setTimeout(() => {
+    item.classList.remove("show");
+    setTimeout(() => item.remove(), 200);
+  }, type === "error" ? 4200 : 2800);
 }
 
 function setBusy(button, busy, labelWhenBusy) {
@@ -957,6 +974,11 @@ function showView(name) {
   document.querySelectorAll("[data-home-only]").forEach((el) => {
     el.hidden = name !== "home";
   });
+  // 顶栏导航激活态：7 个同级按钮此前永远长一个样，无当前视图指示。
+  const NAV_ACTIVE = { skills: "navSkillsBtn", accounts: "navAccountsBtn", imagine: "navImagineBtn", settings: "navSettingsBtn" };
+  document.querySelectorAll(".headerRight .btn[data-nav]").forEach((btn) => {
+    btn.classList.toggle("current", btn.id === NAV_ACTIVE[name]);
+  });
   // Keep header add/import only on home list.
   if ($("headerSubtitle")) {
     $("headerSubtitle").textContent =
@@ -1276,12 +1298,26 @@ function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
     event.stopPropagation();
     startRenameSession(session);
   };
+// 折叠箭头 SVG（统一图标语言：主题按钮已是 SVG，字符 ▾/▸ 显廉价）
+const CHEVRON_EXPANDED = '<svg viewBox="0 0 20 20" width="10" height="10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5.5 12 4.5-4.5L14.5 12"/></svg>';
+const CHEVRON_COLLAPSED = '<svg viewBox="0 0 20 20" width="10" height="10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5.5 4.5 4.5L8 14.5"/></svg>';
+
+// 关闭/删除 ×
+const ICON_CLOSE = '<svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="m5 5 10 10M15 5 5 15"/></svg>';
+
+// 拖拽手柄 ↕
+const ICON_DRAG = '<svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 6.5 10 3.5l3 3M7 13.5l3 3 3-3M10 4v12"/></svg>';
+
+function setChevron(el, expanded) {
+  if (el) el.innerHTML = expanded ? CHEVRON_EXPANDED : CHEVRON_COLLAPSED;
+}
+
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";
   deleteBtn.className = "sessionActionBtn sessionDeleteBtn";
   deleteBtn.title = "删除会话";
   deleteBtn.setAttribute("aria-label", `删除会话 ${session.title || ""}`);
-  deleteBtn.textContent = "×";
+  deleteBtn.innerHTML = ICON_CLOSE;
   deleteBtn.onclick = (event) => {
     event.stopPropagation();
     deleteAgentSession(session).catch((err) => toast(err.message || String(err), "error"));
@@ -1340,7 +1376,7 @@ function renderAgentSessionList() {
   }
   if (toggle) toggle.setAttribute("aria-expanded", state.orphanSessionsOpen ? "true" : "false");
   const chevron = toggle?.querySelector(".treeChevron");
-  if (chevron) chevron.textContent = state.orphanSessionsOpen ? "▾" : "▸";
+  if (chevron) setChevron(chevron, state.orphanSessionsOpen);
 
   if (!state.orphanSessionsOpen) {
     list.hidden = true;
@@ -1368,7 +1404,7 @@ function renderAgentSessionList() {
     const rowChevron = document.createElement("span");
     rowChevron.className = "projectItemChevron";
     rowChevron.setAttribute("aria-hidden", "true");
-    rowChevron.textContent = expanded ? "▾" : "▸";
+    setChevron(rowChevron, expanded);
 
     const body = document.createElement("span");
     body.className = "projectItemBody";
@@ -1414,12 +1450,14 @@ function renderAgentSessionList() {
       };
       actions.append(newBtn);
 
+const ICON_PLUS = '<svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.2v11.6M4.2 10h11.6"/></svg>';
+
       const addProjBtn = document.createElement("button");
       addProjBtn.type = "button";
       addProjBtn.className = "sessionActionBtn projectPromoteBtn";
       addProjBtn.title = "添加为项目";
       addProjBtn.setAttribute("aria-label", `将 ${group.name} 添加为项目`);
-      addProjBtn.textContent = "＋";
+      addProjBtn.innerHTML = ICON_PLUS;
       addProjBtn.onclick = (event) => {
         event.stopPropagation();
         promoteWorkspaceToProject(group.path).catch((err) => toast(err.message || String(err), "error"));
@@ -3946,7 +3984,7 @@ function renderChatAttachments() {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "chatAttachmentRemove";
-    remove.textContent = "×";
+    remove.innerHTML = ICON_CLOSE;
     remove.setAttribute("aria-label", `移除 ${att.name || "附件"}`);
     remove.onclick = () => {
       releaseAttachmentPreview(state.pendingAttachments[index]);
@@ -4417,7 +4455,7 @@ function renderProfiles() {
 			: `${escapeHtml(profile.default_model || "未设默认模型")} · ${formatUpstream(profile.upstream_format)} · ${profile.models?.length || 0} 模型`;
 		el.innerHTML = `
 			<div class="providerTop">
-				<button type="button" class="dragHandle" draggable="true" data-action="drag" title="拖动排序" aria-label="拖动 ${escapeHtml(profile.name)} 排序">↕</button>
+				<button type="button" class="dragHandle" draggable="true" data-action="drag" title="拖动排序" aria-label="拖动 ${escapeHtml(profile.name)} 排序">${ICON_DRAG}</button>
 				<div class="providerInfo">
 					<h3 class="providerName">${escapeHtml(profile.name)}</h3>
 					<p class="providerUrl">${official ? "grok.com / auth.json" : providerLinkHtml(profile.base_url)}</p>
@@ -7205,7 +7243,7 @@ function renderAgentProjects() {
     const chevron = document.createElement("span");
     chevron.className = "projectItemChevron";
     chevron.setAttribute("aria-hidden", "true");
-    chevron.textContent = expanded ? "▾" : "▸";
+    setChevron(chevron, expanded);
 
     const body = document.createElement("span");
     body.className = "projectItemBody";

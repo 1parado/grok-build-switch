@@ -24,8 +24,12 @@ type ProfileBridge struct {
 	// ModelDef 投影（能力表来源）。
 	SupportsReasoningEffort bool
 	ReasoningEfforts        []string
-	ContextWindow           int64
-	MaxCompletionTokens     int64
+	// DefaultEffort 是 Profile 级默认推理强度（default_reasoning_effort）。
+	// 用户在 UI 选「自动」时前端不发 strength，Provider 用它兜底；
+	// 空表示 Profile 未配置默认档，请求不带 reasoning 参数。
+	DefaultEffort       string
+	ContextWindow       int64
+	MaxCompletionTokens int64
 }
 
 // NewProviderForProfile 是 Profile→Provider 的唯一工厂。
@@ -52,14 +56,14 @@ func NewProviderForProfile(p ProfileBridge) (Provider, error) {
 	}
 	switch format {
 	case "responses":
-		return newResponsesProviderFull(target, p.Model, p.SessionKey, cap, "/responses", p.WirePathOverride)
+		return newResponsesProviderFull(target, p.Model, p.SessionKey, cap, "/responses", p.WirePathOverride, p.DefaultEffort)
 	default:
-		return newChatCompletionsProviderFull(target, p.Model, cap, "/chat/completions", p.WirePathOverride)
+		return newChatCompletionsProviderFull(target, p.Model, cap, "/chat/completions", p.WirePathOverride, p.DefaultEffort)
 	}
 }
 
 // newResponsesProviderFull 构造带路径覆盖的 Responses 适配器（工厂内部使用）。
-func newResponsesProviderFull(target UpstreamTarget, model, sessionKey string, cap ModelCapability, defaultPath, override string) (Provider, error) {
+func newResponsesProviderFull(target UpstreamTarget, model, sessionKey string, cap ModelCapability, defaultPath, override, defaultEffort string) (Provider, error) {
 	p, err := NewResponsesProvider(target, model, sessionKey, cap)
 	if err != nil {
 		return nil, err
@@ -69,11 +73,12 @@ func newResponsesProviderFull(target UpstreamTarget, model, sessionKey string, c
 	} else {
 		p.wirePath = defaultPath
 	}
+	p.effort = defaultEffort
 	return p, nil
 }
 
 // newChatCompletionsProviderFull 构造带路径覆盖的 chat/completions 适配器。
-func newChatCompletionsProviderFull(target UpstreamTarget, model string, cap ModelCapability, defaultPath, override string) (Provider, error) {
+func newChatCompletionsProviderFull(target UpstreamTarget, model string, cap ModelCapability, defaultPath, override, defaultEffort string) (Provider, error) {
 	p, err := NewChatCompletionsProvider(target, model, cap)
 	if err != nil {
 		return nil, err
@@ -83,6 +88,7 @@ func newChatCompletionsProviderFull(target UpstreamTarget, model string, cap Mod
 	} else {
 		p.wirePath = defaultPath
 	}
+	p.effort = defaultEffort
 	return p, nil
 }
 

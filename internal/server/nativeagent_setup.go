@@ -85,6 +85,7 @@ func profileToBridge(p profiles.Profile, actualPort int) llm.ProfileBridge {
 		SessionKey:              p.ID,
 		SupportsReasoningEffort: supportsEffort,
 		ReasoningEfforts:        efforts,
+		DefaultEffort:           p.DefaultReasoningEffort,
 		ContextWindow:           contextWindow,
 		MaxCompletionTokens:     maxCompletion,
 	}

@@ -279,31 +279,44 @@ func (n *nativeAgentService) Stop() error {
 }
 
 func (n *nativeAgentService) NewSession(ctx context.Context, cwd string) error {
+	// 取消进行中的 turn：新建会话意味着用户明确放弃当前任务，若 busy 时
+	// 不复位状态，一次卡死的 turn（如权限审批无人应答）会把服务永久锁在
+	// busy，后续所有 NewSession 都被吞掉，UI 表现为无限转圈。
 	n.mu.Lock()
 	if n.turnCancel != nil {
 		n.turnCancel()
 		n.turnCancel = nil
 	}
+	// 卡死 turn 的挂起审批/计划一并唤醒（CancelPrompt 同款语义），
+	// 否则被取消的 turn goroutine 收口时可能把状态写回 ready 之外。
+	n.mu.Unlock()
+	n.resolveAllPending()
 	if cwd == "" {
 		cwd = n.deps.DefaultCwd
 	}
 	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
-		n.mu.Unlock()
 		return fmt.Errorf("工作目录不存在: %s", cwd)
 	}
+	n.mu.Lock()
 	n.cwd = cwd
 	n.memory = agentkit.NewCtxMemory()
 	n.errText = ""
+	n.sessionID = ""
+	n.state = "starting"
 	n.mu.Unlock()
+	n.broadcastStatus()
 	meta, err := n.st.Create(agentkit.SessionMeta{Cwd: cwd})
 	if err != nil {
+		n.mu.Lock()
+		n.state = "dead"
+		n.errText = err.Error()
+		n.mu.Unlock()
+		n.broadcastStatus()
 		return err
 	}
 	n.mu.Lock()
 	n.sessionID = meta.ID
-	if n.state != "busy" {
-		n.state = "ready"
-	}
+	n.state = "ready"
 	n.mu.Unlock()
 	n.broadcastStatus()
 	return nil

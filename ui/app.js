@@ -1355,6 +1355,20 @@ function renderSidebarTree() {
   renderAgentSessionList();
 }
 
+// 折叠箭头 SVG（统一图标语言：主题按钮已是 SVG，字符 ▾/▸ 显廉价）
+const CHEVRON_EXPANDED = '<svg viewBox="0 0 20 20" width="10" height="10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5.5 12 4.5-4.5L14.5 12"/></svg>';
+const CHEVRON_COLLAPSED = '<svg viewBox="0 0 20 20" width="10" height="10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5.5 4.5 4.5L8 14.5"/></svg>';
+
+// 关闭/删除 ×
+const ICON_CLOSE = '<svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="m5 5 10 10M15 5 5 15"/></svg>';
+
+// 拖拽手柄 ↕
+const ICON_DRAG = '<svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 6.5 10 3.5l3 3M7 13.5l3 3 3-3M10 4v12"/></svg>';
+
+function setChevron(el, expanded) {
+  if (el) el.innerHTML = expanded ? CHEVRON_EXPANDED : CHEVRON_COLLAPSED;
+}
+
 function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
   const button = document.createElement("div");
   const missing = !!session.cwd_missing;
@@ -1387,19 +1401,6 @@ function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
     event.stopPropagation();
     startRenameSession(session);
   };
-// 折叠箭头 SVG（统一图标语言：主题按钮已是 SVG，字符 ▾/▸ 显廉价）
-const CHEVRON_EXPANDED = '<svg viewBox="0 0 20 20" width="10" height="10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5.5 12 4.5-4.5L14.5 12"/></svg>';
-const CHEVRON_COLLAPSED = '<svg viewBox="0 0 20 20" width="10" height="10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 5.5 4.5 4.5L8 14.5"/></svg>';
-
-// 关闭/删除 ×
-const ICON_CLOSE = '<svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="m5 5 10 10M15 5 5 15"/></svg>';
-
-// 拖拽手柄 ↕
-const ICON_DRAG = '<svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 6.5 10 3.5l3 3M7 13.5l3 3 3-3M10 4v12"/></svg>';
-
-function setChevron(el, expanded) {
-  if (el) el.innerHTML = expanded ? CHEVRON_EXPANDED : CHEVRON_COLLAPSED;
-}
 
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";

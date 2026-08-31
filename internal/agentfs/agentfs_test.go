@@ -2,12 +2,38 @@ package agentfs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// shellSleep 返回阻塞约 n 秒的当前平台命令（cmd 没有 sleep）。
+// 2>&1 把子进程的管道句柄重定向到 nul，避免超时断父进程后
+// Run() 因等待子进程关闭管道而阻塞到命令自然结束。
+func shellSleep(n int) string {
+	if runtime.GOOS == "windows" {
+		// ping -n N+1 127.0.0.1 每个间隔约 1 秒，总计约 N 秒。
+		return fmt.Sprintf("ping -n %d 127.0.0.1 >nul 2>&1", n+1)
+	}
+	return fmt.Sprintf("sleep %d", n)
+}
+
+// shellPwd 返回打印当前工作目录的当前平台命令（cmd 里等价是 cd）。
+func shellPwd() string {
+	if runtime.GOOS == "windows" {
+		return "cd"
+	}
+	return "pwd"
+}
+
+// exitCmd 返回以指定码退出的当前平台命令（cmd 的 exit 同样可用）。
+func exitCmd(code int) string {
+	return fmt.Sprintf("exit %d", code)
+}
 
 func TestGuardResolvesAndEnforces(t *testing.T) {
 	cwd := t.TempDir()
@@ -87,7 +113,7 @@ func TestShellRunAndTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	res = env.Shell(context.Background(), "sleep 5", "", 200*time.Millisecond)
+	res = env.Shell(context.Background(), shellSleep(5), "", 200*time.Millisecond)
 	if !res.TimedOut {
 		t.Fatalf("应超时: %+v", res)
 	}
@@ -98,7 +124,7 @@ func TestShellRunAndTimeout(t *testing.T) {
 
 func TestShellNonZeroExit(t *testing.T) {
 	env := Env{Cwd: t.TempDir()}
-	res := env.Shell(context.Background(), "exit 3", "", time.Minute)
+	res := env.Shell(context.Background(), exitCmd(3), "", time.Minute)
 	if res.ExitCode != 3 {
 		t.Fatalf("退出码错误: %+v", res)
 	}
@@ -108,7 +134,7 @@ func TestShellCwdParameter(t *testing.T) {
 	a := t.TempDir()
 	b := t.TempDir()
 	env := Env{Cwd: a}
-	res := env.Shell(context.Background(), "pwd", b, time.Minute)
+	res := env.Shell(context.Background(), shellPwd(), b, time.Minute)
 	if !strings.Contains(res.Stdout, filepath.Base(b)) {
 		t.Fatalf("cwd 参数未生效: %+v (want base %s)", res, filepath.Base(b))
 	}

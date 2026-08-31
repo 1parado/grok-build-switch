@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -52,6 +53,16 @@ func (e Env) Shell(ctx context.Context, command, dir string, timeout time.Durati
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(runCtx, "cmd", "/C", command)
+		// CommandContext 默认只杀 cmd.exe 本身，子进程（如长命令）
+		// 会变成孤儿并继续占着输出管道，导致 Run 一直等。改成杀整棵树。
+		cmd.Cancel = func() error {
+			if cmd.Process == nil {
+				return nil
+			}
+			return exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+		}
+		// 树杀后仍可能有进程短暂占着管道，设上限避免 Wait 无限阻塞。
+		cmd.WaitDelay = 2 * time.Second
 	} else {
 		cmd = exec.CommandContext(runCtx, "/bin/sh", "-c", command)
 	}

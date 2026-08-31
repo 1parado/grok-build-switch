@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +17,24 @@ import (
 func testEnv(t *testing.T) agentfs.Env {
 	t.Helper()
 	return agentfs.Env{Cwd: t.TempDir()}
+}
+
+// shellSleep 返回阻塞约 n 秒的当前平台命令（cmd 没有 sleep）。
+// 2>&1 把子进程的管道句柄重定向到 nul，避免超时断父进程后
+// Run() 因等待子进程关闭管道而阻塞到命令自然结束。
+func shellSleep(n int) string {
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("ping -n %d 127.0.0.1 >nul 2>&1", n+1)
+	}
+	return fmt.Sprintf("sleep %d", n)
+}
+
+// shellPwd 返回打印当前工作目录的当前平台命令（cmd 里等价是 cd）。
+func shellPwd() string {
+	if runtime.GOOS == "windows" {
+		return "cd"
+	}
+	return "pwd"
 }
 
 func runTool(t *testing.T, tool Tool, args string, env agentfs.Env) ToolOutput {
@@ -154,7 +174,7 @@ func TestBashTool(t *testing.T) {
 	}
 
 	// 超时。
-	out = runTool(t, BashTool{}, `{"command": "sleep 3", "timeout": 1}`, env)
+	out = runTool(t, BashTool{}, fmt.Sprintf(`{"command": %q, "timeout": 1}`, shellSleep(3)), env)
 	if !out.IsError || !strings.Contains(out.Text, "超时") {
 		t.Fatalf("超时错误: %+v", out)
 	}
@@ -162,13 +182,13 @@ func TestBashTool(t *testing.T) {
 	// dir 参数。
 	sub := filepath.Join(env.Cwd, "subdir")
 	_ = os.MkdirAll(sub, 0o755)
-	out = runTool(t, BashTool{}, `{"command": "pwd", "dir": "subdir"}`, env)
+	out = runTool(t, BashTool{}, fmt.Sprintf(`{"command": %q, "dir": "subdir"}`, shellPwd()), env)
 	if out.IsError || !strings.Contains(out.Text, "subdir") {
 		t.Fatalf("dir 参数错误: %+v", out)
 	}
 
 	// 越界 dir。
-	out = runTool(t, BashTool{}, `{"command": "pwd", "dir": "../../etc"}`, env)
+	out = runTool(t, BashTool{}, fmt.Sprintf(`{"command": %q, "dir": "../../etc"}`, shellPwd()), env)
 	if !out.IsError {
 		t.Fatal("越界 dir 应拒绝")
 	}

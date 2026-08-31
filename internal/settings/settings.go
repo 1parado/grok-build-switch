@@ -34,6 +34,25 @@ type Settings struct {
 	// 服务器并接管 image_gen 请求（走账号池）；关闭时移除注册、不做接管，
 	// 模型回到无生图能力的原始状态。对所有供应商生效。
 	ImageGenEnabled bool `json:"image_gen_enabled"`
+	// AgentEngine 选择聊天工作台的 Agent 引擎（设计文档 D6）：
+	//   "acp"    — spawn Grok CLI 走 ACP 协议（旧行为，默认）
+	//   "native" — 进程内自研引擎（internal/agentloop），无需 grok CLI
+	// 空值按 "acp" 处理；启动失败自动降级 acp 并在 UI 提示。
+	AgentEngine string `json:"agent_engine,omitempty"`
+}
+
+// 引擎选择器的合法取值。
+const (
+	AgentEngineACP    = "acp"
+	AgentEngineNative = "native"
+)
+
+// NormalizedAgentEngine 返回归一化的引擎名（空/未知 → acp）。
+func (s Settings) NormalizedAgentEngine() string {
+	if s.AgentEngine == AgentEngineNative {
+		return AgentEngineNative
+	}
+	return AgentEngineACP
 }
 
 type Store struct {
@@ -235,6 +254,7 @@ func normalize(s Settings) Settings {
 	if s.AgentDefaultCwd == "." {
 		s.AgentDefaultCwd = ""
 	}
+	s.AgentEngine = s.NormalizedAgentEngine()
 	return s
 }
 

@@ -567,6 +567,13 @@
       </div>
 
       <form id="settingsForm" class="formCard">
+        <label class="field">Agent 引擎
+          <select id="agentEngine">
+            <option value="acp">Grok CLI（ACP 桥，默认）</option>
+            <option value="native">内置引擎（无需安装 Grok CLI）</option>
+          </select>
+        </label>
+        <p class="muted tiny settingsHint" id="agentEngineHint">切换引擎后重启应用生效；已开启生图时两种引擎均可生图（走账号池）。内置引擎还在灰度阶段，遇到问题可随时切回。</p>
         <label class="check"><input type="checkbox" id="autostart"> 开机自启</label>
         <label class="check"><input type="checkbox" id="silentAutostart"> 自启时静默</label>
         <label class="check"><input type="checkbox" id="autoOpenBrowser"> 启动时打开面板</label>

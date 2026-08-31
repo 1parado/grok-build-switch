@@ -4482,6 +4482,16 @@ function renderSettings(settings) {
   $("silentAutostart").checked = !!settings.silent_autostart;
   $("autoOpenBrowser").checked = !!settings.auto_open_browser;
   $("port").value = settings.port;
+  const engineSelect = $("agentEngine");
+  if (engineSelect) {
+    engineSelect.value = settings.agent_engine === "native" ? "native" : "acp";
+    const hint = $("agentEngineHint");
+    if (hint) {
+      hint.textContent = engineSelect.value === "native"
+        ? "当前使用内置引擎（进程内，无需 Grok CLI）。切换引擎后重启应用生效。"
+        : "当前使用 Grok CLI（ACP 桥）。切换引擎后重启应用生效；内置引擎无需安装 Grok CLI。";
+    }
+  }
   const actual = state.status?.port;
   const hint = $("portHint");
   if (actual && settings.port && actual !== settings.port) {
@@ -6307,12 +6317,13 @@ $("settingsForm").onsubmit = (event) => {
       silent_autostart: $("silentAutostart").checked,
       auto_open_browser: $("autoOpenBrowser").checked,
       lan_access_enabled: $("lanAccessEnabled").checked,
+      agent_engine: ($("agentEngine")?.value === "native") ? "native" : "acp",
       theme: themeSetting(),
       port: Number($("port").value || 17878),
     };
     await api("/api/settings", { method: "PUT", body: JSON.stringify(settings) });
     await refreshAll();
-  }, { button: $("saveSettingsBtn"), busyLabel: "保存中…", success: "设置已保存" });
+  }, { button: $("saveSettingsBtn"), busyLabel: "保存中…", success: "设置已保存（引擎切换重启后生效）" });
 };
 
 $("lanAccessAddress").onchange = () => {

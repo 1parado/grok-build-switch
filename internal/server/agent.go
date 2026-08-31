@@ -578,6 +578,10 @@ func (s *Server) rememberAgentCwd(cwd string) {
 	if s.Settings == nil || strings.TrimSpace(cwd) == "" {
 		return
 	}
+	// 不持久化已失效的目录（浏览器端 localStorage 可能回传旧路径）。
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		return
+	}
 	current, err := s.Settings.Get()
 	if err != nil || current.AgentDefaultCwd == cwd {
 		return

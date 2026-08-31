@@ -136,12 +136,25 @@ func main() {
 		CpaMint:       cpamint.NewService(),
 		Registrar:     registrarService,
 		Switcher:      sw,
-		Agent:         agent,
 		Assets:        assets,
 		ExePath:       exePath,
 		Version:       version,
 		UpdateChecker: updatecheck.New(version, "grok_switch.exe"),
 		UpdateState:   updateState,
+	}
+	// 引擎选择器（设计文档 D6）：native = 进程内自研引擎，无需 grok CLI；
+	// acp = 旧桥（spawn Grok CLI，默认）。构造失败自动降级 acp 并写日志。
+	// 必须在 Listen 之前赋值：Handler 在 goroutine 里开始服务后读 s.Agent。
+	if currentSettings.AgentEngine == settings.AgentEngineNative {
+		if nativeSvc, nativeErr := appServer.NewNativeAgentService(); nativeErr == nil {
+			appServer.Agent = nativeSvc
+			crash.Logf("agent engine: native")
+		} else {
+			appServer.Agent = agent
+			crash.Logf("native agent engine unavailable, fallback to acp: %v", nativeErr)
+		}
+	} else {
+		appServer.Agent = agent
 	}
 	httpServer, port, err := appServer.Listen(currentSettings.Port)
 	if err != nil {

@@ -58,6 +58,29 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.Agent.Status())
 }
 
+// handleAgentPending 返回仍然挂起的审批/计划请求。
+// permission_request 走 WS 单次广播，页面刷新或 WS 断开期间发出的事件
+// 无法再收到；此接口让前端重连后主动拉取，恢复审批入口（.turn 仍挂在
+// WaitForDecision 上，不响应就会一直占着 busy）。
+func (s *Server) handleAgentPending(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	pender, ok := s.Agent.(interface {
+		PendingRequests() []agentbridge.Event
+	})
+	if !ok {
+		writeJSON(w, []agentbridge.Event{})
+		return
+	}
+	writeJSON(w, pender.PendingRequests())
+}
+
 func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)

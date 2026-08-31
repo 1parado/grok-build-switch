@@ -57,7 +57,7 @@ func newTestNativeService(t *testing.T, prov llm.Provider) *nativeAgentService {
 	svc, err := newNativeAgentService(EngineDeps{
 		SessionsRoot: root,
 		ProviderFor:  func() (llm.Provider, error) { return prov, nil },
-		SystemPrompt: func(toolDoc string) string { return "sys+" + toolDoc },
+		SystemPrompt: func(env string) string { return "sys+" + env },
 		DefaultCwd:   t.TempDir(),
 	})
 	if err != nil {
@@ -309,21 +309,24 @@ func TestNativeServiceRewind(t *testing.T) {
 	}
 }
 
-func TestNativeServiceSystemPromptIncludesToolDoc(t *testing.T) {
+func TestNativeServiceSystemPromptIncludesEnvSection(t *testing.T) {
 	prov := &stubProvider{steps: []llm.StreamResult{textStep("ok")}}
 	svc := newTestNativeService(t, prov)
 	var captured string
-	svc.deps.SystemPrompt = func(toolDoc string) string {
-		captured = toolDoc
+	svc.deps.SystemPrompt = func(env string) string {
+		captured = env
 		return "sys"
 	}
+	cwd := t.TempDir()
+	_ = os.WriteFile(filepath.Join(cwd, "alpha.txt"), []byte("x"), 0o644)
+	_ = os.Mkdir(filepath.Join(cwd, "subdir"), 0o755)
 	sub := subscribeNative(t, svc)
-	_ = svc.Start(t.Context(), agentbridge.StartOptions{Cwd: t.TempDir()})
+	_ = svc.Start(t.Context(), agentbridge.StartOptions{Cwd: cwd})
 	<-sub.events
 	_ = svc.Prompt("hi", nil)
 	waitTurnDone(t, sub, 10*time.Second)
-	if !containsStr(captured, "read") || !containsStr(captured, "bash") {
-		t.Fatalf("工具文档未注入 system prompt: %q", captured[:min(200, len(captured))])
+	if !containsStr(captured, "工作目录: "+cwd) || !containsStr(captured, "alpha.txt") || !containsStr(captured, "subdir/") {
+		t.Fatalf("环境块未注入 system prompt: %q", captured)
 	}
 }
 

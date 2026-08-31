@@ -293,11 +293,6 @@ func TestRegistrySchemasAndExecute(t *testing.T) {
 	if out.IsError || !strings.Contains(out.Text, "hello") {
 		t.Fatalf("注册表 read 失败: %+v", out)
 	}
-	// SystemPromptDoc。
-	doc := reg.SystemPromptDoc()
-	if !strings.Contains(doc, "## read") || !strings.Contains(doc, "## bash") {
-		t.Fatalf("system prompt 文档缺失:\n%s", doc)
-	}
 }
 
 func TestRegistryUnregisterImageGen(t *testing.T) {

@@ -6,6 +6,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
+	"runtime"
 	"strings"
 
 	"grok_switch/internal/agentbridge"
@@ -157,35 +159,72 @@ func (s *Server) agentDefaultCwd() string {
 }
 
 // nativeSystemPrompt 组装原生引擎系统提示词。
-// 骨架借鑑 Kimi 内置工具文档的组织方式（§6.3）；文案用中文，
-// 与本工具用户群一致。toolDoc 由注册表汇总（含每个工具的用法契约）。
-func nativeSystemPrompt(toolDoc string) string {
+// 系统提示词只携带模型无法从对话推断的环境事实（工作目录、目录概貌、
+// 平台）；服务方式已由后训练写入权重，不再重复。环境块按会话现算：
+// cwd 是每会话状态，不能在服务构造时定死。
+func nativeSystemPrompt(env string) string {
 	var b strings.Builder
-	b.WriteString(`你是 grok_switch 内置的软件工程 Agent，运行在用户的本机，直接操作他们的项目。
-
-# 工作方式
-
-- 先理解再动手：改动前读相关代码，确认最近的结构与约定；不确定时先问。
-- 从事实出发：以代码为准，不要凭文档或猜测断言。
-- 改动聚焦：只做当前任务要求的事，不顺手重构。
-- 验证闭环：改完代码后运行构建/测试验证；无法验证时明确说明。
-
-# 工具使用
-
-- 能用专用工具就不要用 bash：读文件用 read、改文件用 edit/write、找文件用 glob、搜内容用 grep。
-- 多个独立的只读操作放在同一轮并行发起。
-- 长命令（构建、测试、安装依赖）设置合理的 timeout。
-- 危险操作（删除、覆盖用户数据、全局安装）先说明再执行。
-
-# 输出
-
-- 用用户使用的语言回复。
-- 解释改了什么、为什么这么改；引用代码给出路径与行号。
-- 遇到阻塞如实说明，不要编造结果。
-
+	b.WriteString(`运行在用户的本机，直接读写用户的真实文件系统、执行真实命令。
+相对路径基于工作目录解析；沙箱外的路径会被拒绝。
 `)
-	b.WriteString(toolDoc)
+	b.WriteString(env)
 	return b.String()
+}
+
+// buildEnvSection 环境块：cwd、平台、目录顶层条目。每次 turn 重算，
+// 模型由此获得方位感，无需靠 glob 自查身份。
+func buildEnvSection(cwd string) string {
+	var b strings.Builder
+	b.WriteString("\n# 环境\n\n")
+	b.WriteString("- 工作目录: " + cwd + "\n")
+	b.WriteString("- 平台: " + runtime.GOOS + "/" + runtime.GOARCH + " shell: " + osShell() + "\n")
+	if entries := topLevelPreview(cwd); entries != "" {
+		b.WriteString("- 目录顶层:\n" + entries)
+	}
+	return b.String()
+}
+
+// osShell 报告用户默认 shell（读 SHELL；空则不猜）。
+func osShell() string {
+	return os.Getenv("SHELL")
+}
+
+// topLevelPreview 列出工作目录顶层条目（目录带尾斜杠，最多 40 条，
+// 附加总条目数）。只一层，不递归——Downloads 这类大目录的递归列表
+// 会撑爆上下文且全是噪声。
+func topLevelPreview(cwd string) string {
+	dirEntries, err := os.ReadDir(cwd)
+	if err != nil {
+		return ""
+	}
+	names := make([]string, 0, len(dirEntries))
+	for _, e := range dirEntries {
+		// macOS 会往各处塞 .DS_Store；对模型理解目录结构没有价值。
+		if e.Name() == ".DS_Store" {
+			continue
+		}
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		names = append(names, name)
+	}
+	const maxEntries = 40
+	shown := names
+	truncated := false
+	if len(names) > maxEntries {
+		shown = names[:maxEntries]
+		truncated = true
+	}
+	var b strings.Builder
+	for _, name := range shown {
+		b.WriteString("  " + name + "\n")
+	}
+	suffix := ""
+	if truncated {
+		suffix = fmt.Sprintf("  …（共 %d 项，已省略）\n", len(names))
+	}
+	return b.String() + suffix
 }
 
 // 编译期引用（保持 import 最小化：agentbridge 用于 Status 语义对齐）。

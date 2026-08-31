@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 
 	"grok_switch/internal/agentfs"
@@ -119,27 +118,6 @@ func (r *Registry) ExecuteTool(ctx context.Context, call llm.ToolCall) ToolOutpu
 		out.Truncated = true
 	}
 	return out
-}
-
-// SystemPromptDoc 汇总所有工具文档，供 server 层拼 system prompt。
-func (r *Registry) SystemPromptDoc() string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.tools))
-	for n := range r.tools {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var b strings.Builder
-	b.WriteString("# 可用工具\n\n")
-	for _, n := range names {
-		b.WriteString("## ")
-		b.WriteString(n)
-		b.WriteString("\n")
-		b.WriteString(r.tools[n].Doc())
-		b.WriteString("\n\n")
-	}
-	return b.String()
 }
 
 // argHelp 构造参数解析错误信息（带期望字段，帮模型自纠）。

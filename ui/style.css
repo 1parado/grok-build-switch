@@ -2861,6 +2861,77 @@ body.chatMode {
   background: var(--bg);
 }
 
+/* 暗色 + 聊天工作台：body.chatMode 的变量在 <body> 上定义，特异性
+   (0,1,0) 与 [data-theme="dark"]（0,1,0，但在 <html> 上）各管一层——
+   chatMode 的值会覆盖 root 暗色组的同名变量，所以必须在这里重申暗色
+   画布/输入面，否则聊天工作台在暗色主题下是一片白。 */
+[data-theme="dark"] body.chatMode {
+  --bg: #131316;
+  --surface: #1b1b20;
+  --surface-2: #232329;
+  --text: #e6e6ea;
+  --muted: #94949e;
+  --line: #2a2a31;
+  --line-strong: #38383f;
+  --primary: #5b93f5;
+  --primary-fg: #ffffff;
+  --primary-soft: #17233a;
+  --primary-border: #2c4a7d;
+  --danger: #ef4444;
+  --danger-soft: #2a1518;
+  --warn: #d97706;
+  --warn-soft: #291d0d;
+  --warn-border: #574315;
+  --success: #34d377;
+  --accent: #7c9ef5;
+  --composer-glass: rgba(30, 30, 36, 0.78);
+  --composer-glass-2: rgba(24, 24, 29, 0.72);
+  --composer-hairline: rgba(255, 255, 255, 0.09);
+  --composer-hairline-strong: rgba(255, 255, 255, 0.16);
+  --composer-glow: rgba(124, 158, 245, 0.22);
+  --composer-ink: #e6e6ea;
+  --composer-ink-soft: #9a9aa4;
+  color-scheme: dark;
+}
+
+/* 聊天工作台内部还有一批不随 body.chatMode 变量翻转的浅色面
+   （侧栏/会话栏/顶栏/composer 白渐变/弹层等），统一收敛到下面这组
+   画布变量；浅色保持原视觉，暗色在 [data-theme="dark"] 中翻转。 */
+.nativeChatShell {
+  --chat-canvas: #f0efed;
+  --chat-pane: #ffffff;
+  --chat-topbar: #ffffff;
+  --chat-card: #ffffff;
+  --chat-card-soft: rgba(255, 255, 255, 0.92);
+  --chat-wash: rgba(0, 0, 0, 0.05);
+  --chat-hairline: rgba(0, 0, 0, 0.06);
+  --chat-input-canvas: linear-gradient(180deg, #ffffff 0%, rgba(252, 251, 250, 0.9) 100%);
+  --chat-input-inset: rgba(255, 255, 255, 0.96);
+  --chat-popup-canvas: rgba(255, 255, 255, 0.98);
+  --chat-popup-head: linear-gradient(180deg, var(--surface-2), var(--bg));
+  --chat-field-canvas: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 244, 242, 0.74));
+  --chat-field-focus: linear-gradient(180deg, #ffffff, rgba(245, 244, 242, 0.86));
+  --chat-dock-canvas: linear-gradient(180deg, rgba(255, 255, 255, 0.86) 0%, var(--composer-glass) 38%, var(--composer-glass-2) 100%);
+  --chat-access-chip: color-mix(in srgb, #f59e0b 8%, #fff);
+}
+[data-theme="dark"] .nativeChatShell {
+  --chat-canvas: #17171b;
+  --chat-pane: #1b1b20;
+  --chat-topbar: #1b1b20;
+  --chat-card: #202026;
+  --chat-card-soft: rgba(32, 32, 38, 0.92);
+  --chat-wash: rgba(255, 255, 255, 0.06);
+  --chat-hairline: rgba(255, 255, 255, 0.08);
+  --chat-input-canvas: linear-gradient(180deg, #202026 0%, rgba(28, 28, 33, 0.92) 100%);
+  --chat-input-inset: rgba(255, 255, 255, 0.05);
+  --chat-popup-canvas: rgba(27, 27, 32, 0.98);
+  --chat-popup-head: linear-gradient(180deg, var(--surface-2), var(--bg));
+  --chat-field-canvas: linear-gradient(180deg, rgba(38, 38, 45, 0.92), rgba(30, 30, 36, 0.74));
+  --chat-field-focus: linear-gradient(180deg, #26262d, rgba(30, 30, 36, 0.86));
+  --chat-dock-canvas: linear-gradient(180deg, rgba(40, 40, 48, 0.88) 0%, var(--composer-glass) 38%, var(--composer-glass-2) 100%);
+  --chat-access-chip: color-mix(in srgb, #f59e0b 14%, #1f1f24);
+}
+
 /* Full-bleed workbench: no product chrome above chat (Grok App style) */
 body.chatMode .shell {
   width: 100%;
@@ -2965,22 +3036,22 @@ html[data-chat-theme]:not([data-chat-theme="none"]) .nativeChatShell::after { op
 
 html[data-chat-theme]:not([data-chat-theme="none"]) .sessionSidebar,
 html[data-chat-theme]:not([data-chat-theme="none"]) .contextRail {
-  background: rgba(241, 240, 238, .88);
+  background: color-mix(in srgb, var(--chat-canvas) 88%, transparent);
   backdrop-filter: blur(18px) saturate(1.04);
 }
 
 html[data-chat-theme]:not([data-chat-theme="none"]) .conversationPane {
-  background: rgba(251, 251, 250, .78);
+  background: color-mix(in srgb, var(--chat-pane) 78%, transparent);
   backdrop-filter: blur(10px) saturate(1.02);
 }
 
 html[data-chat-theme]:not([data-chat-theme="none"]) .conversationTopbar {
-  background: rgba(251, 251, 250, .86);
+  background: color-mix(in srgb, var(--chat-topbar) 86%, transparent);
   backdrop-filter: blur(16px);
 }
 
 html[data-chat-theme]:not([data-chat-theme="none"]) .chatComposer {
-  background: linear-gradient(180deg, rgba(251,251,250,0), rgba(251,251,250,.88) 24%);
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--chat-pane) 88%, transparent) 24%);
 }
 
 /* Custom art is wallpaper-first: keep the image crisp and move readability
@@ -2996,23 +3067,23 @@ html[data-chat-theme="custom"] .nativeChatShell::after {
 }
 
 html[data-chat-theme="custom"]:not([data-chat-theme="none"]) .conversationPane {
-  background: rgba(251, 251, 250, .16);
+  background: color-mix(in srgb, var(--chat-pane) 16%, transparent);
   backdrop-filter: none;
 }
 
 html[data-chat-theme="custom"]:not([data-chat-theme="none"]) .sessionSidebar,
 html[data-chat-theme="custom"]:not([data-chat-theme="none"]) .contextRail {
-  background: rgba(241, 240, 238, .68);
+  background: color-mix(in srgb, var(--chat-canvas) 68%, transparent);
   backdrop-filter: blur(12px) saturate(1.02);
 }
 
 html[data-chat-theme="custom"]:not([data-chat-theme="none"]) .conversationTopbar {
-  background: rgba(251, 251, 250, .7);
+  background: color-mix(in srgb, var(--chat-topbar) 70%, transparent);
   backdrop-filter: blur(10px);
 }
 
 html[data-chat-theme="custom"]:not([data-chat-theme="none"]) .chatComposer {
-  background: linear-gradient(180deg, rgba(251,251,250,0), rgba(251,251,250,.68) 32%);
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--chat-pane) 68%, transparent) 32%);
 }
 
 /* Custom wallpaper: keep iOS bubble colors, slight glass only on empty state. */
@@ -3031,9 +3102,9 @@ html[data-chat-theme="custom"] .chatEmpty {
   min-height: 0;
   margin: auto;
   padding: 26px 34px;
-  border: 1px solid rgba(225, 223, 218, .7);
+  border: 1px solid var(--chat-hairline);
   border-radius: 8px;
-  background: rgba(251, 251, 250, .7);
+  background: color-mix(in srgb, var(--chat-pane) 70%, transparent);
   box-shadow: 0 12px 40px rgba(25, 28, 34, .08);
   backdrop-filter: blur(9px);
 }
@@ -3068,11 +3139,11 @@ html[data-chat-theme="custom"] .chatEmpty {
   flex-direction: column;
   gap: 10px;
   padding: 10px 10px 12px;
-  background: #f0efed;
+  background: var(--chat-canvas);
 }
 
 .sessionSidebar {
-  border-right: 1px solid rgba(0, 0, 0, 0.06);
+  border-right: 1px solid var(--chat-hairline);
   box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.4);
 }
 .contextRail { border-left: 1px solid var(--line); }
@@ -3122,7 +3193,7 @@ html[data-chat-theme="custom"] .chatEmpty {
   cursor: pointer;
 }
 .chromeBtn:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--chat-wash);
   color: var(--text);
 }
 .navNewBtn {
@@ -3140,7 +3211,7 @@ html[data-chat-theme="custom"] .chatEmpty {
   text-align: left;
   cursor: pointer;
 }
-.navNewBtn:hover { background: rgba(0, 0, 0, 0.05); }
+.navNewBtn:hover { background: var(--chat-wash); }
 .navNewIcon {
   width: 18px;
   text-align: center;
@@ -3150,7 +3221,7 @@ html[data-chat-theme="custom"] .chatEmpty {
 .sidebarFooter {
   margin-top: auto;
   padding-top: 8px;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  border-top: 1px solid var(--chat-hairline);
 }
 .sidebarFooterBtn {
   width: 100%;
@@ -3165,7 +3236,7 @@ html[data-chat-theme="custom"] .chatEmpty {
   cursor: pointer;
 }
 .sidebarFooterBtn:hover {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--chat-wash);
   color: var(--text);
 }
 
@@ -3177,7 +3248,7 @@ html[data-chat-theme="custom"] .chatEmpty {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
-  background: #fff;
+  background: var(--chat-card);
 }
 .openLocationBtn {
   display: inline-flex;
@@ -3191,7 +3262,7 @@ html[data-chat-theme="custom"] .chatEmpty {
   cursor: pointer;
   white-space: nowrap;
 }
-.openLocationBtn:hover { background: rgba(0, 0, 0, 0.04); }
+.openLocationBtn:hover { background: var(--chat-wash); }
 .openLocationIcon {
   font-size: 11px;
   color: var(--primary);
@@ -3205,14 +3276,14 @@ html[data-chat-theme="custom"] .chatEmpty {
   font-size: 10px;
   cursor: pointer;
 }
-.openLocationCaret:hover { background: rgba(0, 0, 0, 0.04); color: var(--text); }
+.openLocationCaret:hover { background: var(--chat-wash); color: var(--text); }
 
 .conversationTopbar {
   min-height: 40px;
   height: 40px;
   padding: 0 10px;
-  background: #ffffff;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  background: var(--chat-topbar);
+  border-bottom: 1px solid var(--chat-hairline);
 }
 .conversationIdentity strong {
   font-size: 13px;
@@ -3324,7 +3395,7 @@ body.resizingChatPanels * {
   padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: 5px;
-  background: #ffffff;
+  background: var(--chat-card);
   color: var(--muted);
 }
 
@@ -3474,7 +3545,7 @@ body.resizingChatPanels * {
 }
 
 .conversationPane {
-  background: #ffffff;
+  background: var(--chat-pane);
 }
 
 .conversationTopbar {
@@ -3484,8 +3555,8 @@ body.resizingChatPanels * {
   min-height: 40px;
   height: 40px;
   padding: 0 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  background: #ffffff;
+  border-bottom: 1px solid var(--chat-hairline);
+  background: var(--chat-topbar);
 }
 
 .conversationIdentity {
@@ -3552,7 +3623,7 @@ body.resizingChatPanels * {
   overflow: auto;
   border: 1px solid var(--line-strong);
   border-radius: 9px;
-  background: rgba(251, 251, 250, .97);
+  background: var(--chat-popup-canvas);
   color: var(--text);
   box-shadow: 0 28px 90px rgba(20, 20, 24, .28);
   backdrop-filter: blur(24px) saturate(1.05);
@@ -3647,7 +3718,7 @@ body.resizingChatPanels * {
   padding: 7px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: #fff;
+  background: var(--chat-card);
   color: var(--text);
   text-align: left;
   cursor: pointer;
@@ -4404,11 +4475,11 @@ body.resizingChatPanels * {
   border: 1px solid var(--composer-hairline);
   border-radius: 18px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.86) 0%, var(--composer-glass) 38%, var(--composer-glass-2) 100%);
+    var(--chat-dock-canvas);
   backdrop-filter: blur(22px) saturate(1.12);
   -webkit-backdrop-filter: blur(22px) saturate(1.12);
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 -1px 0 rgba(28, 25, 34, 0.04) inset,
     0 18px 44px -18px rgba(28, 25, 34, 0.22),
     0 6px 18px -12px rgba(113, 92, 200, 0.16);
@@ -4443,7 +4514,7 @@ body.resizingChatPanels * {
 .composerCard:focus-within {
   border-color: color-mix(in srgb, var(--accent) 38%, var(--composer-hairline));
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 0 0 4px rgba(113, 92, 200, 0.10),
     0 22px 60px -20px rgba(113, 92, 200, 0.34),
     0 8px 22px -12px rgba(28, 25, 34, 0.20);
@@ -4511,9 +4582,9 @@ body.resizingChatPanels * {
   border: 1px solid var(--composer-hairline);
   border-radius: 11px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 244, 242, 0.74));
+    var(--chat-field-canvas);
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 1px 2px rgba(28, 25, 34, 0.05);
   transition: border-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
               box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
@@ -4525,15 +4596,15 @@ body.resizingChatPanels * {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--composer-hairline));
   transform: translateY(-1px);
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 6px 16px -8px rgba(113, 92, 200, 0.30);
 }
 
 .composerControl:focus-within {
   border-color: color-mix(in srgb, var(--accent) 52%, var(--composer-hairline));
-  background: linear-gradient(180deg, #ffffff, rgba(245, 244, 242, 0.86));
+  background: var(--chat-field-focus);
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.9) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 0 0 4px rgba(113, 92, 200, 0.12);
 }
 
@@ -4642,9 +4713,9 @@ body.resizingChatPanels * {
   display: grid;
   border: 1px solid var(--composer-hairline-strong);
   border-radius: 13px;
-  background: linear-gradient(180deg, #ffffff 0%, rgba(252, 251, 250, 0.9) 100%);
+  background: var(--chat-input-canvas);
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.96) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 2px 6px rgba(28, 25, 34, 0.05);
   transition: border-color 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
               box-shadow 200ms cubic-bezier(0.2, 0.8, 0.2, 1),
@@ -4653,7 +4724,7 @@ body.resizingChatPanels * {
 .composerInputWrap:focus-within {
   border-color: color-mix(in srgb, var(--accent) 46%, var(--composer-hairline-strong));
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.96) inset,
+    0 1px 0 var(--chat-input-inset) inset,
     0 0 0 4px rgba(113, 92, 200, 0.12),
     0 10px 30px -14px rgba(113, 92, 200, 0.34);
   transform: translateY(-1px);
@@ -4709,14 +4780,14 @@ body.resizingChatPanels * {
   color: var(--composer-ink-soft);
   font: 20px/1 var(--font);
   cursor: pointer;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 1px 2px rgba(28, 25, 34, 0.05);
+  box-shadow: 0 1px 0 var(--chat-input-inset) inset, 0 1px 2px rgba(28, 25, 34, 0.05);
   transition: color 160ms ease, border-color 160ms ease, transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 200ms ease, background 200ms ease;
 }
 .chatAttachBtn:hover {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 36%, var(--composer-hairline));
   transform: translateY(-1px) rotate(0);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset, 0 8px 18px -8px rgba(113, 92, 200, 0.3);
+  box-shadow: 0 1px 0 var(--chat-input-inset) inset, 0 8px 18px -8px rgba(113, 92, 200, 0.3);
 }
 .chatAttachBtn:active { transform: translateY(0) scale(0.96); }
 .chatAttachBtn:disabled { opacity: 0.4; cursor: default; transform: none; }
@@ -4917,7 +4988,7 @@ body.resizingChatPanels * {
   border: 1px solid var(--composer-hairline-strong);
   border-bottom-width: 2px;
   border-radius: 5px;
-  background: #ffffff;
+  background: var(--chat-input-inset);
   color: var(--composer-ink);
   font: 600 9px/1.4 var(--mono);
   text-align: center;
@@ -5006,7 +5077,7 @@ body.resizingChatPanels * {
   place-items: center;
   border: 1px solid var(--composer-hairline);
   border-radius: 999px;
-  background: #fff;
+  background: var(--chat-card);
   color: var(--composer-ink);
   font: 600 16px/1 var(--font);
   cursor: pointer;
@@ -5024,7 +5095,7 @@ body.resizingChatPanels * {
   padding: 0 10px;
   border: 1px solid var(--composer-hairline);
   border-radius: 999px;
-  background: #fff;
+  background: var(--chat-card);
   color: var(--composer-ink);
   font: 550 12px/1 var(--font);
   white-space: nowrap;
@@ -5033,7 +5104,7 @@ body.resizingChatPanels * {
 }
 .composerMiniChip:hover {
   border-color: color-mix(in srgb, var(--accent) 36%, var(--composer-hairline));
-  background: color-mix(in srgb, var(--accent) 6%, #fff);
+  background: var(--chat-card-soft);
 }
 .composerProjectChip {
   max-width: 140px;
@@ -5079,7 +5150,7 @@ body.resizingChatPanels * {
   z-index: 2;
   color: #b45309;
   border-color: color-mix(in srgb, #b45309 28%, var(--composer-hairline));
-  background: color-mix(in srgb, #f59e0b 8%, #fff);
+  background: var(--chat-access-chip);
 }
 .composerAccessChip select { color: #b45309; max-width: 110px; }
 .composerAccessWarn { width: 12px; height: 12px; flex-shrink: 0; }
@@ -5129,7 +5200,7 @@ body.resizingChatPanels * {
   font: 9px/1.45 var(--mono);
   overflow-wrap: anywhere;
 }
-.chatCwdField input { min-height: 34px; padding: 7px 8px; background: #ffffff; width: 100%; }
+.chatCwdField input { min-height: 34px; padding: 7px 8px; background: var(--chat-card); width: 100%; }
 .chatCwdRow .chatCwdPickBtn { min-height: 34px; }
 .autoApproveCheck { min-height: 34px; font-size: 11px; }
 .contextActions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
@@ -5149,7 +5220,7 @@ body.resizingChatPanels * {
   gap: 2px;
   padding: 7px 8px;
   border-left: 2px solid var(--line-strong);
-  background: #ffffff;
+  background: var(--chat-card);
 }
 .toolActivityItem.completed { border-left-color: var(--success); }
 .toolActivityItem.failed { border-left-color: var(--danger); }
@@ -5604,7 +5675,7 @@ body.resizingChatPanels * {
   flex-direction: column;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.98);
+  background: var(--chat-popup-canvas);
   box-shadow: 0 12px 40px rgba(24, 24, 27, 0.14), 0 2px 8px rgba(24, 24, 27, 0.06);
   backdrop-filter: blur(12px) saturate(1.04);
 }
@@ -5621,7 +5692,7 @@ body.resizingChatPanels * {
   gap: 10px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, var(--surface-2), var(--bg));
+  background: var(--chat-popup-head);
 }
 
 .skillsPopupHeadLeft {
@@ -5782,7 +5853,7 @@ body.resizingChatPanels * {
   font: 10px/1.3 var(--mono);
   padding: 1px 4px;
   border-radius: 3px;
-  background: #fff;
+  background: var(--chat-card);
   border: 1px solid var(--line);
 }
 

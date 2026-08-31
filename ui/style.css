@@ -34,6 +34,11 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.04);
   --font: "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+  /* 动效 token：全站三种时长 + 一种缓动（此前 10+ 种时长达 38 处散写） */
+  --dur-fast: 120ms;
+  --dur-med: 200ms;
+  --dur-slow: 320ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   /* 聊天工作台配色（此前硬编码 #007aff/#e9e9eb/#111，暗色下刺眼白底）。
      data-theme=dark 时整组翻转，见下方 [data-theme="dark"] 块。 */
   --chat-bubble-user-bg: #007aff;
@@ -1475,6 +1480,14 @@ body {
 
 .provider:hover {
   border-color: var(--line-strong);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+
+.provider {
+  transition: border-color var(--dur-fast, 120ms) var(--ease-out, ease),
+              box-shadow var(--dur-med, 200ms) var(--ease-out, ease),
+              transform var(--dur-fast, 120ms) var(--ease-out, ease);
 }
 
 .provider.active {
@@ -1678,6 +1691,24 @@ textarea {
   background: var(--surface-2);
   color: var(--text);
   font: inherit;
+}
+
+/* 全站 select 统一外观：自绘箭头（此前只有 composer 的做了 appearance:none） */
+.field select,
+.search select,
+.settingsCard select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="%2371717a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5.5 8 4.5 4.5L14.5 8"/></svg>');
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 14px;
+  cursor: pointer;
+}
+[data-theme="dark"] .field select,
+[data-theme="dark"] .settingsCard select {
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="none" stroke="%2394949e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5.5 8 4.5 4.5L14.5 8"/></svg>');
 }
 
 .field input.mono,
@@ -2060,8 +2091,8 @@ textarea:focus,
   font-weight: 600;
 }
 
-.registrarResult.ok .registrarResultStatus { color: #16a34a; }
-.registrarResult.fail .registrarResultStatus { color: #dc2626; }
+.registrarResult.ok .registrarResultStatus { color: var(--success-strong, var(--success)); }
+.registrarResult.fail .registrarResultStatus { color: var(--danger); }
 
 .registrarResultMint {
   font-size: 11px;
@@ -2263,8 +2294,11 @@ textarea:focus,
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
+  border-radius: var(--radius-sm);
   border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  transition: background var(--dur-fast, 120ms) var(--ease-out, ease);
 }
+.accountRow:hover { background: color-mix(in srgb, var(--primary) 5%, transparent); }
 .accountRow:first-child { border-top: none; }
 .accountRowMain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .accountRowTitle { font-size: 13px; overflow-wrap: anywhere; }
@@ -2496,12 +2530,46 @@ textarea {
   align-items: center;
   gap: 8px;
   font-size: 13px;
+  cursor: pointer;
 }
 
+/* 自定义 checkbox：与自定义 input/select 同一成熟度，不再是裸原生控件 */
 .check input {
-  width: auto;
-  accent-color: var(--primary);
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background var(--dur-fast, 120ms) var(--ease-out, ease),
+              border-color var(--dur-fast, 120ms) var(--ease-out, ease);
 }
+.check input::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  transform: scale(0);
+  transition: transform var(--dur-fast, 120ms) var(--ease-out, ease);
+  background: var(--primary-fg);
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="m4.5 10.5 3.6 3.6 7.4-8" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat;
+          mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="m4.5 10.5 3.6 3.6 7.4-8" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat;
+}
+.check input:checked {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+.check input:checked::before { transform: scale(1); }
+.check input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.check input:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .pathBox {
   margin: 0;
@@ -2587,6 +2655,9 @@ textarea {
   font-weight: 500;
   font-size: 13px;
   cursor: pointer;
+  transition: background 140ms var(--ease-out, ease), border-color 140ms var(--ease-out, ease),
+              color 140ms var(--ease-out, ease), box-shadow 140ms var(--ease-out, ease),
+              transform 100ms var(--ease-out, ease);
   /* 窄屏下按钮文字保持整词，不折成竖排 */
   white-space: nowrap;
 }
@@ -2596,15 +2667,24 @@ textarea {
   color: var(--primary);
 }
 
+.btn:not(:disabled):not(.busy):active {
+  transform: translateY(0.5px);
+}
+
 .btn.primary {
   background: var(--primary);
   border-color: var(--primary);
   color: var(--primary-fg);
 }
 
-.btn.primary:hover {
-  filter: brightness(1.05);
+.btn.primary:not(:disabled):not(.busy):hover {
+  background: color-mix(in srgb, var(--primary) 88%, #000);
+  box-shadow: 0 2px 8px -2px color-mix(in srgb, var(--primary) 45%, transparent);
   color: var(--primary-fg);
+}
+.btn.primary:not(:disabled):not(.busy):active {
+  transform: translateY(0.5px);
+  box-shadow: none;
 }
 
 .btn.primary:disabled,
@@ -2641,36 +2721,60 @@ textarea {
 
 .btn:disabled, .btn.busy, button:disabled {
   opacity: 0.55;
-  cursor: wait;
+  cursor: not-allowed;
 }
 
 /* Toast — sit above the floating composer so it never covers 访问方式 / send */
+/* toast 容器：堆叠队列（最多 3 条，见 app.js TOAST_MAX_STACK） */
 .toast {
   position: fixed;
   right: 16px;
   bottom: calc(var(--composer-float-pad, 140px) + 20px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   max-width: min(380px, calc(100vw - 32px));
-  background: #18181b;
-  color: #fff;
-  border-radius: 10px;
-  padding: 11px 13px;
-  font-size: 13px;
-  opacity: 0;
-  transform: translateY(8px);
-  transition: 160ms ease;
   z-index: 100;
-  box-shadow: var(--shadow);
   pointer-events: none;
 }
 
-.toast.show {
+.toastItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 13px;
+  border-radius: 10px;
+  background: var(--text);
+  color: var(--surface);
+  font-size: 13px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity var(--dur-med, 200ms) var(--ease-out, ease),
+              transform var(--dur-med, 200ms) var(--ease-out, ease);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+
+.toastItem.show {
   opacity: 1;
   transform: none;
 }
 
-.toast.error { background: #b91c1c; }
-.toast.warn { background: var(--warn); }
-.toast.success { background: #15803d; }
+.toastIcon { flex-shrink: 0; display: inline-flex; margin-top: 1px; }
+.toastText { min-width: 0; overflow-wrap: anywhere; }
+
+.toastItem.error { background: var(--danger); color: #fff; }
+.toastItem.warn { background: var(--warn); color: #fff; }
+.toastItem.success { background: var(--success); color: #fff; }
+.toastItem.info { background: var(--text); color: var(--surface); }
+
+@media (prefers-reduced-motion: reduce) {
+  .toastItem { transition: opacity 0ms; transform: none; }
+  .typingDots i, .streamCursor, .agentToolStatus::before { animation: none; }
+  .permissionBar, .planBar { animation: none; }
+  .provider, .accountRow, .btn, .ghostBtn { transition: none; }
+}
 
 .updateBanner {
   display: flex;
@@ -2682,7 +2786,7 @@ textarea {
   border: 1px solid var(--success-border);
   border-radius: 8px;
   background: var(--success-soft);
-  color: #245d37;
+  color: var(--success-strong);
 }
 
 .mediaModelTools {
@@ -4199,10 +4303,13 @@ body.resizingChatPanels * {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   line-height: 1;
-  padding: 0 4px;
+  padding: 2px 4px;
 }
+.sessionSectionAction:hover { color: var(--text); }
 
 .sessionSectionAction:hover { color: var(--text); }
 
@@ -5315,7 +5422,7 @@ body.resizingChatPanels * {
 }
 
 .skillItem[data-kind="dir"] .skillIcon {
-  background: #f1f5fc;
+  background: var(--primary-soft);
   border-color: var(--primary-border);
 }
 

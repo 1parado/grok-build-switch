@@ -21,10 +21,11 @@ import (
 // --- 测试基建：可控 Provider 注入 nativeAgentService ---
 
 type stubProvider struct {
-	mu    sync.Mutex
-	steps []llm.StreamResult
-	idx   int
-	calls int
+	mu         sync.Mutex
+	steps      []llm.StreamResult
+	idx        int
+	calls      int
+	lastEffort string
 }
 
 func (p *stubProvider) Name() string      { return "stub" }
@@ -37,6 +38,7 @@ func (p *stubProvider) Generate(ctx context.Context, systemPrompt string, tools 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.lastEffort = opts.Effort
 	if p.idx >= len(p.steps) {
 		p.idx = len(p.steps) - 1
 	}
@@ -306,6 +308,22 @@ func TestNativeServiceRewind(t *testing.T) {
 	}
 	if svc.memory.UserTurns() != 1 {
 		t.Fatalf("内存轮次错误: %d", svc.memory.UserTurns())
+	}
+}
+
+func TestNativeServiceEffortWiring(t *testing.T) {
+	prov := &stubProvider{steps: []llm.StreamResult{textStep("ok")}}
+	svc := newTestNativeService(t, prov)
+	sub := subscribeNative(t, svc)
+	_ = svc.Start(t.Context(), agentbridge.StartOptions{Cwd: t.TempDir()})
+	<-sub.events
+	_ = svc.SetSessionConfig(t.Context(), "", "high")
+	_ = svc.Prompt("hi", nil)
+	waitTurnDone(t, sub, 10*time.Second)
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	if prov.lastEffort != "high" {
+		t.Fatalf("Generate 未收到会话推理强度: got %q want \"high\"", prov.lastEffort)
 	}
 }
 

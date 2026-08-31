@@ -1155,6 +1155,19 @@
     <p class="chatThemeHint">支持 PNG、JPEG、WebP，最大 16 MB。图片会在本机压缩后保存；建议使用不含文字和界面元素的 16:9 背景。</p>
   </dialog>
 
+  <!-- 统一确认/输入对话框：替代 window.confirm / window.prompt（API 见 app.js appConfirm/appPrompt） -->
+  <dialog id="appDialog" class="appDialog" aria-labelledby="appDialogTitle">
+    <form method="dialog" class="appDialogForm">
+      <h2 id="appDialogTitle" class="appDialogTitle"></h2>
+      <p id="appDialogMessage" class="appDialogMessage" hidden></p>
+      <input id="appDialogInput" class="appDialogInput" hidden autocomplete="off">
+      <div class="appDialogActions">
+        <button type="button" id="appDialogCancel" class="btn">取消</button>
+        <button type="button" id="appDialogOk" class="btn primary">确定</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/marked.umd.js?v=18.0.6"></script>
   <script src="/vendor/purify.min.js?v=3.4.12"></script>

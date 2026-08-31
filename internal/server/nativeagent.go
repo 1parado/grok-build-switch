@@ -31,8 +31,8 @@ type EngineDeps struct {
 	// ProviderFor 返回当前会话应使用的 Provider（按当前生效 Profile 构造）。
 	// 返回 error 时 Prompt 报"引擎未配置"。
 	ProviderFor func() (llm.Provider, error)
-	// SystemPrompt 组装系统提示词（含工具文档）。
-	SystemPrompt func(toolDoc string) string
+	// SystemPrompt 组装系统提示词（每 turn 以当前会话的环境块调用）。
+	SystemPrompt func(env string) string
 	// ImageGen 为 nil 时不注册 generate_image。
 	ImageGen tools.ImageGenerator
 	// DefaultCwd 兜底工作目录。
@@ -404,7 +404,7 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 		res, runErr := agentloop.RunTurn(turnCtx, agentloop.RunTurnInput{
 			TurnID:       turnID,
 			Provider:     provider,
-			SystemPrompt: n.deps.SystemPrompt(registry.SystemPromptDoc()),
+			SystemPrompt: n.deps.SystemPrompt(buildEnvSection(n.cwd)),
 			Memory:       mem,
 			Tools:        &tools.ToolsAdapter{Registry: registry},
 			PermGate:     &nativePermGate{svc: n, registry: registry},

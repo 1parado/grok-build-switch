@@ -341,6 +341,7 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 	if n.model == "" {
 		n.model = provider.ModelName()
 	}
+	effort := n.effort
 	// turn 独立 ctx（与 Start/Stop 的生命周期解耦）。
 	turnCtx, cancel := context.WithCancel(context.Background())
 	n.turnCancel = cancel
@@ -412,6 +413,7 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 			MaxSteps:     100,
 			MaxRetries:   3,
 			Hooks:        hooks,
+			Effort:       effort,
 		})
 		// turn 收尾。
 		n.mu.Lock()

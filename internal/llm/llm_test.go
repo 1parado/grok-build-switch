@@ -207,6 +207,63 @@ func TestResponsesProviderWireShape(t *testing.T) {
 	}
 }
 
+// 回归：added 预设 "{}" 再追加 delta 会拼出 {}{...} 非法 JSON，
+// 导致工具参数解析必然失败、transcript 落盘 Marshal 报错。
+// 回归：done 携带完整 arguments，应覆盖中间态（含 added 缺失时的兜底）。
+func TestResponsesStreamToolCallArgumentsAccumulate(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		writeSSE := func(event string, payload string) {
+			_, _ = w.Write([]byte("event: " + event + "\ndata: " + payload + "\n\n"))
+			f.Flush()
+		}
+		// 场景 A：added → delta 增量（delta 前后各一段）。
+		writeSSE("response.output_item.added", `{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_a","name":"glob"}}`)
+		writeSSE("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"pat"}`)
+		writeSSE("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":1,"delta":"tern\":\"**/*.go\"}"}`)
+		writeSSE("response.output_item.done", `{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","call_id":"call_a","name":"glob","arguments":"{\"pattern\":\"**/*.go\"}"}}`)
+		// 场景 B：done 兜底（added/delta 全缺失）。
+		writeSSE("response.output_item.done", `{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","call_id":"call_b","name":"read","arguments":"{\"path\":\"a.go\"}"}}`)
+		writeSSE("response.completed", `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p, err := NewResponsesProvider(UpstreamTarget{BaseURL: srv.URL + "/v1"}, "grok-4.6", "sess-1", capabilityFor("grok-4.6", true, nil, 500000, 65536))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.Generate(context.Background(), "", nil, []Message{{Role: RoleUser, Parts: []ContentPart{TextPart{Text: "hi"}}}}, GenerateOptions{OnDelta: func(StreamedPart) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Message.ToolCalls) != 2 {
+		t.Fatalf("期望 2 个工具调用, got %d", len(res.Message.ToolCalls))
+	}
+	var globArgs, readArgs json.RawMessage
+	for _, tc := range res.Message.ToolCalls {
+		switch tc.Name {
+		case "glob":
+			globArgs = tc.Arguments
+		case "read":
+			readArgs = tc.Arguments
+		}
+	}
+	if string(globArgs) != `{"pattern":"**/*.go"}` {
+		t.Fatalf("glob 参数拼接错误: %s", globArgs)
+	}
+	if string(readArgs) != `{"path":"a.go"}` {
+		t.Fatalf("read 参数兜底错误: %s", readArgs)
+	}
+	// 参数必须是合法 JSON 对象（历史 bug 在这里必然失败）。
+	var probe map[string]any
+	if err := json.Unmarshal(globArgs, &probe); err != nil {
+		t.Fatalf("glob 参数不是合法 JSON: %v (%s)", err, globArgs)
+	}
+}
+
 func TestResponsesProviderUpstreamError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) {

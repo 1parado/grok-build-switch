@@ -73,6 +73,10 @@ type nativeAgentService struct {
 	planMu      sync.Mutex
 	pendingPlan map[string]chan agentbridge.PlanDecision
 	planSeq     int64
+	// 挂起审批的原始事件（按发生顺序）：WS 断开/页面刷新会丢掉一次性广播，
+	// 订阅与查询接口据此重放，用户重新打开页面可继续审批。
+	pendingPermEvents map[string]agentbridge.Event
+	pendingPermOrder  []string
 
 	// 订阅者。
 	subMu   sync.Mutex
@@ -95,13 +99,14 @@ func newNativeAgentService(deps EngineDeps) (*nativeAgentService, error) {
 		return nil, err
 	}
 	return &nativeAgentService{
-		deps:        deps,
-		st:          st,
-		perm:        perm,
-		state:       "idle",
-		pendingPerm: map[string]*pendingPermReq{},
-		pendingPlan: map[string]chan agentbridge.PlanDecision{},
-		subs:        map[int]chan agentbridge.Event{},
+		deps:              deps,
+		st:                st,
+		perm:              perm,
+		state:             "idle",
+		pendingPerm:       map[string]*pendingPermReq{},
+		pendingPermEvents: map[string]agentbridge.Event{},
+		pendingPlan:       map[string]chan agentbridge.PlanDecision{},
+		subs:              map[int]chan agentbridge.Event{},
 	}, nil
 }
 
@@ -119,6 +124,14 @@ func (n *nativeAgentService) Subscribe() (string, <-chan agentbridge.Event) {
 	ch <- agentbridge.Event{
 		Type: "agent_status", SessionID: status.SessionID, Status: status.State,
 		Model: status.Model, Error: status.Error, SessionAutoApprove: &status.SessionAutoApprove,
+	}
+	// 重放仍然挂起的审批：广播是 fire-and-forget，页面刷新/WS 断开期间
+	// 发出的 permission_request 不会再来第二次；没有重放，用户重新打开
+	// 页面只能眼睁睁看着 turn 卡在 busy。
+	for _, requestID := range n.pendingPermOrder {
+		if ev, ok := n.pendingPermEvents[requestID]; ok {
+			ch <- ev
+		}
 	}
 	return fmt.Sprintf("sub-%d", id), ch
 }
@@ -266,31 +279,44 @@ func (n *nativeAgentService) Stop() error {
 }
 
 func (n *nativeAgentService) NewSession(ctx context.Context, cwd string) error {
+	// 取消进行中的 turn：新建会话意味着用户明确放弃当前任务，若 busy 时
+	// 不复位状态，一次卡死的 turn（如权限审批无人应答）会把服务永久锁在
+	// busy，后续所有 NewSession 都被吞掉，UI 表现为无限转圈。
 	n.mu.Lock()
 	if n.turnCancel != nil {
 		n.turnCancel()
 		n.turnCancel = nil
 	}
+	// 卡死 turn 的挂起审批/计划一并唤醒（CancelPrompt 同款语义），
+	// 否则被取消的 turn goroutine 收口时可能把状态写回 ready 之外。
+	n.mu.Unlock()
+	n.resolveAllPending()
 	if cwd == "" {
 		cwd = n.deps.DefaultCwd
 	}
 	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
-		n.mu.Unlock()
 		return fmt.Errorf("工作目录不存在: %s", cwd)
 	}
+	n.mu.Lock()
 	n.cwd = cwd
 	n.memory = agentkit.NewCtxMemory()
 	n.errText = ""
+	n.sessionID = ""
+	n.state = "starting"
 	n.mu.Unlock()
+	n.broadcastStatus()
 	meta, err := n.st.Create(agentkit.SessionMeta{Cwd: cwd})
 	if err != nil {
+		n.mu.Lock()
+		n.state = "dead"
+		n.errText = err.Error()
+		n.mu.Unlock()
+		n.broadcastStatus()
 		return err
 	}
 	n.mu.Lock()
 	n.sessionID = meta.ID
-	if n.state != "busy" {
-		n.state = "ready"
-	}
+	n.state = "ready"
 	n.mu.Unlock()
 	n.broadcastStatus()
 	return nil
@@ -462,6 +488,28 @@ func (n *nativeAgentService) CancelPrompt() error {
 	return nil
 }
 
+// PendingRequests 返回仍然挂起的审批/计划事件（按发生顺序），供
+// GET /api/agent/pending 在 WS 重连后拉取重放。事件是登记时的快照。
+func (n *nativeAgentService) PendingRequests() []agentbridge.Event {
+	n.permMu.Lock()
+	events := make([]agentbridge.Event, 0, len(n.pendingPermOrder)+len(n.pendingPlan))
+	for _, requestID := range n.pendingPermOrder {
+		if ev, ok := n.pendingPermEvents[requestID]; ok {
+			events = append(events, ev)
+		}
+	}
+	n.permMu.Unlock()
+	n.planMu.Lock()
+	for requestID := range n.pendingPlan {
+		events = append(events, agentbridge.Event{
+			Type: "plan_request", SessionID: n.sessionID,
+			Plan: &agentbridge.PlanEvent{RequestID: requestID, Waiting: true},
+		})
+	}
+	n.planMu.Unlock()
+	return events
+}
+
 // --- 审批（权限/计划） ---
 
 // nativePermGate 实现 agentloop.PermissionGate：manual 模式下写类工具需要审批。
@@ -511,15 +559,8 @@ func (g *nativePermGate) WaitForDecision(ctx context.Context, call llm.ToolCall)
 	req := &pendingPermReq{ch: make(chan agentloop.PermResult, 1), tool: call.Name}
 	g.svc.permMu.Lock()
 	g.svc.pendingPerm[requestID] = req
-	g.svc.permMu.Unlock()
-	defer func() {
-		g.svc.permMu.Lock()
-		delete(g.svc.pendingPerm, requestID)
-		g.svc.permMu.Unlock()
-	}()
-
-	g.svc.broadcast(agentbridge.Event{
-		Type: "permission_request", SessionID: g.svc.Status().SessionID,
+	permEvt := agentbridge.Event{
+		Type: "permission_request", SessionID: g.svc.sessionID,
 		Permission: &agentbridge.PermissionEvent{
 			RequestID: requestID,
 			Summary:   fmt.Sprintf("工具 %s 请求执行", call.Name),
@@ -529,7 +570,26 @@ func (g *nativePermGate) WaitForDecision(ctx context.Context, call llm.ToolCall)
 			},
 			Options: nativePermissionOptions,
 		},
-	})
+	}
+	// 记录挂起事件供重放：WS 是 fire-and-forget 广播，断线/刷新即丢；
+	// 没有这条记录，用户重新打开页面就再也看不到这次审批。
+	g.svc.pendingPermEvents[requestID] = permEvt
+	g.svc.pendingPermOrder = append(g.svc.pendingPermOrder, requestID)
+	g.svc.permMu.Unlock()
+	defer func() {
+		g.svc.permMu.Lock()
+		delete(g.svc.pendingPerm, requestID)
+		delete(g.svc.pendingPermEvents, requestID)
+		for i, id := range g.svc.pendingPermOrder {
+			if id == requestID {
+				g.svc.pendingPermOrder = append(g.svc.pendingPermOrder[:i], g.svc.pendingPermOrder[i+1:]...)
+				break
+			}
+		}
+		g.svc.permMu.Unlock()
+	}()
+
+	g.svc.broadcast(permEvt)
 
 	select {
 	case res := <-req.ch:
@@ -545,6 +605,8 @@ func (n *nativeAgentService) resolveAllPending() {
 		req.ch <- agentloop.PermResult{Decision: agentloop.DecDeny, Reason: "用户取消了任务。"}
 	}
 	n.pendingPerm = map[string]*pendingPermReq{}
+	n.pendingPermEvents = map[string]agentbridge.Event{}
+	n.pendingPermOrder = nil
 	n.permMu.Unlock()
 	n.planMu.Lock()
 	for _, ch := range n.pendingPlan {

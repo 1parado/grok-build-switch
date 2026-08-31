@@ -257,6 +257,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/skills", s.handleSkills)
 	mux.HandleFunc("/api/skills/delete", s.handleSkillsDelete)
 	mux.HandleFunc("/api/agent/status", s.handleAgentStatus)
+	mux.HandleFunc("/api/agent/pending", s.handleAgentPending)
 	mux.HandleFunc("/api/agent/start", s.handleAgentStart)
 	mux.HandleFunc("/api/agent/stop", s.handleAgentStop)
 	mux.HandleFunc("/api/agent/cancel", s.handleAgentCancel)

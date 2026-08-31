@@ -601,3 +601,72 @@ busyConfirmed:
 		t.Fatalf("新会话 turn 应正常完成: %+v", final)
 	}
 }
+
+// 回归：permission_request 只走 WS 单次广播，页面刷新/WS 断开期间发出的
+// 事件无法再收到，turn 卡在 WaitForDecision 而用户看不到任何审批入口。
+// 修复后：Subscribe 时重放挂起审批 + GET /api/agent/pending 可主动拉取。
+func TestNativeServicePendingPermissionReplay(t *testing.T) {
+	prov := &stubProvider{steps: []llm.StreamResult{
+		toolStep("c1", "write", `{"path":"out.txt","content":"x"}`),
+		textStep("写完了"),
+	}}
+	svc := newTestNativeService(t, prov)
+	sub := subscribeNative(t, svc) // 第一个订阅者：会收到原始广播
+	_ = svc.Start(t.Context(), agentbridge.StartOptions{Cwd: t.TempDir()})
+	<-sub.events
+
+	if err := svc.Prompt("写个文件", nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(10 * time.Second)
+	var permEvt agentbridge.Event
+	for {
+		select {
+		case ev := <-sub.events:
+			if ev.Type == "permission_request" {
+				permEvt = ev
+				goto gotPerm
+			}
+		case <-deadline:
+			t.Fatal("未收到审批请求")
+		}
+	}
+gotPerm:
+	// 1) 订阅重放：新订阅者（模拟刷新后的页面）应立刻收到挂起审批。
+	sub2 := subscribeNative(t, svc)
+	replayed := false
+	replayDeadline := time.After(5 * time.Second)
+	for !replayed {
+		select {
+		case ev := <-sub2.events:
+			if ev.Type == "permission_request" && ev.Permission != nil &&
+				ev.Permission.RequestID == permEvt.Permission.RequestID {
+				replayed = true
+			}
+		case <-replayDeadline:
+			t.Fatal("Subscribe 未重放挂起审批")
+		}
+	}
+	// 2) REST 拉取：PendingRequests 应返回同一条。
+	pending := svc.PendingRequests()
+	if len(pending) != 1 || pending[0].Type != "permission_request" ||
+		pending[0].Permission == nil || pending[0].Permission.RequestID != permEvt.Permission.RequestID {
+		t.Fatalf("PendingRequests 返回错误: %+v", pending)
+	}
+	// 审批后重放与拉取都应清空。
+	if err := svc.RespondPermissionEx(permEvt.Permission.RequestID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	waitTurnDone(t, sub, 10*time.Second)
+	if got := svc.PendingRequests(); len(got) != 0 {
+		t.Fatalf("审批完成后仍有挂起: %+v", got)
+	}
+	sub3 := subscribeNative(t, svc)
+	select {
+	case ev := <-sub3.events:
+		if ev.Type == "permission_request" {
+			t.Fatalf("审批完成后不应重放: %+v", ev)
+		}
+	case <-time.After(500 * time.Millisecond):
+	}
+}

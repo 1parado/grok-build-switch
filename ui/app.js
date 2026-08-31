@@ -2034,7 +2034,13 @@ function connectAgentSocket() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${protocol}//${location.host}/api/agent/ws`);
   agentSocket = socket;
-  socket.onopen = () => clearTimeout(agentReconnectTimer);
+  socket.onopen = () => {
+    clearTimeout(agentReconnectTimer);
+    // 断线/刷新期间发出的 permission_request 是一次性广播，收不到第二次；
+    // 服务端在 Subscribe 时会重放挂起审批，这里再主动拉取一次兜底
+    // （也覆盖 plan_request 等挂起请求），恢复卡住的审批入口。
+    fetchPendingAgentRequests();
+  };
   socket.onmessage = (message) => {
     try {
       handleAgentEvent(JSON.parse(message.data));
@@ -2049,6 +2055,23 @@ function connectAgentSocket() {
       agentReconnectTimer = setTimeout(connectAgentSocket, 1500);
     }
   };
+}
+
+/** 拉取服务端仍挂起的审批/计划请求（WS 重连后的恢复路径）。 */
+async function fetchPendingAgentRequests() {
+  try {
+    const pending = await api("/api/agent/pending");
+    if (!Array.isArray(pending)) return;
+    for (const event of pending) {
+      if (event?.type === "permission_request" && event.permission) {
+        showAgentPermission(event.permission);
+      } else if (event?.type === "plan_request" && event.plan) {
+        showAgentPlan(event.plan, true);
+      }
+    }
+  } catch {
+    // 服务未就绪或接口不可用（如 acp 桥）：静默跳过。
+  }
 }
 
 // 切换会话后，旧会话的流式事件仍可能在 WS 上晚到（服务端补发/重连回放同理）；

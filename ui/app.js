@@ -2305,8 +2305,10 @@ function scrollChatToBottom(force = false) {
   const messages = $("chatMessages");
   if (!messages) return;
   if (!force && !state.chatStickToBottom) return;
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
   requestAnimationFrame(() => {
-    messages.scrollTop = messages.scrollHeight;
+    // smooth 仅在流式跟随时有意义；用户主动跳底保持瞬时。
+    messages.scrollTo({ top: messages.scrollHeight, behavior: force || reduceMotion ? "auto" : "smooth" });
     state.chatStickToBottom = true;
   });
 }
@@ -3043,6 +3045,7 @@ async function renderMessageMarkdown(article, final = false) {
   const gen = (article._mdGen = (article._mdGen || 0) + 1);
   if (!window.marked?.parse || !window.DOMPurify) {
     if (article._mdGen === gen) body.textContent = raw;
+    updateStreamingCursor(article, final);
     return;
   }
   try {
@@ -3084,22 +3087,55 @@ async function renderMessageMarkdown(article, final = false) {
       decorateCodeBlocksLite(body);
       renderMathBlocks(body);
     }
+    if (article._mdGen === gen) updateStreamingCursor(article, final);
   } catch (err) {
     if (article._mdGen !== gen) return;
     body.textContent = raw;
     body.title = `Markdown 渲染失败: ${err.message}`;
+    updateStreamingCursor(article, final);
   }
+}
+
+// 流式光标：仅挂在正在流式的 assistant 气泡尾部，finalize 时移除。
+function updateStreamingCursor(article, final) {
+  if (!article) return;
+  article.querySelector(".streamCursor")?.remove();
+  if (final || article !== agentActiveAssistant || !article.isConnected) return;
+  const body = article.querySelector(".chatMessageText");
+  if (!body) return;
+  const cursor = document.createElement("span");
+  cursor.className = "streamCursor";
+  cursor.setAttribute("aria-hidden", "true");
+  body.append(cursor);
 }
 
 function decorateCodeBlocksLite(root) {
   root.querySelectorAll("pre").forEach((pre) => {
-    if (pre.querySelector(".codeLanguageLabel")) return;
     const code = pre.querySelector("code");
     if (!code || code.classList.contains("language-mermaid")) return;
-    const declaredLanguage = [...code.classList].find((name) => name.startsWith("language-"))?.slice(9) || "text";
+    const declaredLanguage = [...code.classList].find((name) => name.startsWith("language-"))?.slice(9) || "";
+    // 流式期间即时高亮：结束瞬间"突然上色"的跳变比每 220ms 高亮一次的
+    // 开销更显廉价。hljs 高亮整块替换 innerHTML，锁定语言时开销可控。
+    const highlighter = window.hljs;
+    if (highlighter && !code.classList.contains("hljs")) {
+      try {
+        if (declaredLanguage && highlighter.getLanguage(declaredLanguage)) {
+          highlighter.highlightElement(code);
+        } else if (!declaredLanguage) {
+          const result = highlighter.highlightAuto(code.textContent || "");
+          code.innerHTML = result.value;
+          code.classList.add("hljs");
+          if (result.language) code.dataset.detectedLanguage = result.language;
+        }
+      } catch {
+        // Keep the original escaped code if highlighting fails.
+      }
+    }
+    if (pre.querySelector(".codeLanguageLabel")) return;
+    const language = declaredLanguage || code.dataset.detectedLanguage || "text";
     const languageLabel = document.createElement("span");
     languageLabel.className = "codeLanguageLabel";
-    languageLabel.textContent = declaredLanguage;
+    languageLabel.textContent = language;
     pre.append(languageLabel);
   });
 }
@@ -3354,14 +3390,31 @@ function appendThoughtChunk(text) {
     // Keep thoughts collapsed by default — large reasoning blocks dominate history.
     details.open = false;
     const summary = document.createElement("summary");
-    summary.textContent = "思考过程";
+    const summaryLabel = document.createElement("span");
+    summaryLabel.className = "agentThoughtLabel";
+    summaryLabel.textContent = "思考过程";
+    const summaryPreview = document.createElement("span");
+    summaryPreview.className = "agentThoughtPreview";
+    summary.append(summaryLabel, summaryPreview);
     const body = document.createElement("pre");
     details.append(summary, body);
+    details._thoughtPreview = summaryPreview;
     chatMessagesRoot().append(details);
     agentActiveThought = details;
   }
-  agentActiveThought.querySelector("pre").textContent += text;
+  const body = agentActiveThought.querySelector("pre");
+  body.textContent += text;
+  // 折叠态摘要：让"思考过程"一行有内容感，而不是干巴巴的四个字。
+  if (agentActiveThought._thoughtPreview && !agentActiveThought.open) {
+    agentActiveThought._thoughtPreview.textContent = summarizeThoughtPreview(body.textContent);
+  }
   if (!historyMountSilent) scrollChatToBottom();
+}
+
+function summarizeThoughtPreview(text) {
+  const oneLine = (text || "").replace(/\s+/g, " ").trim();
+  if (!oneLine) return "";
+  return oneLine.length > 60 ? oneLine.slice(0, 57) + "…" : oneLine;
 }
 
 function bindToolPayloadLazyLoad(details) {
@@ -3478,11 +3531,40 @@ function agentToolStatusLabel(status) {
 
 function formatAgentPayload(payload) {
   if (typeof payload === "string") return payload;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return formatAgentPayloadObject(payload);
+  }
   try {
     return JSON.stringify(payload, null, 2);
   } catch {
     return String(payload);
   }
+}
+
+// 工具参数摘要：把「模型可读」的 JSON 转成「人可读」的关键行。
+// 常见字段（路径/命令/模式等）单行展示，长文本截断，其余字段收尾列出。
+function formatAgentPayloadObject(obj) {
+  const PRIORITY = ["path", "file_path", "command", "pattern", "query", "url", "description", "content", "old_string", "new_string"];
+  const summarizeValue = (value) => {
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    if (text == null) return "";
+    const oneLine = text.replace(/\s+/g, " ").trim();
+    return oneLine.length > 120 ? oneLine.slice(0, 117) + "…" : oneLine;
+  };
+  const lines = [];
+  const seen = new Set();
+  for (const key of PRIORITY) {
+    if (key in obj && !(obj[key] == null || obj[key] === "")) {
+      lines.push(`${key}: ${summarizeValue(obj[key])}`);
+      seen.add(key);
+    }
+  }
+  for (const [key, value] of Object.entries(obj)) {
+    if (!seen.has(key) && value != null && value !== "") {
+      lines.push(`${key}: ${summarizeValue(value)}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function appendAgentNotice(text, isError = false) {
@@ -4216,6 +4298,7 @@ async function sendAgentMessage() {
   agentActiveThought = null;
   agentRetryNotice = null;
   $("chatInput").value = "";
+  autoGrowChatInput();
   clearChatAttachments();
   forceScrollChatToBottom();
   const _m = $("composerModelSelect")?.value || "";
@@ -6056,9 +6139,18 @@ $("agentReadonlyNewBtn").onclick = () => run(async () => {
   return newAgentSession();
 }, { button: $("agentReadonlyNewBtn"), busyLabel: "创建中…" });
 $("chatInput").oninput = () => {
+  autoGrowChatInput();
   renderAgentStatus(state.agentStatus);
   showSkillsPopup();
 };
+// 输入框自动增高：多行内容在固定 50px 盒内滚动是最直观的粗糙感。
+function autoGrowChatInput() {
+  const input = $("chatInput");
+  if (!input) return;
+  input.style.height = "auto";
+  const max = parseInt(getComputedStyle(input).maxHeight, 10) || 180;
+  input.style.height = `${Math.min(input.scrollHeight, max)}px`;
+}
 $("chatInput").onkeydown = (event) => {
   const popup = $("skillsPopup");
   const popupOpen = popup && !popup.hidden;

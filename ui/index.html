@@ -417,15 +417,18 @@
 
               <!-- Status line sits ABOVE the chip row so long copy never covers 访问方式 / send. -->
               <div id="composerStatusRow" class="composerStatusRow" hidden>
+                <span class="typingDots" aria-hidden="true"><i></i><i></i><i></i></span>
                 <span class="composerHint" id="composerHint"></span>
               </div>
               <div id="composerToolbar" class="composerFooterRow">
                 <div class="composerFooterLeft">
                   <input type="file" id="chatAttachFile" accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.markdown,.json,.csv,.tsv,.js,.mjs,.cjs,.ts,.tsx,.jsx,.go,.py,.rb,.java,.c,.cc,.cpp,.h,.hpp,.rs,.php,.sh,.bash,.zsh,.ps1,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.scss,.less,.sql,.log,.env" multiple hidden>
-                  <button type="button" id="chatAttachBtn" class="composerPlusBtn" aria-label="添加附件" title="添加附件">＋</button>
+                  <button type="button" id="chatAttachBtn" class="composerPlusBtn" aria-label="添加附件" title="添加附件">
+                    <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M10 4.2v11.6M4.2 10h11.6"/></svg>
+                  </button>
                   <button type="button" id="chatWorkspaceFileBtn" class="composerMiniChip" aria-label="引用工作区文件" title="@ 引用文件">@</button>
                   <button type="button" id="composerProjectBtn" class="composerMiniChip composerProjectChip" title="当前项目 / 选择目录">
-                    <span class="composerProjectIcon" aria-hidden="true">📁</span>
+                    <svg class="composerProjectIcon" viewBox="0 0 20 20" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6.2c0-1 .8-1.8 1.8-1.8h3l1.6 1.8h6.8c1 0 1.8.8 1.8 1.8v6.8c0 1-.8 1.8-1.8 1.8H4.8c-1 0-1.8-.8-1.8-1.8V6.2Z"/></svg>
                     <span id="composerProjectLabel">选择项目</span>
                   </button>
                   <label class="composerMiniChip composerSelectChip" data-chip="model" title="模型">
@@ -439,7 +442,7 @@
                     </select>
                   </label>
                   <label class="composerMiniChip composerSelectChip composerAccessChip" data-chip="access" title="工具权限：每次确认 / 本会话自动 / 完全访问">
-                    <span class="composerAccessWarn" aria-hidden="true">⚠</span>
+                    <svg class="composerAccessWarn" viewBox="0 0 20 20" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5 17.5 16h-15L10 3.5Z"/><path d="M10 8.6v3.2"/><circle cx="10" cy="14.1" r="0.4" fill="currentColor" stroke="none"/></svg>
                     <select id="composerAccessSelect" class="composerAccessSelect" aria-label="访问方式">
                       <option value="ask">每次确认</option>
                       <option value="session">本会话自动</option>

@@ -33,8 +33,10 @@ type EngineDeps struct {
 	ProviderFor func() (llm.Provider, error)
 	// SystemPrompt 组装系统提示词（每 turn 以当前会话的环境块调用）。
 	SystemPrompt func(env string) string
-	// ImageGen 为 nil 时不注册 generate_image。
-	ImageGen tools.ImageGenerator
+	// ImageGenAdapter 每 turn 调用一次，返回当前可用的生图适配（nil =
+	// 不注册 generate_image）。不能用静态值注入：服务构造早于 Imagine
+	// 引擎初始化（Listen 内），且生图开关需要即时生效。
+	ImageGenAdapter func() tools.ImageGenerator
 	// DefaultCwd 兜底工作目录。
 	DefaultCwd string
 }
@@ -366,8 +368,12 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 		Type: "user_message", SessionID: sessionID, Text: text,
 	})
 
-	// 工具注册表（每 turn 重建：生图开关即时生效）。
-	registry := tools.DefaultRegistry(func() agentfs.Env { return env }, n.deps.ImageGen, &nativePlanApprover{n: n}, &tools.TodoStore{})
+	// 工具注册表（每 turn 重建：生图开关与引擎就绪状态即时生效）。
+	var imageGen tools.ImageGenerator
+	if n.deps.ImageGenAdapter != nil {
+		imageGen = n.deps.ImageGenAdapter()
+	}
+	registry := tools.DefaultRegistry(func() agentfs.Env { return env }, imageGen, &nativePlanApprover{n: n}, &tools.TodoStore{})
 
 	// 引擎事件 → WS 事件翻译。usage 观测挂在服务上（跨 turn 保持）。
 	n.usageHolderOnce.Do(func() { n.usageHolder = &turnUsageHolder{} })

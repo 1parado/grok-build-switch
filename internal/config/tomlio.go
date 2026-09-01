@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -80,7 +82,11 @@ func ApplyProfileToFile(path string, profile profiles.Profile, opts ...ApplyOpts
 	if err != nil {
 		return err
 	}
-	return atomicWrite(path, next)
+	if err := atomicWrite(path, next); err != nil {
+		return err
+	}
+	invalidateDocCache()
+	return nil
 }
 
 // UseOfficialAuthToFile removes provider-owned endpoint and model overrides so
@@ -91,7 +97,11 @@ func UseOfficialAuthToFile(path string) error {
 		return err
 	}
 	next := UseOfficialAuthText(data)
-	return atomicWrite(path, next)
+	if err := atomicWrite(path, next); err != nil {
+		return err
+	}
+	invalidateDocCache()
+	return nil
 }
 
 func UseOfficialAuthText(data []byte) []byte {
@@ -430,7 +440,27 @@ func CurrentMatches(path string, profile profiles.Profile) (bool, error) {
 	return profiles.Normalize(profile).Matches(profiles.Normalize(current)), nil
 }
 
+// docCache 缓存最近一次解析的 config.toml 文档。/api/status 每次轮询都会
+// 经 CurrentMatches → ImportProfile → readDoc 全量 TOML 解析，而 config.toml
+// 很少变化；缓存按 mtime+size 校验，文件一变即失效，语义与逐次读盘一致。
+// 返回的 map 由调用方只读使用（readModels/stringAt 均不修改）。
+var (
+	docCacheMu   sync.Mutex
+	docCachePath string
+	docCacheMod  time.Time
+	docCacheSize int64
+	docCacheDoc  map[string]any
+)
+
 func readDoc(path string) (map[string]any, error) {
+	docCacheMu.Lock()
+	defer docCacheMu.Unlock()
+	if info, err := os.Stat(path); err == nil {
+		if docCacheDoc != nil && docCachePath == path &&
+			info.ModTime().Equal(docCacheMod) && info.Size() == docCacheSize {
+			return docCacheDoc, nil
+		}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -438,13 +468,34 @@ func readDoc(path string) (map[string]any, error) {
 	data = trimUTF8BOM(data)
 	doc := map[string]any{}
 	if strings.TrimSpace(string(data)) == "" {
+		docCachePath = path
+		docCacheDoc = doc
+		if info, statErr := os.Stat(path); statErr == nil {
+			docCacheMod, docCacheSize = info.ModTime(), info.Size()
+		}
 		return doc, nil
 	}
 	if err := toml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if info, statErr := os.Stat(path); statErr == nil {
+		docCachePath, docCacheMod, docCacheSize = path, info.ModTime(), info.Size()
+		docCacheDoc = doc
+	}
 	return doc, nil
 }
+
+// invalidateDocCache 在本进程写入 config.toml 后调用，立即丢弃缓存，
+// 避免写入方持有旧文档视图。
+func invalidateDocCache() {
+	docCacheMu.Lock()
+	docCacheDoc = nil
+	docCacheMu.Unlock()
+}
+
+// InvalidateDocCache 供 config 包外（switcher 等）直接写 config.toml 的
+// 调用方在写入后失效缓存。
+func InvalidateDocCache() { invalidateDocCache() }
 
 func readModels(doc map[string]any) []profiles.ModelDef {
 	modelTable := tableAt(doc, "model")

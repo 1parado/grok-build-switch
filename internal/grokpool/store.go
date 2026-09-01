@@ -65,6 +65,9 @@ func (m *Manager) load() error {
 func (m *Manager) saveLocked() error {
 	m.state.Version = poolVersion
 	m.state.Settings = normalizeSettings(m.state.Settings)
+	// 账号状态可能已被改动（分类/停用/增删）；写盘必然伴随这些变化，
+	// 统一在此置脏，下一次 summarizeLocked 重算。
+	m.invalidateSummaryLocked()
 	data, err := json.MarshalIndent(m.state, "", "  ")
 	if err != nil {
 		return err
@@ -202,4 +205,20 @@ func summarize(accounts []Account) Summary {
 		}
 	}
 	return summary
+}
+
+// summarizeLocked 返回全池 summary（须持 m.mu）。账号集合脏标记置位时重算，
+// 否则直接复用缓存——轮询端点每次调用都会全量重算，数千账号下纯属重复。
+func (m *Manager) summarizeLocked() Summary {
+	if m.accountsDirty {
+		m.summaryCache = summarize(m.state.Accounts)
+		m.accountsDirty = false
+	}
+	return m.summaryCache
+}
+
+// invalidateSummaryLocked 标记 summary 需要重算（须持 m.mu，在改动账号
+// 分类/Disabled/增删之后调用）。
+func (m *Manager) invalidateSummaryLocked() {
+	m.accountsDirty = true
 }

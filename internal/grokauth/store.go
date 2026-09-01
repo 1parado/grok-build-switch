@@ -67,6 +67,14 @@ type Store struct {
 	client               *http.Client
 	mu                   sync.Mutex
 	allowUnsafeEndpoints bool
+
+	// 热路径缓存：Token/Status/Authorized 位于每个本地代理请求的路径上，
+	// 逐次读盘 + JSON 解析是纯开销。凭据文件只由本进程写入（单实例），
+	// 用 mtime+size 判断是否需要重新读取（与 settings store 一致）。
+	cacheValid bool
+	cacheValue Credential
+	cacheMod   time.Time
+	cacheSize  int64
 }
 
 func NewStore(path string) *Store {
@@ -182,6 +190,9 @@ func (s *Store) Delete() error {
 	err := os.Remove(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
+	}
+	if err == nil {
+		s.cacheValid = false
 	}
 	return err
 }
@@ -319,8 +330,19 @@ func (s *Store) validateXAIEndpoint(raw string) error {
 }
 
 func (s *Store) readLocked() (Credential, error) {
+	var modTime time.Time
+	var size int64
+	cacheHit := false
+	if info, err := os.Stat(s.path); err == nil {
+		modTime, size = info.ModTime(), info.Size()
+		cacheHit = s.cacheValid && modTime.Equal(s.cacheMod) && size == s.cacheSize
+	}
+	if cacheHit {
+		return s.cacheValue, nil
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
+		s.cacheValid = false
 		return Credential{}, err
 	}
 	var credential Credential
@@ -330,10 +352,15 @@ func (s *Store) readLocked() (Credential, error) {
 	if credential.AccessToken == "" || credential.LocalAPIKey == "" {
 		return s.recoverCorruptLocked(fmt.Errorf("Grok auth store 不完整"))
 	}
+	s.cacheValid = true
+	s.cacheValue = credential
+	s.cacheMod = modTime
+	s.cacheSize = size
 	return credential, nil
 }
 
 func (s *Store) recoverCorruptLocked(cause error) (Credential, error) {
+	s.cacheValid = false
 	backup, err := recovery.BackupCorrupt(s.path)
 	if err != nil {
 		return Credential{}, fmt.Errorf("%v; 备份损坏 Grok auth store: %w", cause, err)
@@ -347,7 +374,19 @@ func (s *Store) writeLocked(credential Credential) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(s.path, append(data, '\n'))
+	if err := atomicWrite(s.path, append(data, '\n')); err != nil {
+		return err
+	}
+	// 写入成功后同步缓存；Stat 失败则失效缓存，下次读取时重建。
+	s.cacheValue = credential
+	if info, err := os.Stat(s.path); err == nil {
+		s.cacheValid = true
+		s.cacheMod = info.ModTime()
+		s.cacheSize = info.Size()
+	} else {
+		s.cacheValid = false
+	}
+	return nil
 }
 
 func ParseCredential(raw []byte) (Credential, error) {

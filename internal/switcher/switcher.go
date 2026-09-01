@@ -300,7 +300,11 @@ func (s *Switcher) WriteConfig(content []byte) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	return atomicWrite(s.ConfigPath, content)
+	if err := atomicWrite(s.ConfigPath, content); err != nil {
+		return err
+	}
+	grokconfig.InvalidateDocCache()
+	return nil
 }
 
 func atomicWrite(path string, data []byte) error {

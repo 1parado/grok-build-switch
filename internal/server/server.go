@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +76,11 @@ type Server struct {
 
 	imagineMu   sync.Mutex
 	imagineJobs *imagineJobList
+
+	// grok 上游代理共用 client（见 grok_proxy.go grokUpstreamClient）。
+	grokClientMu           sync.Mutex
+	grokUpstreamTransport  http.RoundTripper
+	grokUpstreamHTTPClient *http.Client
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -219,6 +226,7 @@ func (s *Server) Shutdown(ctx context.Context, srv *http.Server) error {
 func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/pair", s.handlePair)
 	mux.HandleFunc("/api/lan-access", s.handleLANAccess)
+	mux.HandleFunc("/api/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/update", s.handleUpdate)
 	mux.HandleFunc("/api/profiles", s.handleProfiles)
@@ -1164,6 +1172,9 @@ func (s *Server) handleImagineOutput(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, full)
 }
 
+// handleStatic 服务嵌入的 UI 资源。资源随二进制发布、内容不可变，用
+// sha256 ETag 支持条件请求：命中时返回 304 且不传输 4MB+ 的 vendor 脚本，
+// 同时保留 no-cache 语义保证资源变化后浏览器一定会重新验证。
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 	if name == "." || name == "" {
@@ -1184,7 +1195,52 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	etag := staticETag(name, data)
+	w.Header().Set("ETag", etag)
+	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.Write(data)
+}
+
+// staticETag 计算资源的内容指纹（进程内缓存：嵌入资源不可变）。
+func staticETag(name string, data []byte) string {
+	staticETagOnce.Do(func() {
+		staticETags = map[string]string{}
+	})
+	if etag, ok := staticETags[name]; ok {
+		return etag
+	}
+	sum := sha256.Sum256(data)
+	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+	staticETags[name] = etag
+	return etag
+}
+
+var (
+	staticETagOnce sync.Once
+	staticETags    map[string]string
+)
+
+// matchesETag 按 RFC 7232 处理 If-None-Match（* 与逗号分隔的标签列表）。
+func matchesETag(ifNoneMatch, etag string) bool {
+	if ifNoneMatch == "" {
+		return false
+	}
+	for _, candidate := range strings.Split(ifNoneMatch, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == etag {
+			return true
+		}
+		// 宽容比较：忽略弱校验前缀与引号差异。
+		candidate = strings.TrimPrefix(candidate, "W/")
+		candidate = strings.Trim(candidate, `"`)
+		if candidate == strings.Trim(etag, `"`) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) changed() {

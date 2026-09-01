@@ -140,6 +140,12 @@ type Manager struct {
 	stickyPath     string
 	stickyDirty    bool
 
+	// summaryCache 缓存全池 summary：每次轮询（/api/status、/api/grok-pool、
+	// /api/grok-pool/accounts）都会 summarize 数千账号，逐字段重算纯属重复。
+	// accountsDirty 标记账号集合/分类变化，置位后下一次读取重算。
+	summaryCache  Summary
+	accountsDirty bool
+
 	// Auth-dir hot-load state (in-memory fingerprints; re-scanned after restart).
 	watchHashes     map[string]string
 	watchLastScan   time.Time

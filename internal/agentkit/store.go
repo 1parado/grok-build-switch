@@ -21,6 +21,9 @@ import (
 type Store struct {
 	root string
 	mu   sync.Mutex
+	// seq 记录每个会话已追加的行数，避免每次追加都全量重读 transcript
+	// 统计行数（turn 内每条事件都会落一条记录，文件会到几十 MB）。
+	seqs map[string]int64
 }
 
 // SessionMeta 是 meta.json 的内容与列表返回结构（字段与
@@ -42,7 +45,7 @@ func NewStore(root string) (*Store, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("agentkit: 创建会话目录失败: %w", err)
 	}
-	return &Store{root: root}, nil
+	return &Store{root: root, seqs: map[string]int64{}}, nil
 }
 
 func (s *Store) sessionDir(id string) string {
@@ -152,6 +155,9 @@ func (s *Store) Rename(id, title string) error {
 
 // Delete 删除整个会话目录。
 func (s *Store) Delete(id string) error {
+	s.mu.Lock()
+	delete(s.seqs, sanitizeID(id))
+	s.mu.Unlock()
 	return os.RemoveAll(s.sessionDir(id))
 }
 
@@ -163,15 +169,19 @@ func (s *Store) AppendRecord(id string, rec Record) error {
 	if rec.Time.IsZero() {
 		rec.Time = time.Now()
 	}
-	f, err := os.OpenFile(s.transcriptPath(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// Seq 用缓存的行数计数器：首次遇到该会话时才数一遍文件行数，
+	// 之后追加式递增（原实现每次追加都全量重读 transcript）。
+	seq, ok := s.seqs[id]
+	if !ok {
+		seq = int64(countLines(s.transcriptPath(id)))
+	}
+	rec.Seq = seq + 1
+	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	// Seq 取当前行数（简化：读现有记录数由调用方维护；这里用文件行数）。
-	rec.Seq = int64(countLines(s.transcriptPath(id))) + 1
-	b, err := json.Marshal(rec)
+	f, err := os.OpenFile(s.transcriptPath(id), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		f.Close()
 		return err
 	}
 	if _, err := f.Write(append(b, '\n')); err != nil {
@@ -181,13 +191,16 @@ func (s *Store) AppendRecord(id string, rec Record) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	meta, err := s.GetMeta(id)
+	s.seqs[id] = seq + 1
+	// 同一函数已持锁并刚写过 transcript；meta 原地更新（读改写合一），
+	// 避免 GetMeta（读盘）+ writeMeta（MarshalIndent）双重往返的重复解析。
+	meta, err := s.readMetaLocked(id)
 	if err != nil {
 		return err
 	}
 	meta.MessageCount++
 	meta.UpdatedAt = time.Now()
-	return s.writeMeta(meta)
+	return s.writeMetaLocked(meta)
 }
 
 // LoadRecords 读回全部记录（恢复/回放）。
@@ -227,16 +240,28 @@ func (s *Store) metaPath(id string) string {
 	return filepath.Join(s.sessionDir(id), "meta.json")
 }
 
+// readMetaLocked 读取 meta.json（须持 s.mu，与 GetMeta 同逻辑，命名表意）。
+func (s *Store) readMetaLocked(id string) (SessionMeta, error) {
+	return s.GetMeta(id)
+}
+
+// writeMetaLocked 落盘 meta（须持 s.mu）。用紧凑编码替代 MarshalIndent：
+// meta 是机器读写文件（每次 turn 事件都会重写），紧凑编码体积约小 1/3、
+// 编码更快，不影响任何可读性需求（用户查看的列表数据来自 API）。
+func (s *Store) writeMetaLocked(meta SessionMeta) error {
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return atomicWriteJSON(s.metaPath(meta.ID), b)
+}
+
 func (s *Store) transcriptPath(id string) string {
 	return filepath.Join(s.sessionDir(id), "transcript.jsonl")
 }
 
 func (s *Store) writeMeta(meta SessionMeta) error {
-	b, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWriteJSON(s.metaPath(meta.ID), b)
+	return s.writeMetaLocked(meta)
 }
 
 func countLines(path string) int {

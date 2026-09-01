@@ -688,16 +688,31 @@ themeMedia.addEventListener("change", () => {
 });
 
 async function refreshAll() {
-  const [status, profiles, backups, settings, grokAuth, grokPool, registrar, lanAccess] = await Promise.all([
-    api("/api/status"),
-    api("/api/profiles"),
-    api("/api/backups"),
-    api("/api/settings"),
-    api("/api/grok-auth"),
-    api("/api/grok-pool"),
-    api("/api/registrar"),
-    api("/api/lan-access"),
-  ]);
+  // 单一快照端点：一次往返拿全量轮询数据（原为 8 个并发请求）。
+  // 快照不可用时回退到逐端点并发（旧二进制兼容）。
+  const snap = await api("/api/snapshot").catch(() => null);
+  let status, profiles, backups, settings, grokAuth, grokPool, registrar, lanAccess;
+  if (snap && (snap.status || snap.profiles || snap.grok_pool)) {
+    status = snap.status;
+    profiles = snap.profiles;
+    backups = snap.backups;
+    settings = snap.settings;
+    grokAuth = snap.grok_auth;
+    grokPool = snap.grok_pool;
+    registrar = snap.registrar;
+    lanAccess = snap.lan_access;
+  } else {
+    [status, profiles, backups, settings, grokAuth, grokPool, registrar, lanAccess] = await Promise.all([
+      api("/api/status"),
+      api("/api/profiles"),
+      api("/api/backups"),
+      api("/api/settings"),
+      api("/api/grok-auth"),
+      api("/api/grok-pool"),
+      api("/api/registrar"),
+      api("/api/lan-access"),
+    ]);
+  }
   state.status = status;
   state.profiles = profiles;
   state.backups = backups;

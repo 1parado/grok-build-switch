@@ -32,6 +32,13 @@ type persistedState struct {
 type Store struct {
 	path string
 	mu   sync.Mutex
+
+	// 会话 token 内存缓存：Authorized 位于每个局域网请求的中间件路径上，
+	// 逐次读盘是纯开销。文件只由本进程写入，用 mtime+size 判断是否重读。
+	tokenValid bool
+	tokenValue string
+	tokenMod   time.Time
+	tokenSize  int64
 }
 
 func NewStore(path string) *Store {
@@ -88,14 +95,41 @@ func (s *Store) ConsumePairing(code string) (string, bool, error) {
 }
 
 func (s *Store) Authorized(token string) (bool, error) {
-	snapshot, err := s.Get()
+	s.mu.Lock()
+	sessionToken, err := s.sessionTokenLocked()
+	s.mu.Unlock()
 	if err != nil {
 		return false, err
 	}
-	if token == "" || snapshot.SessionToken == "" {
+	if token == "" || sessionToken == "" {
 		return false, nil
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(snapshot.SessionToken)) == 1, nil
+	return subtle.ConstantTimeCompare([]byte(token), []byte(sessionToken)) == 1, nil
+}
+
+// sessionTokenLocked 返回当前会话 token（须持 s.mu）；文件未变时走内存缓存。
+func (s *Store) sessionTokenLocked() (string, error) {
+	if info, err := os.Stat(s.path); err == nil {
+		if s.tokenValid && info.ModTime().Equal(s.tokenMod) && info.Size() == s.tokenSize {
+			return s.tokenValue, nil
+		}
+	} else if s.tokenValid && os.IsNotExist(err) {
+		// 文件被外部删除：失效缓存，按无凭据处理（loadLocked 会重建）。
+		s.tokenValid = false
+	}
+	state, err := s.loadLocked()
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(s.path); err == nil {
+		s.tokenValid = true
+		s.tokenValue = state.SessionToken
+		s.tokenMod = info.ModTime()
+		s.tokenSize = info.Size()
+	} else {
+		s.tokenValid = false
+	}
+	return state.SessionToken, nil
 }
 
 func (s *Store) ResetSessions() error {

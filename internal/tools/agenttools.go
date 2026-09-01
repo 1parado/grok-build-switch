@@ -157,12 +157,14 @@ func (t GenerateImageTool) Execute(ctx context.Context, args json.RawMessage, en
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "已生成 %d 张图片:\n", len(paths))
+	media := make([]llm.ContentPart, 0, len(paths))
 	for _, p := range paths {
 		b.WriteString(p)
 		b.WriteString("\n")
+		media = append(media, llm.ImagePart{URI: p, MimeType: "image/jpeg"})
 	}
 	return ToolOutput{
 		Text:  b.String(),
-		Media: []llm.ContentPart{},
+		Media: media,
 	}
 }

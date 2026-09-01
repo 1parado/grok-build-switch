@@ -66,6 +66,9 @@ type ToolResultEvent struct {
 	Output    string `json:"output,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
+	// Media 携带工具产出的结构化媒体（如 generate_image 的图片引用），
+	// 供宿主直接渲染，避免从文本输出做不可靠的路径提取。
+	Media []llm.ContentPart `json:"-"`
 }
 
 // Dispatcher 是事件单出口。Dispatch 必须非阻塞且不 panic 外泄。

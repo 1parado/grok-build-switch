@@ -67,12 +67,16 @@ func (t *nativeEventTranslator) Dispatch(ev agentloop.Event) {
 		}
 	case agentloop.EventToolResult:
 		if ev.ToolResult != nil {
+			// 结构化媒体（generate_image 等）直接随事件下发与落盘；
+			// UI 与历史回放都不必再从文本里猜路径。
+			media := mediaPartsToBridge(ev.ToolResult.Media)
 			t.svc.broadcast(agentbridge.Event{
 				Type: "tool_update", SessionID: t.sessionID,
 				Tool: &agentbridge.ToolEvent{
 					ID: ev.ToolResult.ID, Title: ev.ToolResult.Name, Kind: ev.ToolResult.Name,
 					Status:    toolEventStatus(ev.ToolResult.IsError),
 					RawOutput: ev.ToolResult.Output,
+					Media:     media,
 				},
 			})
 			// 工具结果落盘（含回显的 call 参数）。
@@ -94,9 +98,11 @@ func (t *nativeEventTranslator) Dispatch(ev agentloop.Event) {
 				})
 			}
 			t.svc.persist(t.sessionID, agentkit.Record{
-				Origin: agentkit.OriginTool, Role: llm.RoleTool,
+				Origin:     agentkit.OriginTool,
+				Role:       llm.RoleTool,
 				ToolCallID: ev.ToolResult.ID,
 				Text:       agentloop.ToolResult{Output: ev.ToolResult.Output, IsError: ev.ToolResult.IsError, Truncated: ev.ToolResult.Truncated}.ResultJSON(),
+				Media:      mediaRefsFromParts(ev.ToolResult.Media),
 				TurnID:     t.turnID,
 			})
 		}
@@ -126,6 +132,42 @@ func toolEventStatus(isErr bool) string {
 		return "failed"
 	}
 	return "completed"
+}
+
+// mediaPartsToBridge 把工具结果里的媒体部件转成 WS 协议的 MediaContent。
+// 只转发 URI 引用（generate_image 产出落盘后的 /imagine-output/... 路径）；
+// 内联 base64 数据走 ImagePart.Data，按引用语义不适用。
+func mediaPartsToBridge(parts []llm.ContentPart) []agentbridge.MediaContent {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]agentbridge.MediaContent, 0, len(parts))
+	for _, part := range parts {
+		if img, ok := part.(llm.ImagePart); ok && img.URI != "" {
+			out = append(out, agentbridge.MediaContent{Kind: "image", MimeType: img.MimeType, URI: img.URI})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mediaRefsFromParts 把媒体部件转成 transcript 持久化引用（历史回放用）。
+func mediaRefsFromParts(parts []llm.ContentPart) []agentkit.MediaRef {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]agentkit.MediaRef, 0, len(parts))
+	for _, part := range parts {
+		if img, ok := part.(llm.ImagePart); ok && img.URI != "" {
+			out = append(out, agentkit.MediaRef{Kind: "image", MimeType: img.MimeType, URI: img.URI})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // turnUsageHolder 记录本 turn 最近一步的真实 input tokens（D3：无状态重放下

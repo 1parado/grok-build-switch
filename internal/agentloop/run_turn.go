@@ -245,6 +245,7 @@ func execToolBatch(ctx context.Context, in RunTurnInput, calls []llm.ToolCall, e
 			ToolResult: &ToolResultEvent{
 				ID: call.ID, Name: call.Name,
 				Output: result.Output, IsError: result.IsError, Truncated: result.Truncated,
+				Media: result.Media,
 			},
 		})
 	}

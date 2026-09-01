@@ -161,12 +161,22 @@ func (s *Server) agentDefaultCwd() string {
 
 // nativeSystemPrompt 组装原生引擎系统提示词。
 // 系统提示词只携带模型无法从对话推断的环境事实（工作目录、目录概貌、
-// 平台）；服务方式已由后训练写入权重，不再重复。环境块按会话现算：
-// cwd 是每会话状态，不能在服务构造时定死。
+// 平台）与最小工具调用契约；服务方式已由后训练写入权重，不再重复。
+// 环境块按会话现算：cwd 是每会话状态，不能在服务构造时定死。
+//
+// 工具契约必须保留：实测（2026-09）grok-4.6 在无工具指令的系统提示词下，
+// auto tool_choice 会把工具调用降级成文本描述（"用 generate_image 画…"）
+// 而不发真正的 function_call；强制 tool_choice 则一切正常。一行"动作要走
+// 工具调用"即可纠偏，删除会让生图等工具静默失效。
 func nativeSystemPrompt(env string) string {
 	var b strings.Builder
 	b.WriteString(`运行在用户的本机，直接读写用户的真实文件系统、执行真实命令。
 相对路径基于工作目录解析；沙箱外的路径会被拒绝。
+
+# 工具调用
+
+- 执行动作（读文件、执行命令、生成图片等）必须通过工具调用完成；不要在回复文本里描述调用，直接发起调用。
+- 生成/绘制图片时必须调用 generate_image 工具。
 `)
 	b.WriteString(env)
 	return b.String()

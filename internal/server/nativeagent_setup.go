@@ -23,8 +23,10 @@ func (s *Server) NewNativeAgentService() (AgentService, error) {
 		SessionsRoot: s.Paths.DataDir + "/agent2/sessions",
 		ProviderFor:  s.nativeProviderFor,
 		SystemPrompt: nativeSystemPrompt,
-		ImageGen:     s.nativeImageGen(),
-		DefaultCwd:   s.agentDefaultCwd(),
+		// 惰性取用：构造发生在 Listen() 初始化 Imagine 之前，这里只交出
+		// 读取器，每 turn 重建工具注册表时才真正判定生图可用性。
+		ImageGenAdapter: s.nativeImageGen,
+		DefaultCwd:      s.agentDefaultCwd(),
 	})
 }
 
@@ -117,7 +119,12 @@ func rewriteLoopbackPort(u string, port int) string {
 
 // nativeImageGen 返回生图工具适配；生图全局开关关闭或号池无账号时返回 nil
 // （工具不注册，模型回到无生图状态，与 acp 引擎的 MCP 移除语义一致）。
-// Registry 每 turn 重建，开关切换即时生效。
+// Registry 每 turn 重建，本函数也每 turn 调用一次，开关切换与引擎就绪
+// 都即时生效。
+//
+// 注意 s.Imagine 不能在构造期快照：main.go 在 Listen() 之前构造 native
+// 服务，而 Imagine 引擎在 Listen() 内才初始化——构造期它必为 nil，若在
+// 那时判定会把 generate_image 永久挤出工具列表（2026-09 实测回归）。
 func (s *Server) nativeImageGen() tools.ImageGenerator {
 	if s.Settings != nil {
 		if current, err := s.Settings.Get(); err != nil || !current.ImageGenEnabled {

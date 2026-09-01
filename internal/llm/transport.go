@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,8 +23,41 @@ const (
 	maxErrorBody   = 8 << 10
 )
 
-// transport 构造共享 HTTP 客户端（两个适配器复用）。
+// providerClientKey 是 client 缓存的键（UpstreamTarget 含 map 字段不可比较，
+// 提炼出可比较的连接相关字段）。APIKey 参与 key：不同凭据走不同连接池，
+// 避免跨账号复用被上游判定为会话串扰。
+type providerClientKey struct {
+	baseURL  string
+	apiKey   string
+	proxyURL string
+	timeout  time.Duration
+}
+
+// providerClientCache 按 target 复用 HTTP client/transport：每次 turn 都新建
+// http.Transport 会丢弃连接池，SSE 流式回复每个 turn 都要重做 TCP+TLS
+// 握手。无代理的 target 全部共享缓存（进程内最常见情形，切换 Profile 不
+// 产生新握手）；数量上限兜底淘汰。
+var (
+	providerClientMu    sync.Mutex
+	providerClientCache = map[providerClientKey]*http.Client{}
+)
+
 func newHTTPClient(target UpstreamTarget) (*http.Client, error) {
+	proxyURL := strings.TrimSpace(target.ProxyURL)
+	key := providerClientKey{
+		baseURL:  target.BaseURL,
+		apiKey:   target.APIKey,
+		proxyURL: proxyURL,
+		timeout:  target.Timeout,
+	}
+	if proxyURL == "" {
+		providerClientMu.Lock()
+		if client, ok := providerClientCache[key]; ok {
+			providerClientMu.Unlock()
+			return client, nil
+		}
+		providerClientMu.Unlock()
+	}
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		MaxIdleConns:        16,
@@ -31,8 +65,8 @@ func newHTTPClient(target UpstreamTarget) (*http.Client, error) {
 		IdleConnTimeout:     90 * time.Second,
 		ForceAttemptHTTP2:   true,
 	}
-	if strings.TrimSpace(target.ProxyURL) != "" {
-		pu, err := url.Parse(target.ProxyURL)
+	if proxyURL != "" {
+		pu, err := url.Parse(proxyURL)
 		if err != nil {
 			return nil, fmt.Errorf("解析代理地址失败: %w", err)
 		}
@@ -47,7 +81,18 @@ func newHTTPClient(target UpstreamTarget) (*http.Client, error) {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &http.Client{Transport: transport, Timeout: timeout}, nil
+	client := &http.Client{Transport: transport, Timeout: timeout}
+	if proxyURL == "" {
+		providerClientMu.Lock()
+		if len(providerClientCache) >= 16 {
+			// 超上限：整表重置（保留当前 key），避免无界增长。
+			providerClientCache = map[providerClientKey]*http.Client{key: client}
+		} else {
+			providerClientCache[key] = client
+		}
+		providerClientMu.Unlock()
+	}
+	return client, nil
 }
 
 // doJSON 发起 POST JSON 请求，返回 resp（调用方负责关闭 body）。

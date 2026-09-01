@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"grok_switch/internal/grokauth"
 )
@@ -267,29 +268,51 @@ func (s *Server) doGrokUpstream(r *http.Request, token string, body []byte, mode
 	}
 	req.Host = req.URL.Host
 
-	client := &http.Client{}
+	// 复用进程级 client：每次请求新建 http.Client 会丢弃连接池，SSE 流式
+	// 回复下每个 turn 都要重新做 TCP+TLS 握手。client 无整体超时（流式
+	// 响应生命周期由请求 context 控制），与原先的 `&http.Client{}` 一致。
+	return s.grokUpstreamClient().Do(req)
+}
+
+// grokUpstreamClient 返回代理上游共用的 HTTP client。优先用号池的传输层
+// （带用户配置的代理，代理变更时重建一次 client）；号池 transport 为 nil
+// 时走无代理共用 client，实际使用 http.DefaultTransport —— 测试通过替换
+// DefaultTransport 模拟上游的方式继续生效。
+func (s *Server) grokUpstreamClient() *http.Client {
 	if s.GrokPool != nil {
 		if transport := s.GrokPool.Transport(); transport != nil {
-			client.Transport = transport
+			s.grokClientMu.Lock()
+			defer s.grokClientMu.Unlock()
+			if s.grokUpstreamHTTPClient == nil || s.grokUpstreamTransport != transport {
+				s.grokUpstreamTransport = transport
+				s.grokUpstreamHTTPClient = &http.Client{Transport: transport}
+			}
+			return s.grokUpstreamHTTPClient
 		}
 	}
-	return client.Do(req)
+	return grokUpstreamDefaultClient
 }
+
+// grokUpstreamDefaultClient 无代理时的共用 client：transport 为空，
+// 实际使用 http.DefaultTransport（连接池复用 + 测试可替换）。
+var grokUpstreamDefaultClient = &http.Client{}
 
 // copyGrokUpstreamBody 流式回传上游响应，同时从已收集前缀里提取
 // resp_ ID 与流内错误事件负载。流内错误（HTTP 200 但事件报错）返回给
 // 调用方做账号健康观测；正常完成时第二个返回值为空串。
 func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) (string, string) {
 	flusher, _ := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
+	buf := proxyBufPool.Get().(*[]byte)
+	defer proxyBufPool.Put(buf)
+	data := (*buf)[:cap(*buf)]
 	var collected []byte
 	collectCap := 1 << 16
 	responseID := ""
 	streamError := ""
 	for {
-		n, err := resp.Body.Read(buf)
+		n, err := resp.Body.Read(data)
 		if n > 0 {
-			_, _ = w.Write(buf[:n])
+			_, _ = w.Write(data[:n])
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -298,7 +321,7 @@ func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) (string, s
 				if need > n {
 					need = n
 				}
-				collected = append(collected, buf[:need]...)
+				collected = append(collected, data[:need]...)
 				if responseID == "" {
 					responseID = extractGrokResponseID(collected)
 				}
@@ -318,6 +341,14 @@ func copyGrokUpstreamBody(w http.ResponseWriter, resp *http.Response) (string, s
 		streamError = extractGrokStreamError(collected)
 	}
 	return responseID, streamError
+}
+
+// proxyBufPool 复用流式回传的读缓冲（32KB/请求，SSE 下每秒数请求）。
+var proxyBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
 }
 
 // extractGrokStreamError 在已收集的响应前缀里找 SSE 错误事件

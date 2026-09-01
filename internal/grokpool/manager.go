@@ -106,7 +106,7 @@ func (m *Manager) Status() Status {
 		LocalAPIKey:     m.state.LocalAPIKey,
 		Settings:        settings,
 		Accounts:        accounts,
-		Summary:         summarize(accounts),
+		Summary:         m.summarizeLocked(),
 		Running:         m.running,
 		Done:            m.doneCount,
 		Total:           m.totalCount,

@@ -19,6 +19,14 @@ import (
 type Store struct {
 	path string
 	mu   sync.Mutex
+
+	// 热路径缓存：List/Get 位于 /api/status、/api/profiles 与每次代理取号的
+	// 路径上，逐次读盘 + JSON 解析是纯开销。profiles.json 只由本进程写入
+	//（单实例），用 mtime+size 判断是否需要重新读取（与 settings store 一致）。
+	cacheValid bool
+	cacheValue []Profile
+	cacheMod   time.Time
+	cacheSize  int64
 }
 
 func NewStore(path string) *Store {
@@ -175,15 +183,29 @@ func (s *Store) readLocked() ([]Profile, error) {
 	if err := s.EnsureDir(); err != nil {
 		return nil, err
 	}
+	var modTime time.Time
+	var size int64
+	cacheHit := false
+	if info, err := os.Stat(s.path); err == nil {
+		modTime, size = info.ModTime(), info.Size()
+		cacheHit = s.cacheValid && modTime.Equal(s.cacheMod) && size == s.cacheSize
+	}
+	if cacheHit {
+		return append([]Profile(nil), s.cacheValue...), nil
+	}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return []Profile{}, nil
+		profiles := []Profile{}
+		s.storeCacheLocked(profiles, modTime, size)
+		return profiles, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	if len(data) == 0 {
-		return []Profile{}, nil
+		profiles := []Profile{}
+		s.storeCacheLocked(profiles, modTime, size)
+		return profiles, nil
 	}
 	var profiles []Profile
 	if err := json.Unmarshal(data, &profiles); err != nil {
@@ -202,7 +224,17 @@ func (s *Store) readLocked() ([]Profile, error) {
 	for i := range profiles {
 		profiles[i] = Normalize(profiles[i])
 	}
+	s.storeCacheLocked(profiles, modTime, size)
 	return profiles, nil
+}
+
+// storeCacheLocked 在持锁状态下更新缓存；Stat 失败（含文件不存在）时以
+// size=-1 命中规则，保证下次写入后 mtime+size 校验必然失效重读。
+func (s *Store) storeCacheLocked(profiles []Profile, modTime time.Time, size int64) {
+	s.cacheValid = true
+	s.cacheValue = append([]Profile(nil), profiles...)
+	s.cacheMod = modTime
+	s.cacheSize = size
 }
 
 func (s *Store) writeLocked(profiles []Profile) error {
@@ -210,7 +242,19 @@ func (s *Store) writeLocked(profiles []Profile) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(s.path, append(data, '\n'))
+	if err := atomicWrite(s.path, append(data, '\n')); err != nil {
+		return err
+	}
+	// 写入成功后同步缓存；Stat 失败则失效缓存，下次读取时重建。
+	s.cacheValue = append([]Profile(nil), profiles...)
+	if info, err := os.Stat(s.path); err == nil {
+		s.cacheValid = true
+		s.cacheMod = info.ModTime()
+		s.cacheSize = info.Size()
+	} else {
+		s.cacheValid = false
+	}
+	return nil
 }
 
 func atomicWrite(path string, data []byte) error {

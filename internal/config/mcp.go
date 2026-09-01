@@ -31,7 +31,11 @@ func EnsureMcpServerToFile(path string, cfg McpServerConfig) error {
 	if string(next) == string(data) {
 		return nil
 	}
-	return atomicWrite(path, next)
+	if err := atomicWrite(path, next); err != nil {
+		return err
+	}
+	invalidateDocCache()
+	return nil
 }
 
 // RemoveMcpServerToFile 从 config.toml 删除 [mcp_servers.<name>] 段
@@ -48,7 +52,11 @@ func RemoveMcpServerToFile(path, name string) error {
 	if string(next) == string(data) {
 		return nil
 	}
-	return atomicWrite(path, next)
+	if err := atomicWrite(path, next); err != nil {
+		return err
+	}
+	invalidateDocCache()
+	return nil
 }
 
 // RemoveMcpServerText 是 RemoveMcpServerToFile 的纯文本实现。

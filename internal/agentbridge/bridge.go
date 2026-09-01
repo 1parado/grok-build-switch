@@ -114,7 +114,19 @@ type Bridge struct {
 	permCounter atomic.Uint64
 	plans       map[string]*pendingPlan
 	planCounter atomic.Uint64
+
+	// Status() 可用性探测缓存：Status 在 /api/agent/status 轮询路径上，
+	// ResolveExecutable 每次都 exec.LookPath + os.Stat，纯开销。
+	availOverride string
+	availChecked  time.Time
+	availCached   bool
+	availPath     string
+	availErr      string
 }
+
+// availCacheTTL 控制可用性探测缓存时长；用户安装/更新 grok 后最多
+// 30 秒内生效，轮询开销则降为内存读。
+const availCacheTTL = 30 * time.Second
 
 func New(grokHome, logPath string) *Bridge {
 	defaultCwd, err := os.Getwd()
@@ -166,7 +178,23 @@ func (b *Bridge) Status() Status {
 		UserTurnCount:      b.userTurnCount,
 	}
 	override := b.override
+	overrideUnchanged := override == b.availOverride
+	cachedAvail := b.availCached
+	cachedPath := b.availPath
+	cachedErr := b.availErr
+	cachedAt := b.availChecked
 	b.mu.RUnlock()
+	// 命中缓存的可用性探测时直接返回，避免每次轮询都 LookPath+Stat。
+	if overrideUnchanged && !cachedAt.IsZero() && time.Since(cachedAt) < availCacheTTL {
+		status.Available = cachedAvail
+		if status.Available && status.GrokPath == "" {
+			status.GrokPath = cachedPath
+		}
+		if !status.Available && status.Error == "" {
+			status.Error = cachedErr
+		}
+		return status
+	}
 	resolved, err := ResolveExecutable(override, b.grokHome)
 	if err == nil {
 		status.Available = true
@@ -176,6 +204,17 @@ func (b *Bridge) Status() Status {
 	} else if status.Error == "" {
 		status.Error = err.Error()
 	}
+	b.mu.Lock()
+	b.availOverride = override
+	b.availChecked = time.Now()
+	b.availCached = status.Available
+	b.availPath = resolved
+	if err != nil {
+		b.availErr = err.Error()
+	} else {
+		b.availErr = ""
+	}
+	b.mu.Unlock()
 	return status
 }
 

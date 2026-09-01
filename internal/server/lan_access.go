@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/skip2/go-qrcode"
@@ -209,6 +210,35 @@ func (s *Server) handleLANAccess(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// lanAccessSnapshotResponse 返回 /api/lan-access GET 的同构载荷（供
+// /api/snapshot 复用）；未启用时返回 disabled 形状，与原端点一致。
+func (s *Server) lanAccessSnapshotResponse() (map[string]any, error) {
+	if !s.lanAccessEnabled() {
+		return map[string]any{"enabled": false, "addresses": []lanAddress{}}, nil
+	}
+	if s.RemoteAccess == nil {
+		return nil, fmt.Errorf("局域网访问凭据未初始化")
+	}
+	snapshot, err := s.RemoteAccess.Get()
+	if err == nil && (snapshot.PairingCode == "" || !time.Now().Before(snapshot.PairingExpiry)) {
+		snapshot, err = s.RemoteAccess.NewPairing()
+	}
+	if err != nil {
+		return nil, err
+	}
+	addresses, err := s.lanAddresses(snapshot.PairingCode)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"enabled":        true,
+		"port":           s.ActualPort,
+		"addresses":      addresses,
+		"pairing_code":   snapshot.PairingCode,
+		"pairing_expiry": snapshot.PairingExpiry,
+	}, nil
+}
+
 func (s *Server) lanAddresses(code string) ([]lanAddress, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
@@ -230,7 +260,7 @@ func (s *Server) lanAddresses(code string) ([]lanAddress, error) {
 			case *net.IPNet:
 				ip = value.IP
 			case *net.IPAddr:
-				ip = value.IP
+				ip = ipFromAddr(value)
 			}
 			ip = ip.To4()
 			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || seen[ip.String()] {
@@ -239,20 +269,43 @@ func (s *Server) lanAddresses(code string) ([]lanAddress, error) {
 			seen[ip.String()] = true
 			address := fmt.Sprintf("%s:%d", ip.String(), s.ActualPort)
 			pairURL := fmt.Sprintf("http://%s/pair?code=%s", address, url.QueryEscape(code))
-			png, err := qrcode.Encode(pairURL, qrcode.Medium, 256)
-			if err != nil {
-				return nil, err
-			}
 			addresses = append(addresses, lanAddress{
 				Address: address,
 				URL:     fmt.Sprintf("http://%s/", address),
 				PairURL: pairURL,
-				QRCode:  "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+				QRCode:  "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG(pairURL)),
 			})
 		}
 	}
 	return addresses, nil
 }
+
+// qrPNG 生成配对二维码 PNG。二维码随配对码（10 分钟有效）生成一次，
+// 但 /api/lan-access 与 /api/snapshot 会在同一配对码生命周期内被轮询
+// 多次，按 URL 缓存编码结果避免重复运算。
+func qrPNG(content string) []byte {
+	qrMu.Lock()
+	defer qrMu.Unlock()
+	if png, ok := qrCache[content]; ok {
+		return png
+	}
+	png, err := qrcode.Encode(content, qrcode.Medium, 256)
+	if err != nil {
+		return nil
+	}
+	if len(qrCache) >= 8 {
+		qrCache = map[string][]byte{}
+	}
+	qrCache[content] = png
+	return png
+}
+
+var (
+	qrMu    sync.Mutex
+	qrCache = map[string][]byte{}
+)
+
+func ipFromAddr(value *net.IPAddr) net.IP { return value.IP }
 
 func writePairPage(w http.ResponseWriter, message string, success bool) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

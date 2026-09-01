@@ -46,13 +46,12 @@ const (
 func (m *Manager) QueryAccounts(opts QueryOpts) AccountPage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	all := append([]Account(nil), m.state.Accounts...)
-	summary := summarize(all)
-
-	normalizedClasses := normalizeClassFilter(opts.Classifications)
-	query := strings.ToLower(strings.TrimSpace(opts.Query))
+	all := m.state.Accounts
+	summary := m.summarizeLocked()
 
 	filtered := make([]Account, 0, len(all))
+	normalizedClasses := normalizeClassFilter(opts.Classifications)
+	query := strings.ToLower(strings.TrimSpace(opts.Query))
 	for _, account := range all {
 		if !matchesClassFilter(account, normalizedClasses) {
 			continue

@@ -26,7 +26,10 @@ func (s *Server) NewNativeAgentService() (AgentService, error) {
 		// 惰性取用：构造发生在 Listen() 初始化 Imagine 之前，这里只交出
 		// 读取器，每 turn 重建工具注册表时才真正判定生图可用性。
 		ImageGenAdapter: s.nativeImageGen,
-		DefaultCwd:      s.agentDefaultCwd(),
+		// DefaultCwd 惰性读取：rememberAgentCwd 会在运行中更新
+		// settings.AgentDefaultCwd，静态快照会把构造时的旧目录固化成
+		// 兜底 cwd（重启回落 Downloads 的根因之一）。
+		DefaultCwd: s.agentDefaultCwd,
 	})
 }
 

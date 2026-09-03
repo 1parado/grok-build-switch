@@ -79,6 +79,24 @@ func RemoveMcpServerText(data []byte, name string) []byte {
 	return []byte(result + "\n")
 }
 
+// skipSectionWithSubtables 返回 header 段及其全部子表（[a.b] 之下还有
+// [a.b.c]）的结束下标。skipSection 只认下一个 [header] 行，会把
+// [mcp_servers.x.env] 这类子表留在段外——替换主体后与段内 inline table
+// 同 key 共存，产生 TOML 解析错误（"key env should be a table, not a
+// value"）。
+func skipSectionWithSubtables(lines []string, start int, header string) int {
+	end := skipSection(lines, start)
+	prefix := header + "."
+	for end < len(lines) {
+		next := parseHeader(lines[end])
+		if !strings.HasPrefix(next, prefix) {
+			break
+		}
+		end = skipSection(lines, end+1)
+	}
+	return end
+}
+
 // EnsureMcpServerText 是 EnsureMcpServerToFile 的纯文本实现。
 // 幂等：已存在匹配段时更新它；重复段（异常情况）只保留第一个。
 // 同时清理 grok_switch 曾用过的旧服务器名（仅当命令指向同一可执行文件，
@@ -92,7 +110,7 @@ func EnsureMcpServerText(data []byte, cfg McpServerConfig) []byte {
 	for i := 0; i < len(lines); {
 		current := parseHeader(lines[i])
 		if current == header {
-			end := skipSection(lines, i+1)
+			end := skipSectionWithSubtables(lines, i+1, current)
 			// 已写入过（含重复段）则丢弃，保证最终只有一个。
 			if !replaced {
 				existing := strings.Join(lines[i:end], "\n")
@@ -107,7 +125,7 @@ func EnsureMcpServerText(data []byte, cfg McpServerConfig) []byte {
 			continue
 		}
 		if legacy != "" && legacy != header && current == legacy {
-			end := skipSection(lines, i+1)
+			end := skipSectionWithSubtables(lines, i+1, current)
 			existing := strings.Join(lines[i:end], "\n")
 			if mcpSectionCommandEquals(existing, cfg.Command) {
 				// 旧名残留且指向同一可执行文件：迁移清理。

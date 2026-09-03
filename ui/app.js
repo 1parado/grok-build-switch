@@ -4392,6 +4392,16 @@ async function sendAgentMessage() {
     toast("正在生成回复，请先停止或等待完成", "error");
     return;
   }
+  // 工作区一致性守卫：用户切换了项目/目录（agentCwd）但引擎还挂在旧目录的
+  // 会话上时，直接发消息会让工具继续跑在旧目录（检索到错误的项目）。
+  // 此时自动把引擎迁到新目录的新会话，保证"当前工作区 = 会话 cwd"。
+  const selectedCwd = $("agentCwd")?.value.trim() || "";
+  const engineCwd = state.agentStatus?.cwd || state.activeAgentSession?.cwd || "";
+  if (state.agentEngineState === "attached" && selectedCwd && engineCwd &&
+      normalizePathKey(selectedCwd) !== normalizePathKey(engineCwd)) {
+    const created = await newAgentSession();
+    if (created === false) return;
+  }
   if (state.agentEngineState === "bootstrap") {
     // Keep local history; engine already has a fresh session with bootstrap armed.
     setAgentEngineState("attached");

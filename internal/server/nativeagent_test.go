@@ -60,7 +60,7 @@ func newTestNativeService(t *testing.T, prov llm.Provider) *nativeAgentService {
 		SessionsRoot: root,
 		ProviderFor:  func() (llm.Provider, error) { return prov, nil },
 		SystemPrompt: func(env string) string { return "sys+" + env },
-		DefaultCwd:   t.TempDir(),
+		DefaultCwd:   func() string { return t.TempDir() },
 	})
 	if err != nil {
 		t.Fatal(err)

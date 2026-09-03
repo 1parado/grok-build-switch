@@ -37,8 +37,10 @@ type EngineDeps struct {
 	// 不注册 generate_image）。不能用静态值注入：服务构造早于 Imagine
 	// 引擎初始化（Listen 内），且生图开关需要即时生效。
 	ImageGenAdapter func() tools.ImageGenerator
-	// DefaultCwd 兜底工作目录。
-	DefaultCwd string
+	// DefaultCwd 返回兜底工作目录（cwd=="" 时的替代）。函数而非静态值：
+	// rememberAgentCwd 会在运行中更新 settings.AgentDefaultCwd，快照会
+	// 把构造时的旧目录固化成永久兜底。
+	DefaultCwd func() string
 }
 
 // permissionOptionFor 构造与 acp 桥一致的审批选项。
@@ -184,7 +186,7 @@ func (n *nativeAgentService) Status() agentbridge.Status {
 		State:              n.state,
 		SessionID:          n.sessionID,
 		Cwd:                n.cwd,
-		DefaultCwd:         n.deps.DefaultCwd,
+		DefaultCwd:         n.defaultCwdLocked(),
 		Busy:               n.state == "busy",
 		SessionAutoApprove: n.autoAppr,
 		Model:              n.model,
@@ -200,6 +202,16 @@ func (n *nativeAgentService) memoryUserTurnsLocked() int {
 	return n.memory.UserTurns()
 }
 
+// defaultCwdLocked 返回当前兜底工作目录。惰性求值：rememberAgentCwd
+// 更新 settings.AgentDefaultCwd 后这里立即反映新值（静态快照会把构造
+// 时的旧目录固化成永久兜底，重启回落旧目录的根因之一）。
+func (n *nativeAgentService) defaultCwdLocked() string {
+	if n.deps.DefaultCwd == nil {
+		return ""
+	}
+	return strings.TrimSpace(n.deps.DefaultCwd())
+}
+
 // Start 初始化引擎会话（不 spawn 进程——原生引擎无需子进程）。
 func (n *nativeAgentService) Start(ctx context.Context, opts agentbridge.StartOptions) error {
 	n.mu.Lock()
@@ -208,7 +220,7 @@ func (n *nativeAgentService) Start(ctx context.Context, opts agentbridge.StartOp
 		return nil // 已就绪（幂等）
 	}
 	if opts.Cwd == "" {
-		opts.Cwd = n.deps.DefaultCwd
+		opts.Cwd = n.defaultCwdLocked()
 	}
 	n.state = "starting"
 	n.errText = ""
@@ -294,7 +306,7 @@ func (n *nativeAgentService) NewSession(ctx context.Context, cwd string) error {
 	n.mu.Unlock()
 	n.resolveAllPending()
 	if cwd == "" {
-		cwd = n.deps.DefaultCwd
+		cwd = n.defaultCwdLocked()
 	}
 	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
 		return fmt.Errorf("工作目录不存在: %s", cwd)

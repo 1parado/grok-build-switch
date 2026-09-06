@@ -409,21 +409,26 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 			return nil // 压实失败不终止 turn；下一步仍会重试
 		}
 		mem.CompactInPlace(out, outOrigins, stats)
+		// 压实后重置 usage 观测为新历史估算，避免 stale 大值导致每步重复压实（pi stale guard）。
+		n.usageHolder.reset(llm.EstimateHistoryTokens(out))
 		n.persist(sessionID, agentkit.Record{
 			Origin: agentkit.OriginInjection, Role: llm.RoleUser,
-			Text:   fmt.Sprintf("[上下文已压实: 折叠 %d 条，%d → %d tokens]", stats.CompactedCount, stats.TokensBefore, stats.TokensAfter),
+			Text:   fmt.Sprintf("[上下文已压实: 折叠 %d 条，保留尾部 %d 条，%d → %d tokens]", stats.CompactedCount, stats.RetainedTailCount, stats.TokensBefore, stats.TokensAfter),
 			TurnID: turnID,
 		})
-		n.broadcast(agentbridge.Event{Type: "notice", SessionID: sessionID, Text: fmt.Sprintf("长对话已自动压缩（折叠 %d 条消息）", stats.CompactedCount)})
+		n.broadcast(agentbridge.Event{Type: "notice", SessionID: sessionID, Text: fmt.Sprintf("长对话已自动压缩（折叠 %d 条消息，保留近期 %d 条）", stats.CompactedCount, stats.RetainedTailCount)})
 		return nil
 	}}
 
 	go func() {
 		defer cancel()
-		res, runErr := agentloop.RunTurn(turnCtx, agentloop.RunTurnInput{
+		// 系统提示词 = 基础契约 + 环境块 + 项目上下文 + 当 turn 工具表（对齐 pi _rebuildSystemPrompt）。
+		basePrompt := n.deps.SystemPrompt(buildEnvSection(n.cwd))
+		fullPrompt := basePrompt + loadProjectContext(n.cwd) + buildToolPromptSection(registry)
+		runInput := agentloop.RunTurnInput{
 			TurnID:       turnID,
 			Provider:     provider,
-			SystemPrompt: n.deps.SystemPrompt(buildEnvSection(n.cwd)),
+			SystemPrompt: fullPrompt,
 			Memory:       mem,
 			Tools:        &tools.ToolsAdapter{Registry: registry},
 			PermGate:     &nativePermGate{svc: n, registry: registry},
@@ -432,7 +437,15 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 			MaxRetries:   3,
 			Hooks:        hooks,
 			Effort:       effort,
-		})
+		}
+		res, runErr := agentloop.RunTurn(turnCtx, runInput)
+		// 溢出单次恢复（对齐 pi overflowRecoveryUsed）：压实后重跑一次，不递归。
+		if runErr != nil && agentloop.IsContextOverflow(runErr) {
+			if emergencyCompact(turnCtx, n, mem, sessionID, turnID, provider) {
+				n.broadcast(agentbridge.Event{Type: "notice", SessionID: sessionID, Text: "上下文溢出，已紧急压缩并重试"})
+				res, runErr = agentloop.RunTurn(turnCtx, runInput)
+			}
+		}
 		// turn 收尾。
 		n.mu.Lock()
 		n.turnCancel = nil
@@ -849,6 +862,7 @@ func (n *nativeAgentService) StoredSessionHistory(id string) (agentbridge.Sessio
 			msgs = append(msgs, agentbridge.HistoryMessage{
 				Role:    "tool_result",
 				Content: payload.Output,
+				Media:   mediaRefsToBridge(r.Media),
 				Tool:    &agentbridge.ToolEvent{ID: r.ToolCallID, Status: toolStatusFromPayload(payload.Error)},
 			})
 		}

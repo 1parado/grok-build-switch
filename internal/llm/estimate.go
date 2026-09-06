@@ -33,8 +33,8 @@ func EstimateMessageTokens(m Message) int64 {
 		case ThinkPart:
 			total += EstimateTokens(part.Text)
 		case ImagePart:
-			// 图片按中等分辨率经验值计。
-			total += 800
+			// 图片按 pi ESTIMATED_IMAGE_CHARS=4800 经验值计（原 800 严重低估致晚压）。
+			total += 4800
 		}
 	}
 	for _, tc := range m.ToolCalls {

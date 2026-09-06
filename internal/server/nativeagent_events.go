@@ -13,6 +13,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -187,6 +188,55 @@ func (h *turnUsageHolder) lastInputTokens() int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.tokens
+}
+
+// reset 压实后以新历史估算覆盖 stale 大值，避免每步重复触发。
+func (h *turnUsageHolder) reset(tokens int64) {
+	h.mu.Lock()
+	h.tokens = tokens
+	h.mu.Unlock()
+}
+
+// emergencyCompact 溢出时的兜底压实：激进尾部预算 + 失败时 DropOldest。
+// 返回是否成功压缩（成功才值得重试一次）。
+func emergencyCompact(ctx context.Context, n *nativeAgentService, mem *agentkit.CtxMemory, sessionID, turnID string, provider llm.Provider) bool {
+	msgs, origins := mem.Snapshot()
+	if len(msgs) < 5 {
+		return false
+	}
+	cfg := agentkit.DefaultCompactionConfig()
+	cfg.KeepRecentTokens = 8000 // 溢出时只保近期 8k，其余全折叠
+	out, outOrigins, stats, err := agentkit.Compact(msgs, origins, func(dropped []llm.Message) (string, error) {
+		return compactViaLLM(ctx, provider, dropped)
+	}, cfg)
+	if err != nil || stats.CompactedCount == 0 {
+		// 摘要失败：按 token 直接砍最老 30%（诚实 blind spot）。
+		total := llm.EstimateHistoryTokens(msgs)
+		rest, dropped := agentkit.DropOldest(msgs, total/3)
+		if dropped == 0 || len(rest) == 0 {
+			return false
+		}
+		// origins 同步截断（按消息数对齐）。
+		_, allOrigins := mem.Snapshot()
+		keepFrom := len(allOrigins) - len(rest)
+		if keepFrom < 0 {
+			keepFrom = 0
+		}
+		mem.CompactInPlace(rest, allOrigins[keepFrom:], agentkit.CompactionStats{CompactedCount: dropped})
+		n.persist(sessionID, agentkit.Record{
+			Origin: agentkit.OriginInjection, Role: llm.RoleUser,
+			Text:   fmt.Sprintf("[上下文溢出兜底: 直接丢弃最老 %d 条]", dropped),
+			TurnID: turnID,
+		})
+		return true
+	}
+	mem.CompactInPlace(out, outOrigins, stats)
+	n.persist(sessionID, agentkit.Record{
+		Origin: agentkit.OriginInjection, Role: llm.RoleUser,
+		Text:   fmt.Sprintf("[上下文溢出已压实: 折叠 %d 条，保留尾部 %d 条]", stats.CompactedCount, stats.RetainedTailCount),
+		TurnID: turnID,
+	})
+	return true
 }
 
 // compactViaLLM 用当前 Provider 生成一次压实摘要（非流式单调用）。

@@ -3289,7 +3289,22 @@ html[data-chat-theme="custom"] .chatEmpty {
   font-size: 13px;
   font-weight: 600;
 }
-.conversationSignals .modelBadge { display: none; }
+.activeChatPath {
+  display: block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+.conversationSignals .modelBadge {
+  display: inline-flex;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .agentStatusBadge {
   min-height: 26px;
   padding: 0 8px;
@@ -4186,6 +4201,45 @@ body.resizingChatPanels * {
   cursor: pointer;
   user-select: none;
 }
+.agentToolBody { display: grid; gap: 8px; padding: 0 10px 10px; }
+.agentTool:not([open]) .agentToolBody { display: none; }
+.agentToolSectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.agentToolSection pre.agentToolDetail { margin: 0; max-height: 260px; }
+.agentToolCopyBtn { font-size: 11px; padding: 2px 8px; }
+.agentToolElapsed { font-size: 11px; color: var(--muted); margin-left: 8px; }
+.agentToolStatus[data-status="failed"] { color: var(--danger, #c00); }
+.agentToolStatus[data-status="completed"] { color: var(--ok, #1a7f37); }
+.agentTodoList { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.agentTodoItem { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.agentTodoItem.completed { color: var(--muted); text-decoration: line-through; }
+.agentTodoItem.in_progress { font-weight: 600; }
+.agentTodoBox { width: 18px; flex: none; }
+.agentToolEditSummary { font-size: 12px; color: var(--muted); }
+.agentToolFileLink { justify-self: start; }
+.agentTool .chatMessageMedia { padding: 0 10px 10px; }
+.agentTool:not([open]) .chatMessageMedia { display: none; }
+.agentPlanList { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.agentPlanItem { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.agentPlanNum { color: var(--muted); flex: none; }
+.agentPlanPill {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.agentPlanItem.completed .agentPlanPill { color: var(--ok, #1a7f37); border-color: currentColor; }
+.agentPlanItem.in_progress .agentPlanPill { color: var(--accent); border-color: currentColor; }
+.agentPlanRaw { margin-top: 8px; }
+.agentPlanCopyBtn { margin-top: 8px; }
 .agentTool:not([open]) pre.agentToolDetail {
   max-height: 0;
   margin: 0;

@@ -25,6 +25,10 @@ type Registry struct {
 	tools map[string]Tool
 	// ExtraHeaders 允许 server 层注入请求头（生图引擎等）。
 	getEnv func() agentfs.Env
+	// callLimits 单轮（本注册表实例生命周期内）各工具最大调用次数；
+	// 0/缺省表示不限。注册表按 turn 重建，计数天然按 turn 清零。
+	callLimits map[string]int
+	callCounts map[string]int
 }
 
 // Tool 是单个工具的接口。
@@ -46,7 +50,18 @@ type ToolOutput struct {
 
 // NewRegistry 构造注册表。getEnv 提供当前会话的沙箱环境（工作目录可变）。
 func NewRegistry(getEnv func() agentfs.Env) *Registry {
-	return &Registry{tools: map[string]Tool{}, getEnv: getEnv}
+	return &Registry{tools: map[string]Tool{}, getEnv: getEnv, callLimits: map[string]int{}, callCounts: map[string]int{}}
+}
+
+// SetCallLimit 设置某工具在本轮内的最大调用次数（防模型循环调用烧额度，
+// 如 generate_image 连调 28 次）。超限后不再执行，直接回 IsError 结果让模型收敛。
+func (r *Registry) SetCallLimit(name string, max int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.callLimits == nil {
+		r.callLimits = map[string]int{}
+	}
+	r.callLimits[name] = max
 }
 
 // Register 注册工具；同名覆盖（便于测试）。
@@ -99,9 +114,20 @@ func (r *Registry) Schemas() []llm.Tool {
 // Execute 实现 agentloop.ToolExecutor：参数解析 + 沙箱 + 预算截断。
 // 返回值通过 ToAgentloopResult 适配 agentloop.ToolExecutor 的签名（见 adapter.go）。
 func (r *Registry) ExecuteTool(ctx context.Context, call llm.ToolCall) ToolOutput {
-	r.mu.RLock()
+	r.mu.Lock()
 	t, ok := r.tools[call.Name]
-	r.mu.RUnlock()
+	limit := r.callLimits[call.Name]
+	if ok && limit > 0 {
+		if r.callCounts == nil {
+			r.callCounts = map[string]int{}
+		}
+		r.callCounts[call.Name]++
+		if r.callCounts[call.Name] > limit {
+			r.mu.Unlock()
+			return ToolOutput{Text: fmt.Sprintf("本轮 %s 已调用 %d 次达到上限（不再执行，不消耗额度）。请先向用户展示已有结果；如需更多，请向用户确认后再分轮生成。", call.Name, limit), IsError: true}
+		}
+	}
+	r.mu.Unlock()
 	if !ok {
 		return ToolOutput{Text: fmt.Sprintf("未知工具 %q", call.Name), IsError: true}
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +34,8 @@ func (BashTool) Schema() map[string]any {
 func (BashTool) Doc() string {
 	return `在 shell 中执行命令（git、构建、测试、包管理等）。每次调用独立 shell：
 变量与 cd 不跨调用保留，请在 command 内组合（&& / ; / 管道）或用 dir 参数。
-cat/sed/grep 等文件操作优先用专用工具。输出超长会被截断。`
+cat/sed/grep 等文件操作优先用专用工具。输出保尾截断：超长时保留尾部并落盘，
+提示 Full output 路径，模型可用 read 分段查看。`
 }
 
 type bashArgs struct {
@@ -74,16 +77,72 @@ func (BashTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 	}
 	if res.TimedOut {
 		fmt.Fprintf(&b, "[命令超时（%s），已终止]\n", timeout)
-		return ToolOutput{Text: b.String(), IsError: true}
+		return ToolOutput{Text: truncateBashTailWithEnv(b.String(), env), IsError: true}
 	}
 	if res.ExitCode != 0 {
 		fmt.Fprintf(&b, "[退出码: %d]\n", res.ExitCode)
-		return ToolOutput{Text: b.String(), IsError: true}
+		return ToolOutput{Text: truncateBashTailWithEnv(b.String(), env), IsError: true}
 	}
 	if b.Len() == 0 {
 		return ToolOutput{Text: "(命令成功，无输出)"}
 	}
-	return ToolOutput{Text: strings.TrimRight(b.String(), "\n")}
+	text := strings.TrimRight(b.String(), "\n")
+	if truncated, out := spillBashOutputWithEnv(text, env); truncated {
+		return ToolOutput{Text: out, Truncated: true}
+	}
+	return ToolOutput{Text: text}
+}
+
+// bashOutputBudget 保尾截断预算（对齐 pi truncateTail + 50KB）。
+const bashOutputBudget = 30000
+
+// truncateBashTailWithEnv 错误路径同样保尾截断，避免超长错误刷屏。
+func truncateBashTailWithEnv(s string, env agentfs.Env) string {
+	if len(s) <= bashOutputBudget {
+		return s
+	}
+	if spilled, out := spillBashOutputWithEnv(s, env); spilled {
+		_ = spilled
+		return out
+	}
+	return s[len(s)-bashOutputBudget:] + "\n\n[输出超长已截断，保留尾部]"
+}
+
+// truncateBashTail 兼容旧调用（无 env 时落 /tmp，模型不可读，仅保尾）。
+func truncateBashTail(s string) string {
+	return truncateBashTailWithEnv(s, agentfs.Env{})
+}
+
+// spillBashOutputWithEnv 超预算时落盘全量到沙箱内 .agent_tmp 并返回尾部 + 相对路径（供 read 分段查看）。
+func spillBashOutputWithEnv(s string, env agentfs.Env) (bool, string) {
+	if len(s) <= bashOutputBudget {
+		return false, s
+	}
+	tail := s[len(s)-25000:]
+	// 按行边界对齐，避免半行。
+	if idx := strings.Index(tail, "\n"); idx >= 0 && idx < 500 {
+		tail = tail[idx+1:]
+	}
+	// 沙箱内落盘：cwd/.agent_tmp/pi-bash-*.log，模型可用 read 查看。
+	if env.Cwd != "" {
+		tmpDir := filepath.Join(env.Cwd, ".agent_tmp")
+		if err := os.MkdirAll(tmpDir, 0o755); err == nil {
+			if f, err := os.CreateTemp(tmpDir, "pi-bash-*.log"); err == nil {
+				_, _ = f.WriteString(s)
+				_ = f.Close()
+				if rel, err := filepath.Rel(env.Cwd, f.Name()); err == nil {
+					return true, tail + fmt.Sprintf("\n\n[输出超长已截断，保留尾部。完整输出: %s，可用 read 分段查看]", rel)
+				}
+				return true, tail + fmt.Sprintf("\n\n[输出超长已截断，保留尾部。完整输出: %s]", f.Name())
+			}
+		}
+	}
+	return true, tail + "\n\n[输出超长已截断，保留尾部；可用更精确的命令（如 grep/head/tail/read）缩小范围]"
+}
+
+// spillBashOutput 兼容旧调用。
+func spillBashOutput(s string) (bool, string) {
+	return spillBashOutputWithEnv(s, agentfs.Env{})
 }
 
 // --- todo_list ---

@@ -19,6 +19,9 @@ func DefaultRegistry(getEnv func() agentfs.Env, imageGen ImageGenerator, approve
 	reg.Register(ExitPlanModeTool{Approver: approver})
 	if imageGen != nil {
 		reg.Register(GenerateImageTool{Engine: imageGen})
+		// 单轮调用上限：防模型成功后不停换 prompt 复调烧额度（实测连调 28 次）。
+		// 注册表按 turn 重建，计数按 turn 清零；正常多图需求（count≤4/轮内少量复调）不受影响。
+		reg.SetCallLimit("generate_image", 4)
 	}
 	return reg
 }

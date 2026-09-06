@@ -1842,7 +1842,17 @@ function updateConversationIdentity() {
   const session = state.activeAgentSession;
   if ($("activeChatTitle")) $("activeChatTitle").textContent = session?.title || "新对话";
   const cwd = session?.cwd || state.agentStatus?.cwd || $("agentCwd")?.value || "";
-  if ($("activeChatPath")) $("activeChatPath").textContent = cwd || "尚未选择工作目录";
+  const pathEl = $("activeChatPath");
+  if (pathEl) {
+    pathEl.textContent = cwd || "尚未选择工作目录";
+    // 修复：旧逻辑只写 textContent 从不移除 hidden，路径恒不可见。
+    pathEl.hidden = false;
+    pathEl.title = cwd || "";
+  }
+  if ($("openLocationLabel")) {
+    const name = cwd ? cwd.split(/[/\\]/).filter(Boolean).pop() : "";
+    $("openLocationLabel").textContent = name ? `打开 ${name}` : "打开位置";
+  }
   if ($("contextSessionId")) $("contextSessionId").textContent = session?.id || state.agentStatus?.session_id || "—";
   // Keep active project in sync with current workspace path.
   const matched = projectPathKeys().get(normalizePathKey(cwd));
@@ -2093,12 +2103,21 @@ function renderAgentStatus(status) {
   if (model && state.activeAgentSession && (!status.session_id || status.session_id === state.activeAgentSession.id)) {
     state.activeAgentSession.model = model;
   }
-  if ($("agentModelBadge")) $("agentModelBadge").textContent = model ? `MODEL ${model}` : "MODEL —";
+  if ($("agentModelBadge")) {
+    $("agentModelBadge").textContent = model ? `MODEL ${model}` : "MODEL —";
+    $("agentModelBadge").hidden = false;
+    $("agentModelBadge").title = model || "";
+  }
   if ($("contextModel")) $("contextModel").textContent = model || "—";
   populateComposerModelSelect();
   populateComposerStrengthSelect();
   if ($("contextSessionId")) $("contextSessionId").textContent = status.session_id || state.activeAgentSession?.id || "—";
-  if ($("activeChatPath")) $("activeChatPath").textContent = status.cwd || state.activeAgentSession?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
+  const statusCwd = status.cwd || state.activeAgentSession?.cwd || $("agentCwd")?.value || "尚未选择工作目录";
+  if ($("activeChatPath")) {
+    $("activeChatPath").textContent = statusCwd;
+    $("activeChatPath").hidden = false;
+    $("activeChatPath").title = statusCwd;
+  }
   const running = agentIsRunning(status);
   const busy = stateName === "busy" || !!status.busy;
   if ($("agentStartBtn")) {
@@ -3564,32 +3583,156 @@ function bindToolPayloadLazyLoad(details) {
   details.dataset.lazyBound = "1";
   details.addEventListener("toggle", () => {
     if (!details.open) return;
-    const pre = details.querySelector("pre.agentToolDetail");
-    if (!pre || details.dataset.payloadReady === "1") return;
-    pre.textContent = details._toolPayload || "（无内容）";
-    pre.classList.remove("agentToolDetailPlaceholder");
+    if (details.dataset.payloadReady === "1") return;
+    renderToolPayloadBody(details);
     details.dataset.payloadReady = "1";
   });
 }
 
 function setToolPayloadLazy(details, payload) {
-  const pre = details.querySelector("pre.agentToolDetail");
-  if (!pre) return;
-  const formatted = payload == null ? "" : formatAgentPayload(payload);
-  details._toolPayload = formatted;
-  // Never auto-expand. While closed, keep a short placeholder so long histories
-  // do not pay for multi-KB tool text in the layout until the user opens them.
-  if (details.open) {
-    pre.textContent = formatted || "（无内容）";
-    pre.classList.remove("agentToolDetailPlaceholder");
-    details.dataset.payloadReady = "1";
-  } else {
-    pre.textContent = formatted ? "点击展开查看输入/输出" : "（无内容）";
-    pre.classList.add("agentToolDetailPlaceholder");
-    details.dataset.payloadReady = "0";
+  // 兼容旧单载荷入口：存为 output，input 保留。
+  if (payload != null && details._toolInput == null && details._toolOutput == null) {
+    details._toolOutput = formatAgentPayload(payload);
+  } else if (payload != null && details._toolOutput == null) {
+    details._toolOutput = formatAgentPayload(payload);
   }
-  pre.hidden = false;
+  renderToolPayloadBody(details, true);
   bindToolPayloadLazyLoad(details);
+}
+
+// 新双栏渲染：input/output 分区 + 复制 + 特殊类型（todo/diff/plan）。
+function renderToolPayloadBody(details, lazy = false) {
+  const wrap = details.querySelector(".agentToolBody");
+  if (!wrap) return;
+  const input = details._toolInput || "";
+  const output = details._toolOutput || "";
+  const kind = details.dataset.toolKind || "";
+  wrap.innerHTML = "";
+  const buildSection = (label, text, cls) => {
+    if (!text) return;
+    const sec = document.createElement("div");
+    sec.className = "agentToolSection " + cls;
+    const head = document.createElement("div");
+    head.className = "agentToolSectionHead";
+    const span = document.createElement("span");
+    span.textContent = label;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "codeCopyBtn agentToolCopyBtn";
+    copy.textContent = "复制";
+    copy.addEventListener("click", (e) => {
+      e.stopPropagation();
+      copyText(text);
+      copy.textContent = "已复制";
+      setTimeout(() => { copy.textContent = "复制"; }, 1200);
+    });
+    head.append(span, copy);
+    const pre = document.createElement("pre");
+    pre.className = "agentToolDetail";
+    pre.textContent = text;
+    sec.append(head, pre);
+    wrap.append(sec);
+  };
+  // 输入区（折叠时占位，展开后懒填）。
+  if (input) {
+    if (!details.open && lazy && !details.dataset.userOpened) {
+      const ph = document.createElement("div");
+      ph.className = "agentToolDetailPlaceholder";
+      ph.textContent = "点击展开查看输入/输出";
+      wrap.append(ph);
+      details.dataset.payloadReady = "0";
+      return;
+    }
+    buildSection("输入", input, "agentToolInput");
+  }
+  // 特殊渲染：todo 清单 / edit diff 着色。
+  const special = renderToolSpecial(wrap, kind, input, output);
+  if (!special && output) buildSection(kind ? "输出" : "内容", output, "agentToolOutput");
+  else if (!special && !input && !output) {
+    const ph = document.createElement("div");
+    ph.className = "agentToolDetailPlaceholder";
+    ph.textContent = "（无内容）";
+    wrap.append(ph);
+  }
+  // bash 落盘文件链接：完整输出: path → 点击插入 read 提示。
+  if (output && /完整输出:\s*(\S+)/.test(output)) {
+    const m = output.match(/完整输出:\s*(\S+)/);
+    if (m && m[1]) {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "btn sm ghost agentToolFileLink";
+      link.textContent = `用 read 查看完整输出 (${m[1]})`;
+      link.addEventListener("click", () => {
+        const input = $("chatInput");
+        if (input) {
+          input.value = (input.value ? input.value + "\n" : "") + `请用 read 工具分段查看 ${m[1]} 的关键错误`;
+          input.focus();
+        }
+      });
+      wrap.append(link);
+    }
+  }
+  details.dataset.payloadReady = details.open || details.dataset.userOpened ? "1" : "0";
+  if (!details.open && !details.dataset.userOpened) {
+    // 保持折叠占位语义：已渲染但隐藏，toggle 时直接显示。
+    details.dataset.payloadReady = "1";
+  }
+}
+
+// 特殊工具富渲染：todo 清单 / edit 多块 / plan entries。返回 true 表示已处理输出区。
+function renderToolSpecial(wrap, kind, input, output) {
+  try {
+    // todo_list：从输入 items 渲染勾选清单。
+    if (kind === "todo_list" && input) {
+      const obj = tryParseToolJson(input);
+      const items = obj && Array.isArray(obj.items) ? obj.items : null;
+      if (items) {
+        const ul = document.createElement("ul");
+        ul.className = "agentTodoList";
+        for (const it of items) {
+          const li = document.createElement("li");
+          li.className = "agentTodoItem " + (it.status || "pending");
+          const box = document.createElement("span");
+          box.className = "agentTodoBox";
+          box.textContent = it.status === "completed" ? "☑" : it.status === "in_progress" ? "◐" : "☐";
+          const txt = document.createElement("span");
+          txt.textContent = it.content || "";
+          li.append(box, txt);
+          ul.append(li);
+        }
+        const sec = document.createElement("div");
+        sec.className = "agentToolSection agentToolOutput";
+        const head = document.createElement("div");
+        head.className = "agentToolSectionHead";
+        head.innerHTML = "<span>任务清单</span>";
+        sec.append(head, ul);
+        if (output) {
+          const pre = document.createElement("pre");
+          pre.className = "agentToolDetail";
+          pre.textContent = output;
+          sec.append(pre);
+        }
+        wrap.append(sec);
+        return true;
+      }
+    }
+    // edit：输出含“替换 N 处”时给成功态；输入含 edits 数组时逐块摘要。
+    if (kind === "edit" && input) {
+      const obj = tryParseToolJson(input);
+      if (obj && Array.isArray(obj.edits) && obj.edits.length > 1) {
+        const div = document.createElement("div");
+        div.className = "agentToolEditSummary";
+        div.textContent = `多块编辑 ${obj.edits.length} 处 · ${obj.path || ""}`;
+        wrap.append(div);
+      }
+    }
+  } catch { /* 富渲染失败回退纯文本 */ }
+  return false;
+}
+
+function tryParseToolJson(text) {
+  if (!text || typeof text !== "string") return null;
+  try { return JSON.parse(text); } catch { return null; }
 }
 
 function renderAgentTool(tool, isUpdate, sessionID = "") {
@@ -3600,28 +3743,52 @@ function renderAgentTool(tool, isUpdate, sessionID = "") {
     details = document.createElement("details");
     details.className = "agentTool";
     details.open = false;
-    details.innerHTML = `<summary><span class="agentToolSummaryMain"><span class="agentToolTitle"></span><span class="agentToolStatus"></span></span></summary><pre class="agentToolDetail agentToolDetailPlaceholder"></pre>`;
+    details.innerHTML = `<summary><span class="agentToolSummaryMain"><span class="agentToolTitle"></span><span class="agentToolStatus"></span></span><span class="agentToolElapsed"></span></summary><div class="agentToolBody"></div>`;
     chatMessagesRoot().append(details);
     agentTools.set(id, details);
+    details.dataset.toolStart = String(Date.now());
     bindToolPayloadLazyLoad(details);
   }
   // Always force collapsed during history mount / streaming updates unless user opened it.
-  if (!details.dataset.userOpened) details.open = false;
+  // 已出图的卡片不再强制折叠：图片是交付物，默认展开；用户仍可手动折叠。
+  if (!details.dataset.userOpened && !details.dataset.hasMedia) details.open = false;
   if (!details.dataset.userOpenedBound) {
     details.dataset.userOpenedBound = "1";
     details.addEventListener("toggle", () => {
-      if (details.open) details.dataset.userOpened = "1";
+      if (details.open) {
+        details.dataset.userOpened = "1";
+        renderToolPayloadBody(details);
+      }
     });
   }
 
   const title = tool.title || details.querySelector(".agentToolTitle").textContent || "工具调用";
   const status = tool.status || details.dataset.status || (isUpdate ? "更新" : "等待");
   details.dataset.status = status;
+  details.dataset.toolKind = tool.kind || details.dataset.toolKind || "";
   details.querySelector(".agentToolTitle").textContent = title;
-  details.querySelector(".agentToolStatus").textContent = agentToolStatusLabel(status);
-  const payload = tool.raw_output ?? tool.raw_input;
-  if (payload != null) setToolPayloadLazy(details, payload);
-  else if (!details._toolPayload) setToolPayloadLazy(details, null);
+  const statusEl = details.querySelector(".agentToolStatus");
+  statusEl.textContent = agentToolStatusLabel(status);
+  statusEl.dataset.status = status;
+  // 耗时：in_progress 记 start，完成时算秒数。
+  const elapsedEl = details.querySelector(".agentToolElapsed");
+  if (elapsedEl) {
+    if (status === "in_progress" && !details.dataset.toolStart) details.dataset.toolStart = String(Date.now());
+    if ((status === "completed" || status === "failed") && details.dataset.toolStart) {
+      const secs = Math.max(0, (Date.now() - Number(details.dataset.toolStart)) / 1000);
+      elapsedEl.textContent = secs >= 0.5 ? `${secs.toFixed(1)}s` : "";
+    } else if (status === "in_progress") {
+      elapsedEl.textContent = "…";
+    }
+  }
+  // 双栏存储：输入输出分别保留，有输出不再丢输入。
+  if (tool.raw_input != null) details._toolInput = formatAgentPayload(tool.raw_input);
+  if (tool.raw_output != null) details._toolOutput = formatAgentPayload(tool.raw_output);
+  else if (tool.raw_input == null && !details._toolInput && !details._toolOutput) {
+    details._toolInput = "";
+    details._toolOutput = "";
+  }
+  renderToolPayloadBody(details, true);
 
   if (!historyMountSilent) renderToolActivity(tool, id, title, status);
   const toolHint = `${tool.kind || ""} ${title}`;
@@ -3633,7 +3800,12 @@ function renderAgentTool(tool, isUpdate, sessionID = "") {
   const media = structuredMedia.length
     ? structuredMedia
     : (historyMountSilent ? [] : extractMediaFromPayload(tool.raw_output, toolHint));
-  if (media.length) appendAssistantMedia(media, sessionID);
+  // 工具产出的媒体渲染进各自卡片（不再堆到 assistant 气泡，避免多图错位到首个调用下）。
+  if (media.length) {
+    details.dataset.hasMedia = "1";
+    renderMessageMedia(details, media, sessionID);
+    if (!details.dataset.userOpened) details.open = true;
+  }
   if (!historyMountSilent) scrollChatToBottom();
 }
 
@@ -3686,8 +3858,15 @@ function formatAgentPayload(payload) {
 // 工具参数摘要：把「模型可读」的 JSON 转成「人可读」的关键行。
 // 常见字段（路径/命令/模式等）单行展示，长文本截断，其余字段收尾列出。
 function formatAgentPayloadObject(obj) {
-  const PRIORITY = ["path", "file_path", "command", "pattern", "query", "url", "description", "content", "old_string", "new_string"];
+  const PRIORITY = ["path", "file_path", "command", "pattern", "query", "url", "description", "content", "prompt", "aspect", "count", "model", "old_string", "new_string", "edits", "items", "limit", "glob", "ignore_case", "literal", "context", "timeout", "dir"];
   const summarizeValue = (value) => {
+    if (Array.isArray(value)) {
+      if (value.length === 0) return "[]";
+      // edits/items 数组给计数+首项预览，避免刷屏。
+      const first = typeof value[0] === "object" ? JSON.stringify(value[0]) : String(value[0]);
+      const oneLine = first.replace(/\s+/g, " ").trim();
+      return `[${value.length} 项] ${oneLine.length > 80 ? oneLine.slice(0, 77) + "…" : oneLine}`;
+    }
     const text = typeof value === "string" ? value : JSON.stringify(value);
     if (text == null) return "";
     const oneLine = text.replace(/\s+/g, " ").trim();
@@ -3735,8 +3914,14 @@ function showAgentPermission(permission) {
   if ($("permissionRejectBtn")) {
     $("permissionRejectBtn").dataset.optionId = reject?.id || "";
   }
-  $("permissionBar").hidden = false;
+  const bar = $("permissionBar");
+  bar.hidden = false;
+  bar.setAttribute("role", "alertdialog");
+  bar.setAttribute("aria-live", "assertive");
+  bar.setAttribute("aria-label", "工具权限确认");
   scrollChatToBottom(true);
+  // 可达性：出现即聚焦首要动作，支持 Enter/Esc。
+  setTimeout(() => { $("permissionAllowBtn")?.focus(); }, 60);
 }
 
 function showAgentPlan(plan, waiting) {
@@ -3744,21 +3929,64 @@ function showAgentPlan(plan, waiting) {
   state.agentPlan = { ...plan, waiting: waiting || plan.waiting };
   if ($("planSummary")) $("planSummary").textContent = waiting ? "需要确认执行计划" : "计划更新";
   if ($("planBody")) {
-    if (plan.body) {
+    // 富渲染：entries 按状态 pill 展示，body 保留 pre。
+    if (Array.isArray(plan.entries) && plan.entries.length) {
+      $("planBody").innerHTML = "";
+      const ul = document.createElement("ul");
+      ul.className = "agentPlanList";
+      plan.entries.forEach((e, i) => {
+        const li = document.createElement("li");
+        li.className = "agentPlanItem " + (e.status || "pending");
+        const num = document.createElement("span");
+        num.className = "agentPlanNum";
+        num.textContent = `${i + 1}.`;
+        const txt = document.createElement("span");
+        txt.className = "agentPlanText";
+        txt.textContent = e.content || "";
+        const pill = document.createElement("span");
+        pill.className = "agentPlanPill";
+        pill.textContent = e.status || "pending";
+        li.append(num, txt, pill);
+        ul.append(li);
+      });
+      $("planBody").append(ul);
+      if (plan.body) {
+        const pre = document.createElement("pre");
+        pre.className = "agentPlanRaw";
+        pre.textContent = plan.body;
+        $("planBody").append(pre);
+      }
+    } else if (plan.body) {
       $("planBody").textContent = plan.body;
-    } else if (Array.isArray(plan.entries) && plan.entries.length) {
-      $("planBody").textContent = plan.entries.map((e, i) =>
-        `${i + 1}. ${e.content || ""}${e.status ? ` [${e.status}]` : ""}`).join("\n");
     } else {
       $("planBody").textContent = "（无计划正文）";
+    }
+    // 复制按钮。
+    if (!$("planBody").querySelector(".agentPlanCopyBtn")) {
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "btn sm ghost agentPlanCopyBtn";
+      copy.textContent = "复制计划";
+      copy.addEventListener("click", () => {
+        copyText($("planBody").innerText || "");
+        copy.textContent = "已复制";
+        setTimeout(() => { copy.textContent = "复制计划"; }, 1200);
+      });
+      $("planBody").append(copy);
     }
   }
   const showActions = !!(plan.request_id && (waiting || plan.waiting));
   ["planApproveBtn", "planReviseBtn", "planDismissBtn"].forEach((id) => {
     if ($(id)) $(id).hidden = !showActions;
   });
-  if ($("planBar")) $("planBar").hidden = false;
+  const bar = $("planBar");
+  if (bar) {
+    bar.hidden = false;
+    bar.setAttribute("role", "alertdialog");
+    bar.setAttribute("aria-live", "assertive");
+  }
   scrollChatToBottom(true);
+  if (showActions) setTimeout(() => { $("planApproveBtn")?.focus(); }, 60);
 }
 
 async function respondAgentPlan(outcome) {
@@ -4217,8 +4445,11 @@ function normalizeStructuredMedia(media, sessionID = "") {
   const uri = String(media.uri || media.url || "").trim();
   const kind = inferMediaKind(media.kind || media.type || "", mimeType, uri);
   const rawData = typeof media.data === "string" ? media.data.replace(/\s+/g, "") : "";
-  const localSrc = localSessionMediaURL(uri, sessionID);
-  const referenceSrc = localSrc || safeMediaURL(uri);
+  // 本机服务端直出的文件路由（/imagine-output/ 等）直接同源加载，
+  // 不得走 /api/agent/media 会话代理（该代理只认会话目录内的文件，会 404）。
+  const directSrc = directServerFileURL(uri);
+  const localSrc = directSrc ? "" : localSessionMediaURL(uri, sessionID);
+  const referenceSrc = directSrc || localSrc || safeMediaURL(uri);
   let src = "";
   if (rawData && /^[A-Za-z0-9+/_-]+={0,2}$/.test(rawData)) {
     const dataMime = mimeType || ({ image: "image/png", video: "video/mp4", audio: "audio/mpeg" })[kind];
@@ -4236,6 +4467,8 @@ function localSessionMediaURL(value, sessionID) {
   value = String(value || "").trim();
   sessionID = String(sessionID || "").trim();
   if (!value || !sessionID || value.startsWith("/api/agent/media?")) return "";
+  // 服务端直出文件路由走同源直连，不进会话代理。
+  if (directServerFileURL(value)) return "";
   const windowsPath = /^[a-z]:[\\/]/i.test(value);
   let local = windowsPath || /^file:/i.test(value) || !/^[a-z][a-z0-9+.-]*:/i.test(value);
   if (!local) {
@@ -4255,6 +4488,21 @@ function localSessionMediaURL(value, sessionID) {
 function safeMediaMime(value) {
   const mimeType = String(value || "").trim().toLowerCase();
   return /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/.test(mimeType) ? mimeType : "";
+}
+
+// directServerFileURL 服务端同源直出的文件路由（如 /imagine-output/a.jpg）。
+// 这类 URI 本就由本机 HTTP 服务公开提供，无需会话鉴权，直接加载即可。
+function directServerFileURL(value) {
+  const v = String(value || "").trim();
+  if (!v.startsWith("/") || v.startsWith("//") || v.startsWith("/api/agent/media")) return "";
+  const path = v.split(/[?#]/, 1)[0];
+  if (!/\.[a-z0-9]{2,5}$/i.test(path)) return "";
+  if (path.includes("..")) return "";
+  try {
+    return new URL(v, location.href).href;
+  } catch {
+    return "";
+  }
 }
 
 function safeMediaURL(value) {
@@ -7051,6 +7299,24 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape" && $("chatThemeDialog")?.open) {
+    return;
+  }
+  // 审批优先：Esc 拒绝当前权限/计划，避免误停生成。
+  if (event.key === "Escape" && state.view === "chat" && !$("permissionBar")?.hidden) {
+    event.preventDefault();
+    respondAgentPermission(false, false);
+    return;
+  }
+  if (event.key === "Escape" && state.view === "chat" && !$("planBar")?.hidden && state.agentPlan?.request_id) {
+    event.preventDefault();
+    respondAgentPlan("abandoned");
+    return;
+  }
+  // 抽屉优先关闭，再停生成。
+  if (event.key === "Escape" && state.view === "chat" &&
+    ($("sessionSidebar")?.classList.contains("open") || $("contextRail")?.classList.contains("open"))) {
+    event.preventDefault();
+    closeNativeChatPanels();
     return;
   }
   if (event.key === "Escape" && state.view === "chat" && (state.agentStatus?.state === "busy" || state.agentStatus?.busy)) {

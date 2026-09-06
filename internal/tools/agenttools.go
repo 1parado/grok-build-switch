@@ -108,26 +108,34 @@ func (GenerateImageTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"prompt": map[string]any{"type": "string", "description": "图像描述（提示词）"},
-			"aspect": map[string]any{"type": "string", "description": "宽高比: 1:1 | 16:9 | 9:16 | 4:3 | 3:4（默认 1:1）"},
+			"prompt": map[string]any{"type": "string", "description": "图像描述（提示词，含主体、风格、构图、光线；越具体越好）"},
+			"aspect": map[string]any{"type": "string", "description": "宽高比: 1:1 | 16:9 | 9:16 | 4:3 | 3:4 | 3:2 | 2:3 | 4:5 | 21:9（默认 1:1）"},
 			"count":  map[string]any{"type": "integer", "description": "生成数量 1-4（默认 1）"},
+			"model":  map[string]any{"type": "string", "description": "生图模型（可选，空用供应商默认）"},
 		},
 		"required": []string{"prompt"},
 	}
 }
 
 func (GenerateImageTool) Doc() string {
-	return `生成图片（走本地生图引擎与账号池）。为获得好结果，提示词应描述主体、
-风格、构图与光线。返回保存路径；结果同时出现在画廊。`
+	return `生成图片（走本地生图引擎与账号池，结果进画廊）。提示词应描述主体、
+风格、构图与光线；如用户只说"画只猫"，应扩写为具体画面再调用。
+宽高比按用途选（头像1:1、壁纸16:9、手机9:16、海报3:4/4:5、横幅21:9）。
+单轮最多调用 4 次：一次生成即应向用户展示结果，不要换 prompt 反复复调；
+返回保存路径与图片引用；失败时按错误提示调整后重试，不要臆造图片链接。`
 }
 
 type genImageArgs struct {
 	Prompt string `json:"prompt"`
 	Aspect string `json:"aspect"`
 	Count  int    `json:"count"`
+	Model  string `json:"model"`
 }
 
-var allowedAspects = map[string]bool{"1:1": true, "16:9": true, "9:16": true, "4:3": true, "3:4": true, "3:2": true, "2:3": true}
+var allowedAspects = map[string]bool{
+	"1:1": true, "16:9": true, "9:16": true, "4:3": true, "3:4": true,
+	"3:2": true, "2:3": true, "4:5": true, "21:9": true,
+}
 
 func (t GenerateImageTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.Env) ToolOutput {
 	var a genImageArgs
@@ -137,12 +145,16 @@ func (t GenerateImageTool) Execute(ctx context.Context, args json.RawMessage, en
 	if t.Engine == nil {
 		return ToolOutput{Text: "生图引擎未启用（设置中可开启生图）", IsError: true}
 	}
+	prompt := strings.TrimSpace(a.Prompt)
+	if len(prompt) > 2000 {
+		return ToolOutput{Text: "提示词过长（>2000 字符），请精简主体、风格、构图与光线后重试。", IsError: true}
+	}
 	aspect := a.Aspect
 	if aspect == "" {
 		aspect = "1:1"
 	}
 	if !allowedAspects[aspect] {
-		return ToolOutput{Text: fmt.Sprintf("不支持的宽高比 %q，可选: 1:1 16:9 9:16 4:3 3:4 3:2 2:3", aspect), IsError: true}
+		return ToolOutput{Text: fmt.Sprintf("不支持的宽高比 %q，可选: 1:1 16:9 9:16 4:3 3:4 3:2 2:3 4:5 21:9", aspect), IsError: true}
 	}
 	count := a.Count
 	if count <= 0 {
@@ -151,18 +163,22 @@ func (t GenerateImageTool) Execute(ctx context.Context, args json.RawMessage, en
 	if count > 4 {
 		count = 4
 	}
-	paths, err := t.Engine.Generate(ctx, a.Prompt, "", aspect, count)
+	paths, err := t.Engine.Generate(ctx, prompt, strings.TrimSpace(a.Model), aspect, count)
 	if err != nil {
-		return ToolOutput{Text: fmt.Sprintf("生图失败: %v", err), IsError: true}
+		return ToolOutput{Text: fmt.Sprintf("生图失败: %v（可换 prompt/宽高比后重试）", err), IsError: true}
+	}
+	if len(paths) == 0 {
+		return ToolOutput{Text: "生图引擎未返回图片，请重试。", IsError: true}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "已生成 %d 张图片:\n", len(paths))
+	fmt.Fprintf(&b, "已生成 %d 张图片（%s，已进画廊）:\n", len(paths), aspect)
 	media := make([]llm.ContentPart, 0, len(paths))
 	for _, p := range paths {
 		b.WriteString(p)
 		b.WriteString("\n")
 		media = append(media, llm.ImagePart{URI: p, MimeType: "image/jpeg"})
 	}
+	b.WriteString("如已满足用户要求，请直接用文字回复用户并展示图片，不要重复调用本工具（除非用户要求更多）。")
 	return ToolOutput{
 		Text:  b.String(),
 		Media: media,

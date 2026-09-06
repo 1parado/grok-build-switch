@@ -251,9 +251,14 @@ func TestGenerateImageTool(t *testing.T) {
 		t.Fatalf("生图失败: %+v", out)
 	}
 
-	out = runTool(t, tool, `{"prompt": "x", "aspect": "21:9"}`, env)
+	out = runTool(t, tool, `{"prompt": "x", "aspect": "99:99"}`, env)
 	if !out.IsError {
 		t.Fatal("非法宽高比应拒绝")
+	}
+	// 新增比例 21:9 / 4:5 应合法（对齐 README）。
+	out = runTool(t, tool, `{"prompt": "x", "aspect": "21:9"}`, env)
+	if out.IsError {
+		t.Fatalf("21:9 应合法: %+v", out)
 	}
 
 	// 引擎未启用。
@@ -342,4 +347,25 @@ func TestAdapterBudgetTruncation(t *testing.T) {
 
 func mustCall(name, args string) llm.ToolCall {
 	return llm.ToolCall{ID: "t-" + name, Name: name, Arguments: json.RawMessage(args)}
+}
+
+func TestRegistryCallLimit(t *testing.T) {
+	env := testEnv(t)
+	reg := DefaultRegistry(func() agentfs.Env { return env }, fakeImageGen{}, nil, &TodoStore{})
+	// 前 4 次正常执行，第 5 次起被上限拦截且不再调引擎。
+	for i := 0; i < 4; i++ {
+		out := reg.ExecuteTool(context.Background(), mustCall("generate_image", `{"prompt":"cat"}`))
+		if out.IsError {
+			t.Fatalf("第 %d 次应成功: %+v", i+1, out)
+		}
+	}
+	out := reg.ExecuteTool(context.Background(), mustCall("generate_image", `{"prompt":"cat"}`))
+	if !out.IsError || !strings.Contains(out.Text, "达到上限") {
+		t.Fatalf("超限应拦截: %+v", out)
+	}
+	// 不相关工具不受影响。
+	out = reg.ExecuteTool(context.Background(), mustCall("read", `{"path":"nope.txt"}`))
+	if !out.IsError || strings.Contains(out.Text, "达到上限") {
+		t.Fatalf("其它工具不应被连带限流: %+v", out)
+	}
 }

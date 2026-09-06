@@ -24,6 +24,7 @@ func (GlobTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"pattern": map[string]any{"type": "string", "description": "glob 模式，如 \"**/*.go\"、\"internal/**/*.md\""},
 			"path":    map[string]any{"type": "string", "description": "起始目录（默认工作目录）"},
+			"limit":   map[string]any{"type": "integer", "description": "最多返回条数（默认 200，上限 1000）"},
 		},
 		"required": []string{"pattern"},
 	}
@@ -31,12 +32,13 @@ func (GlobTool) Schema() map[string]any {
 
 func (GlobTool) Doc() string {
 	return `按 glob 模式列出文件路径（支持 ** 跨目录）。按文件名找文件用本工具，
-按内容搜索用 grep。结果按修改时间排序（最新在前），上限 200 条。`
+按内容搜索用 grep。结果字母序，上限 200 条；超限请收窄 pattern。`
 }
 
 type globArgs struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path"`
+	Limit   int    `json:"limit"`
 }
 
 const globMaxResults = 200
@@ -71,18 +73,22 @@ func (GlobTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 		return ToolOutput{Text: "(无匹配文件)"}
 	}
 	sort.Strings(matches)
+	maxResults := a.Limit
+	if maxResults <= 0 || maxResults > 1000 {
+		maxResults = globMaxResults
+	}
 	var b strings.Builder
 	shown := len(matches)
-	if shown > globMaxResults {
-		shown = globMaxResults
+	if shown > maxResults {
+		shown = maxResults
 	}
 	for i := 0; i < shown; i++ {
 		rel, _ := filepath.Rel(env.Cwd, matches[i])
 		b.WriteString(rel)
 		b.WriteString("\n")
 	}
-	if len(matches) > globMaxResults {
-		fmt.Fprintf(&b, "... (共 %d 个匹配，仅显示前 %d 个；请收窄 pattern)\n", len(matches), globMaxResults)
+	if len(matches) > maxResults {
+		fmt.Fprintf(&b, "... (共 %d 个匹配，仅显示前 %d 个；请收窄 pattern)\n", len(matches), maxResults)
 	}
 	return ToolOutput{Text: b.String()}
 }
@@ -165,10 +171,14 @@ func (GrepTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"pattern":   map[string]any{"type": "string", "description": "正则表达式（RE2 语法）"},
-			"path":      map[string]any{"type": "string", "description": "搜索的文件或目录（默认工作目录）"},
-			"glob":      map[string]any{"type": "string", "description": "文件名过滤，如 \"*.go\""},
-			"max_items": map[string]any{"type": "integer", "description": "最多返回的匹配条数（默认 100）"},
+			"pattern":     map[string]any{"type": "string", "description": "正则表达式（RE2 语法；literal=true 时按字面匹配）"},
+			"path":        map[string]any{"type": "string", "description": "搜索的文件或目录（默认工作目录）"},
+			"glob":        map[string]any{"type": "string", "description": "文件名过滤，如 \"*.go\""},
+			"max_items":   map[string]any{"type": "integer", "description": "最多返回的匹配条数（默认 100，上限 1000）"},
+			"limit":       map[string]any{"type": "integer", "description": "max_items 别名"},
+			"ignore_case": map[string]any{"type": "boolean", "description": "忽略大小写（默认 false）"},
+			"literal":     map[string]any{"type": "boolean", "description": "按字面字符串匹配而非正则（默认 false）"},
+			"context":     map[string]any{"type": "integer", "description": "每条命中附带上下文行数（默认 0）"},
 		},
 		"required": []string{"pattern"},
 	}
@@ -176,14 +186,19 @@ func (GrepTool) Schema() map[string]any {
 
 func (GrepTool) Doc() string {
 	return `按正则搜索文件内容，返回命中文件、行号与行内容（截断到 500 字符）。
-搜索会跳过 .git、node_modules、二进制文件与超大文件（>2MB）。`
+支持 ignore_case/literal/context；搜索会跳过 .git、node_modules、二进制文件
+与超大文件（>2MB）。达到上限时提示收窄或 limit=2x。`
 }
 
 type grepArgs struct {
-	Pattern  string `json:"pattern"`
-	Path     string `json:"path"`
-	Glob     string `json:"glob"`
-	MaxItems int    `json:"max_items"`
+	Pattern    string `json:"pattern"`
+	Path       string `json:"path"`
+	Glob       string `json:"glob"`
+	MaxItems   int    `json:"max_items"`
+	Limit      int    `json:"limit"`
+	IgnoreCase bool   `json:"ignore_case"`
+	Literal    bool   `json:"literal"`
+	Context    int    `json:"context"`
 }
 
 const (
@@ -198,13 +213,30 @@ func (GrepTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.Pattern) == "" {
 		return argHelp("grep", err, `{"pattern": "regex", "path"?: ".", "glob"?: "*.go"}`)
 	}
-	re, err := regexp.Compile(a.Pattern)
+	pattern := a.Pattern
+	if a.Literal {
+		pattern = regexp.QuoteMeta(pattern)
+	}
+	if a.IgnoreCase {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return ToolOutput{Text: fmt.Sprintf("正则无效: %v", err), IsError: true}
 	}
 	max := a.MaxItems
+	if a.Limit > 0 {
+		max = a.Limit
+	}
 	if max <= 0 || max > 1000 {
 		max = grepDefaultItems
+	}
+	ctxLines := a.Context
+	if ctxLines < 0 {
+		ctxLines = 0
+	}
+	if ctxLines > 5 {
+		ctxLines = 5
 	}
 	base := env.Cwd
 	if a.Path != "" {
@@ -219,7 +251,7 @@ func (GrepTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 		return ToolOutput{Text: fmt.Sprintf("路径不存在: %s", base), IsError: true}
 	}
 
-	grepState := &grepRun{re: re, env: env, glob: a.Glob, max: max}
+	grepState := &grepRun{re: re, env: env, glob: a.Glob, max: max, context: ctxLines}
 	if !st.IsDir {
 		grepState.searchFile(base)
 	} else {
@@ -232,16 +264,20 @@ type grepHit struct {
 	Path string
 	Line int
 	Text string
+	// ContextLines 命中行的上下文（context>0 时填充，不含命中行本身）。
+	Before []string
+	After  []string
 }
 
 type grepRun struct {
-	re     *regexp.Regexp
-	env    agentfs.Env
-	glob   string
-	max    int
-	hits   []grepHit
-	files  map[string]bool
-	capped bool
+	re      *regexp.Regexp
+	env     agentfs.Env
+	glob    string
+	max     int
+	context int
+	hits    []grepHit
+	files   map[string]bool
+	capped  bool
 }
 
 func (g *grepRun) walk(dir string, depth int) {
@@ -293,7 +329,8 @@ func (g *grepRun) searchFile(path string) {
 		g.files = map[string]bool{}
 	}
 	g.files[path] = true
-	for i, line := range strings.Split(content, "\n") {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
 		if len(g.hits) >= g.max {
 			g.capped = true
 			return
@@ -301,11 +338,34 @@ func (g *grepRun) searchFile(path string) {
 		if g.re.MatchString(line) {
 			text := line
 			if len(text) > grepMaxLineLen {
-				text = text[:grepMaxLineLen] + "…"
+				text = text[:grepMaxLineLen] + "…[行截断，用 read 看全行]"
 			}
-			g.hits = append(g.hits, grepHit{Path: path, Line: i + 1, Text: text})
+			hit := grepHit{Path: path, Line: i + 1, Text: text}
+			if g.context > 0 {
+				for k := maxInt(0, i-g.context); k < i; k++ {
+					hit.Before = append(hit.Before, truncateGrepLine(lines[k]))
+				}
+				for k := i + 1; k < len(lines) && k <= i+g.context; k++ {
+					hit.After = append(hit.After, truncateGrepLine(lines[k]))
+				}
+			}
+			g.hits = append(g.hits, hit)
 		}
 	}
+}
+
+func truncateGrepLine(s string) string {
+	if len(s) > grepMaxLineLen {
+		return s[:grepMaxLineLen] + "…"
+	}
+	return s
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (g *grepRun) render(pattern string) ToolOutput {
@@ -320,10 +380,16 @@ func (g *grepRun) render(pattern string) ToolOutput {
 			curFile = rel
 			fmt.Fprintf(&b, "%s:\n", rel)
 		}
+		for j, before := range h.Before {
+			fmt.Fprintf(&b, "  %d- %s\n", h.Line-len(h.Before)+j, before)
+		}
 		fmt.Fprintf(&b, "  %d: %s\n", h.Line, h.Text)
+		for j, after := range h.After {
+			fmt.Fprintf(&b, "  %d+ %s\n", h.Line+1+j, after)
+		}
 	}
 	if g.capped {
-		fmt.Fprintf(&b, "... (达到 %d 条上限，结果已截断；请收窄 pattern)\n", g.max)
+		fmt.Fprintf(&b, "... (达到 %d 条上限，结果已截断；请收窄 pattern 或 limit=%d 再查)\n", g.max, g.max*2)
 	}
 	return ToolOutput{Text: b.String()}
 }

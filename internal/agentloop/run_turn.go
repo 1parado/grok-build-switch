@@ -259,11 +259,57 @@ func appendToolResult(mem Memory, call llm.ToolCall, result ToolResult) {
 
 // shouldRetry 判断错误是否值得重试。
 func shouldRetry(err error) bool {
+	if IsContextOverflow(err) {
+		return false // 溢出走压实恢复而非退避重试
+	}
 	apiErr, ok := err.(*llm.APIError)
 	if !ok {
 		return false
 	}
 	return llm.RetryableKind(apiErr.Kind)
+}
+
+// IsContextOverflow 判断是否为上下文溢出（对齐 pi isContextOverflow）。
+// 413/too_large 直接判溢出；400 系 invalid_request 需消息含 context/length/token 关键词。
+func IsContextOverflow(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apiErr, ok := err.(*llm.APIError); ok {
+		if apiErr.Kind == "too_large" || apiErr.StatusCode == 413 {
+			return true
+		}
+		if apiErr.Kind == "invalid_request" || apiErr.Kind == "unknown" {
+			return containsOverflowHint(apiErr.Upstream)
+		}
+		return false
+	}
+	return containsOverflowHint(err.Error())
+}
+
+func containsOverflowHint(s string) bool {
+	lower := strings.ToLower(s)
+	if !strings.Contains(lower, "context") && !strings.Contains(lower, "token") && !strings.Contains(lower, "length") && !strings.Contains(lower, "too long") && !strings.Contains(lower, "maximum") {
+		return false
+	}
+	for _, hint := range []string{
+		"context", "maximum context", "context length", "too long", "too many tokens",
+		"token limit", "max tokens", "overflow", "exceed",
+	} {
+		if strings.Contains(lower, hint) {
+			// 必须同时与长度/上限语义相关，避免误伤普通 "context" 提及。
+			if hint == "context" {
+				for _, extra := range []string{"length", "long", "exceed", "limit", "maximum", "overflow", "token", "window"} {
+					if strings.Contains(lower, extra) {
+						return true
+					}
+				}
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // retryDelay 计算指数退避时长；限流尊重 Retry-After。

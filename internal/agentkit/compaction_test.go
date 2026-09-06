@@ -220,9 +220,12 @@ func TestCompactInputText(t *testing.T) {
 	if !strings.Contains(text, "user: 用户的问题") || !strings.Contains(text, "tool_call: read") {
 		t.Fatalf("摘要输入缺关键内容:\n%s", text)
 	}
-	// 超长截断。
+	// 超长截断（按 rune 截断，CJK 按字节会更长，只断言实质截断）。
 	long := CompactInputText([]llm.Message{userMsg(strings.Repeat("长", 9000))}, 1000)
-	if len(long) > 1100 {
-		t.Fatalf("未截断: %d", len(long))
+	if !strings.Contains(long, "[输入过长已截断]") {
+		t.Fatalf("应标记截断:\n%s", long[:200])
+	}
+	if len([]rune(long)) > 1200 {
+		t.Fatalf("未截断: runes=%d", len([]rune(long)))
 	}
 }

@@ -1,5 +1,7 @@
 # Grok_switch
 
+**简体中文** | [English](./README.en.md)
+
 <img width="188" height="66" alt="image" src="https://github.com/user-attachments/assets/f2ee6b24-6a15-4912-a6ed-67f3ffb6c1a4" />
 
 本地托盘工具：用供应商（Profile）管理 Grok CLI 的 `~/.grok/config.toml`。

@@ -41,18 +41,18 @@
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   /* 聊天工作台配色（此前硬编码 #007aff/#e9e9eb/#111，暗色下刺眼白底）。
      data-theme=dark 时整组翻转，见下方 [data-theme="dark"] 块。 */
-  --chat-bubble-user-bg: #007aff;
+  --chat-bubble-user-bg: #715cc8;
   --chat-bubble-user-fg: #ffffff;
   --chat-bubble-user-muted: rgba(255, 255, 255, 0.78);
   --chat-bubble-user-soft: rgba(255, 255, 255, 0.16);
   --chat-bubble-user-line: rgba(255, 255, 255, 0.22);
   --chat-bubble-user-link: #e8f2ff;
-  --chat-bubble-assistant-bg: #e9e9eb;
-  --chat-bubble-assistant-fg: #111111;
-  --chat-bubble-assistant-muted: #6c6c70;
+  --chat-bubble-assistant-bg: #f0efed;
+  --chat-bubble-assistant-fg: #2d2c29;
+  --chat-bubble-assistant-muted: #7b7872;
   --chat-bubble-assistant-soft: rgba(0, 0, 0, 0.05);
   --chat-bubble-assistant-strong: #ffffff;
-  --chat-assistant-link: #007aff;
+  --chat-assistant-link: #6753b6;
   --chat-assistant-heading: #111111;
   --chat-md-code-bg: #f1f0ed;
   --chat-md-code-border: #ddd9d2;
@@ -112,7 +112,7 @@
   --tone-violet-border: #3f3266;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 24px rgba(0, 0, 0, 0.45);
   /* 聊天工作台暗色组：与浅色组一一对应，消除暗色下的刺眼白底。 */
-  --chat-bubble-user-bg: #2f6fed;
+  --chat-bubble-user-bg: #5b93f5;
   --chat-bubble-user-fg: #ffffff;
   --chat-bubble-user-muted: rgba(255, 255, 255, 0.78);
   --chat-bubble-user-soft: rgba(255, 255, 255, 0.16);
@@ -120,10 +120,10 @@
   --chat-bubble-user-link: #dce9ff;
   --chat-bubble-assistant-bg: #232329;
   --chat-bubble-assistant-fg: #e6e6ea;
-  --chat-bubble-assistant-muted: #9a9aa4;
+  --chat-bubble-assistant-muted: #94949e;
   --chat-bubble-assistant-soft: rgba(255, 255, 255, 0.06);
   --chat-bubble-assistant-strong: #1b1b20;
-  --chat-assistant-link: #7aa7f7;
+  --chat-assistant-link: #7c9ef5;
   --chat-assistant-heading: #f0f0f4;
   --chat-md-code-bg: #26262d;
   --chat-md-code-border: #36363f;
@@ -439,13 +439,13 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-height: 30px;
-  padding: 5px 10px;
+  min-height: 28px;
+  padding: 0 12px;
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
+  border-radius: 999px;
+  background: var(--chat-card);
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -457,18 +457,14 @@ body {
   background: var(--muted);
 }
 
-.agentStatusBadge[data-state="ready"] { color: var(--success); }
+/* 状态语义只由圆点承载，文字保持中性灰，避免整块徽章变色 shouting */
 .agentStatusBadge[data-state="ready"] .statusDot { background: var(--success); }
-.agentStatusBadge[data-state="busy"],
-.agentStatusBadge[data-state="starting"],
-.agentStatusBadge[data-state="stopping"] { color: var(--warn); }
 .agentStatusBadge[data-state="busy"] .statusDot,
 .agentStatusBadge[data-state="starting"] .statusDot,
 .agentStatusBadge[data-state="stopping"] .statusDot {
   background: var(--warn);
   animation: statusPulse 1.2s ease-in-out infinite;
 }
-.agentStatusBadge[data-state="dead"] { color: var(--danger); }
 .agentStatusBadge[data-state="dead"] .statusDot { background: var(--danger); }
 
 @keyframes statusPulse {
@@ -529,17 +525,6 @@ body {
   box-shadow: var(--shadow);
 }
 
-.chatMessages {
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  scrollbar-gutter: stable;
-}
-
 .agentEngineBanner {
   display: flex;
   align-items: center;
@@ -557,77 +542,9 @@ body {
 .agentEngineBanner[hidden] { display: none; }
 .agentEngineBanner[data-state="readonly"] { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
 
-.chatEmpty {
-  margin: auto;
-  display: grid;
-  justify-items: center;
-  gap: 4px;
-  max-width: 520px;
-  padding: 24px;
-  color: var(--muted);
-  text-align: center;
-}
-
-.chatEmpty strong {
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.chatEmpty span {
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.chatMessage {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-/* iOS Messages-style bubbles */
-.chatMessage.user {
-  --bubble-fg: #ffffff;
-  --bubble-muted: rgba(255, 255, 255, 0.78);
-  --bubble-soft: rgba(255, 255, 255, 0.16);
-  --bubble-soft-strong: rgba(0, 0, 0, 0.18);
-  align-self: flex-end;
-  width: fit-content;
-  max-width: min(78%, 560px);
-  padding: 9px 13px 10px;
-  border: 0;
-  border-radius: 18px 18px 5px 18px;
-  background: #007aff;
-  color: var(--bubble-fg);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
-}
-
-.chatMessage.assistant {
-  --bubble-fg: #111111;
-  --bubble-muted: #6c6c70;
-  --bubble-soft: rgba(0, 0, 0, 0.05);
-  --bubble-soft-strong: #ffffff;
-  align-self: flex-start;
-  width: fit-content;
-  max-width: min(88%, 720px);
-  padding: 9px 13px 10px;
-  border: 0;
-  border-radius: 18px 18px 18px 5px;
-  background: #e9e9eb;
-  color: var(--bubble-fg);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
-}
-
-.chatMessage.system {
-  align-self: flex-start;
-  width: auto;
-  max-width: 100%;
-  padding: 8px 10px;
-  border-left: 3px solid var(--line-strong);
-  background: var(--surface-2);
-  color: var(--muted);
-  border-radius: 0 4px 4px 0;
-}
+/* 气泡主样式（.chatMessage / .user / .assistant / .system / .chatMessageRole /
+   .chatMessageText）统一在文件后段"AI 工作台重构"块中定义；此处仅保留
+   该块未覆盖的系统消息状态色。 */
 
 .chatMessage.system.error {
   border-left-color: var(--danger);
@@ -637,21 +554,6 @@ body {
 .chatMessage.system.recovered {
   border-left-color: var(--success);
   color: var(--success);
-}
-
-.chatMessageRole {
-  color: var(--bubble-muted, var(--muted));
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  text-transform: none;
-}
-
-.chatMessageText {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.55;
-  color: inherit;
 }
 
 .agentThought,
@@ -1400,9 +1302,9 @@ body {
 }
 
 @keyframes chatNodeFlash {
-  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, #007aff 55%, transparent); }
-  18%  { box-shadow: 0 0 0 4px color-mix(in srgb, #007aff 40%, transparent); }
-  100% { box-shadow: 0 0 0 0 color-mix(in srgb, #007aff 0%, transparent); }
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--chat-bubble-user-bg) 55%, transparent); }
+  18%  { box-shadow: 0 0 0 4px color-mix(in srgb, var(--chat-bubble-user-bg) 40%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--chat-bubble-user-bg) 0%, transparent); }
 }
 
 .chatMessage.assistant.nodeFlash {
@@ -3204,14 +3106,14 @@ html[data-chat-theme="custom"]:not([data-chat-theme="none"]) .chatComposer {
   background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--chat-pane) 68%, transparent) 32%);
 }
 
-/* Custom wallpaper: keep iOS bubble colors, slight glass only on empty state. */
+/* Custom wallpaper: keep bubble colors, slight glass only on empty state. */
 html[data-chat-theme="custom"] .chatMessage.user {
-  background: color-mix(in srgb, #007aff 92%, #ffffff 8%);
-  box-shadow: 0 6px 20px rgba(0, 84, 180, 0.18);
+  background: color-mix(in srgb, var(--chat-bubble-user-bg) 92%, #ffffff 8%);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--chat-bubble-user-bg) 22%, transparent);
 }
 
 html[data-chat-theme="custom"] .chatMessage.assistant {
-  background: rgba(233, 233, 235, 0.92);
+  background: color-mix(in srgb, var(--chat-bubble-assistant-bg) 92%, transparent);
   backdrop-filter: blur(10px) saturate(1.05);
   box-shadow: 0 6px 20px rgba(25, 28, 34, 0.08);
 }
@@ -3364,7 +3266,7 @@ html[data-chat-theme="custom"] .chatEmpty {
   align-items: stretch;
   height: 28px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 999px;
   overflow: hidden;
   background: var(--chat-card);
 }
@@ -3372,11 +3274,11 @@ html[data-chat-theme="custom"] .chatEmpty {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 0 9px;
+  padding: 0 12px 0 13px;
   border: 0;
   background: transparent;
   color: var(--text);
-  font: 550 12px/1 var(--font);
+  font: 550 11px/1 var(--font);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -3424,8 +3326,8 @@ html[data-chat-theme="custom"] .chatEmpty {
   white-space: nowrap;
 }
 .agentStatusBadge {
-  min-height: 26px;
-  padding: 0 8px;
+  min-height: 28px;
+  padding: 0 12px;
   font-size: 11px;
 }
 
@@ -3484,7 +3386,7 @@ body.resizingChatPanels * {
   flex: 0 0 32px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 5px;
+  border-radius: 50%;
   background: transparent;
   color: var(--muted);
   font: 17px/1 var(--font);
@@ -3722,26 +3624,26 @@ body.resizingChatPanels * {
 }
 
 .modelBadge {
-  min-height: 26px;
+  min-height: 28px;
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   max-width: 220px;
-  padding: 4px 8px;
+  padding: 0 12px;
   overflow: hidden;
-  border: 1px solid #d5cff0;
-  border-radius: 4px;
-  background: #f0edfb;
-  color: #6553ad;
-  font: 9px/1.2 var(--mono);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--chat-card);
+  color: var(--muted);
+  font: 600 10px/1.2 var(--mono);
+  letter-spacing: 0.02em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .agentStatusBadge {
-  min-height: 26px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  background: transparent;
+  border-radius: 999px;
+  background: var(--chat-card);
 }
 
 .railToggle,
@@ -3834,7 +3736,7 @@ body.resizingChatPanels * {
 }
 
 .chatThemeHead > div { display: grid; gap: 5px; }
-.chatThemeHead h2 { margin: 0; font: 600 20px/1.2 Georgia, "Microsoft YaHei UI", serif; }
+.chatThemeHead h2 { margin: 0; font: 600 20px/1.2 var(--font); }
 .chatThemeHead p { margin: 0; color: var(--muted); font-size: 11px; }
 
 .chatThemePresets {
@@ -3927,6 +3829,7 @@ body.resizingChatPanels * {
 .chatMessages {
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 34px max(24px, calc((100% - 820px) / 2)) 40px;
   display: flex;
   flex-direction: column;
@@ -3936,46 +3839,75 @@ body.resizingChatPanels * {
 
 .chatEmpty {
   margin: auto;
-  min-height: 280px;
+  min-height: 320px;
   display: grid;
   align-content: center;
   justify-items: center;
-  gap: 8px;
+  gap: 10px;
   color: var(--muted);
   text-align: center;
 }
 
+/* 欢迎态：logo 直接呼吸，不再套边框小方块 */
 .chatEmptyMark {
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   display: grid;
   place-items: center;
-  margin-bottom: 8px;
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--surface);
+  margin-bottom: 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--primary);
-  font: 600 22px/1 Georgia, serif;
+  font: 600 28px/1 var(--font);
 }
 
 .chatEmptyIcon {
-  width: 30px;
-  height: 30px;
+  width: 56px;
+  height: 56px;
   object-fit: contain;
   border: 0;
   background: transparent;
   font-size: 0;
+  opacity: 0.9;
 }
 
-.chatEmpty strong { color: var(--text); font: 600 17px/1.3 Georgia, "Microsoft YaHei UI", serif; }
-.chatEmpty span { max-width: 420px; font-size: 11px; }
+.chatEmpty strong { color: var(--text); font: 600 20px/1.35 var(--font); letter-spacing: -0.01em; }
+.chatEmpty span { max-width: 460px; font-size: 13px; line-height: 1.65; }
 .chatEmptyActions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: center;
-  margin-top: 10px;
+  margin-top: 14px;
 }
+
+/* 快捷起手式：点击把提示词填进输入框 */
+.chatEmptyPrompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 6px;
+}
+.chatEmptyPrompts[hidden] { display: none; }
+.chatEmptyPrompt {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--chat-card);
+  color: var(--text);
+  font: 550 12px/1 var(--font);
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+.chatEmptyPrompt:hover {
+  border-color: var(--primary-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px -2px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+.chatEmptyPrompt:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .chatEmpty[data-state="missing"] strong,
 .chatEmpty[data-state="error"] strong { color: var(--danger); }
 .chatEditNote {
@@ -4128,7 +4060,7 @@ body.resizingChatPanels * {
 .markdownBody h4 {
   margin: 1.35em 0 .55em;
   color: var(--chat-md-heading, #262522);
-  font-family: Georgia, "Microsoft YaHei UI", serif;
+  font-family: var(--font);
   font-weight: 600;
   line-height: 1.32;
 }
@@ -5047,47 +4979,6 @@ body.resizingChatPanels * {
   padding: 13px 14px 12px;
 }
 
-/* signal bar (toolbar) */
-.composerSignalBar {
-  padding: 0 0 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--composer-hairline) 62%, transparent);
-}
-.composerSignalCluster { gap: 9px; }
-.composerSignalActions { gap: 8px; }
-
-/* chip kicker: dot + eyebrow text */
-.composerChipKicker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding-right: 9px;
-}
-.composerChipKicker::after { display: none; }                  /* drop old vertical divider */
-.composerStrengthControl .composerChipKicker::before { display: none; }  /* drop 3-bar glyph; dot replaces it */
-
-.composerSignalChip[data-chip="model"]  { --chip-accent: #715cc8; }
-.composerSignalChip[data-chip="reason"] { --chip-accent: #3f8a62; }
-
-.composerChipDot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  border-radius: 50%;
-  background: var(--chip-accent, var(--accent));
-  box-shadow: 0 0 0 0 var(--chip-accent, var(--accent));
-  animation: composerChipPulse 2.6s cubic-bezier(0.2, 0.8, 0.2, 1) infinite;
-}
-@keyframes composerChipPulse {
-  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--chip-accent, var(--accent)) 55%, transparent); }
-  70%  { box-shadow: 0 0 0 7px color-mix(in srgb, var(--chip-accent, var(--accent)) 0%, transparent); }
-  100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--chip-accent, var(--accent)) 0%, transparent); }
-}
-.composerSignalChip:hover .composerChipDot { transform: scale(1.15); }
-.composerChipDot { transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1); }
-@media (prefers-reduced-motion: reduce) {
-  .composerChipDot { animation: none; }
-}
-
 /* attach orbs in the toolbar */
 .composerOrbBtn {
   width: 40px;
@@ -5320,12 +5211,18 @@ body.resizingChatPanels * {
 .composerAccessChip {
   position: relative;
   z-index: 2;
-  color: #b45309;
-  border-color: color-mix(in srgb, #b45309 28%, var(--composer-hairline));
+}
+.composerAccessChip select { color: inherit; max-width: 110px; }
+.composerAccessWarn { width: 12px; height: 12px; flex-shrink: 0; opacity: 0.65; }
+/* 「每次确认」是安全默认档，chip 保持中性；只有权限提升
+   （本会话自动 / YOLO，JS 会给 select 挂 .is-elevated）才亮琥珀告警。 */
+.composerAccessChip:has(select.is-elevated) {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--composer-hairline));
   background: var(--chat-access-chip);
 }
-.composerAccessChip select { color: #b45309; max-width: 110px; }
-.composerAccessWarn { width: 12px; height: 12px; flex-shrink: 0; }
+.composerAccessChip:has(select.is-elevated) select { color: var(--warn); }
+.composerAccessChip:has(select.is-elevated) .composerAccessWarn { opacity: 1; }
 
 /* Compact send orb for footer row */
 .composerFooterRight .sendChatBtn,
@@ -5357,6 +5254,26 @@ body.resizingChatPanels * {
 .composerSelectChip .composerStrengthSelect {
   font-family: var(--font);
   max-width: 72px;
+}
+
+/* ── Composer chip 语义圆点：模型=紫 / 推理=绿 / 权限=默认中性 ──
+   接替旧 .composerSignalChip 体系（标记已迁移到 .composerMiniChip），
+   颜色只作为身份标识，不再整块变色。 */
+.composerMiniChip[data-chip="model"]  { --chip-accent: #715cc8; }
+.composerMiniChip[data-chip="reason"] { --chip-accent: #3f8a62; }
+.composerMiniChip[data-chip="model"]::before,
+.composerMiniChip[data-chip="reason"]::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--chip-accent);
+  opacity: 0.85;
+}
+.composerMiniChip[data-chip="model"]:has(select:disabled)::before,
+.composerMiniChip[data-chip="reason"]:has(select:disabled)::before {
+  opacity: 0.35;
 }
 
 .contextSection {

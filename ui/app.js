@@ -2354,6 +2354,11 @@ function chatEmptyMarkup() {
       <button type="button" id="chatEmptyStartBtn" class="btn sm primary">启动 Agent</button>
       <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>
     </div>
+    <div id="chatEmptyPrompts" class="chatEmptyPrompts">
+      <button type="button" class="chatEmptyPrompt" data-prompt="解释这个项目的结构和主要功能，列出关键文件。">解释这个项目</button>
+      <button type="button" class="chatEmptyPrompt" data-prompt="帮我写一个自动化脚本，完成一个小而完整的任务。">写一个自动化脚本</button>
+      <button type="button" class="chatEmptyPrompt" data-prompt="生成一张配图：">生成一张配图</button>
+    </div>
   </div>`;
 }
 
@@ -2369,6 +2374,18 @@ function bindChatEmptyActions() {
       if (!status.available) throw new Error(status.error || "仍未检测到 Grok Build");
       return status;
     }, { button: $("chatEmptyRetryBtn"), busyLabel: "检测中…", success: "已检测到 Grok Build" }).catch(() => {});
+  });
+  // 快捷起手式：点击把提示词填进输入框（等价于用户自己输入）。
+  // data-prompt 属性不在 i18n 的 TEXT_ATTRS 内，这里手动过一遍 t()。
+  document.querySelectorAll("#chatEmptyPrompts .chatEmptyPrompt").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const input = $("chatInput");
+      if (!input) return;
+      const prompt = btn.dataset.prompt || "";
+      input.value = (window.I18N && typeof window.I18N.t === "function") ? window.I18N.t(prompt) : prompt;
+      autoGrowChatInput();
+      input.focus();
+    });
   });
 }
 
@@ -2400,10 +2417,12 @@ function renderChatEmptyState(status = state.agentStatus) {
   const title = empty.querySelector("#chatEmptyTitle") || empty.querySelector("strong");
   const desc = empty.querySelector("#chatEmptyDesc") || empty.querySelector("span");
   const actions = empty.querySelector("#chatEmptyActions");
+  const prompts = empty.querySelector("#chatEmptyPrompts");
   if (!title || !desc) return;
 
   if (status && status.available === false) {
     empty.dataset.state = "missing";
+    if (prompts) prompts.hidden = true;
     title.textContent = "未找到 Grok Build";
     desc.textContent = friendlyAgentError(status.error) || "本机未检测到 grok 可执行文件。请先安装并登录 Grok CLI，然后重试。";
     if (actions) {
@@ -2417,6 +2436,7 @@ function renderChatEmptyState(status = state.agentStatus) {
 
   if (status && (status.state === "dead" || status.error) && !agentIsRunning(status)) {
     empty.dataset.state = "error";
+    if (prompts) prompts.hidden = true;
     title.textContent = "Agent 未就绪";
     desc.textContent = friendlyAgentError(status.error) || "连接异常，请检查工作目录后重新启动 Agent。";
     if (actions) {
@@ -2429,6 +2449,7 @@ function renderChatEmptyState(status = state.agentStatus) {
   }
 
   empty.dataset.state = "welcome";
+  if (prompts) prompts.hidden = false;
   title.textContent = "开始对话";
   const cwd = ($("agentCwd")?.value || status?.cwd || "").trim();
   desc.textContent = cwd

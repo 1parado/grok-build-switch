@@ -1,3 +1,5 @@
+//go:build !notray
+
 package tray
 
 import (

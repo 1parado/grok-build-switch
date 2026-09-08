@@ -31,6 +31,26 @@ plugins:
       blog_dir: blog
       post_dir: "{blog}/posts"
       post_date_format: full
+      # i18n 构建下归档/分类页是构建期虚拟文件，无法判定语言归属会产生警告，显式关闭
+      archive: false
+      categories: false
+  - i18n:
+      docs_structure: suffix
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: true
+      languages:
+        - locale: zh
+          default: true
+          name: 简体中文
+        - locale: en
+          name: English
+          site_name: grok_switch
+          nav_translations:
+            首页: Home
+            使用教程: Usage
+            博客: Blog
+            联系方式: Contact
 
 markdown_extensions:
   - admonition

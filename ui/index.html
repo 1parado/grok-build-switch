@@ -7,15 +7,18 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/highlight-github.min.css?v=11.11.1">
   <link rel="stylesheet" href="/vendor/katex/katex.min.css?v=0.18.0">
-  <link rel="stylesheet" href="/style.css?v=54">
+  <link rel="stylesheet" href="/style.css?v=56">
   <script>
     // 首屏防闪烁：CSS 生效前按本地缓存的主题写入 data-theme。
+    // 语言同样提前落到 <html lang>，文案翻译由 /i18n.js 在 DOMContentLoaded 完成。
     (function () {
       try {
         var theme = localStorage.getItem("gs_theme_v1") || "light";
         var dark = theme === "dark" ||
           (theme === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
         document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.lang =
+          localStorage.getItem("gs_lang_v1") === "en" ? "en" : "zh-CN";
       } catch (e) { /* 隐私模式下存储可能不可用 */ }
     })();
   </script>
@@ -41,6 +44,45 @@
         <button type="button" id="navAccountsBtn" class="btn" data-nav title="账号管理">账号</button>
         <button type="button" id="navImagineBtn" class="btn" data-nav title="生图">生图</button>
         <button type="button" id="navSettingsBtn" class="btn" data-nav title="设置">设置</button>
+        <div class="langSwitch" id="langSwitch">
+          <button type="button" id="langToggleBtn" class="langToggleBtn" title="界面语言" aria-label="界面语言"
+            aria-haspopup="menu" aria-expanded="false" aria-controls="langMenu">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><ellipse cx="8" cy="8" rx="2.9" ry="6.4"/><path d="M1.6 8h12.8"/></svg>
+            <span class="langToggleLabel">EN</span>
+            <svg class="langCaret" viewBox="0 0 10 6" width="8" height="5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg>
+          </button>
+          <div class="langMenu" id="langMenu" role="menu" aria-label="语言 / Language">
+            <button type="button" class="langOption active" data-lang="zh" role="menuitemradio" aria-checked="true">
+              <svg class="langFlag" viewBox="0 0 16 12" aria-hidden="true">
+                <rect width="16" height="12" rx="1.5" fill="#de2910"/>
+                <path d="M3.2 1.6l.66 1.9h2l-1.62 1.2.62 1.9-1.64-1.18-1.64 1.18.62-1.9-1.62-1.2h2z" fill="#ffde00"/>
+              </svg>
+              <span class="langOptionName">简体中文</span>
+              <span class="langCheck" aria-hidden="true">✓</span>
+            </button>
+            <button type="button" class="langOption" data-lang="en" role="menuitemradio" aria-checked="false">
+              <svg class="langFlag" viewBox="0 0 16 12" aria-hidden="true">
+                <rect width="16" height="12" rx="1.5" fill="#fff"/>
+                <g fill="#b22234">
+                  <rect y="0" width="16" height="0.92"/><rect y="1.85" width="16" height="0.92"/>
+                  <rect y="3.69" width="16" height="0.92"/><rect y="5.54" width="16" height="0.92"/>
+                  <rect y="7.38" width="16" height="0.92"/><rect y="9.23" width="16" height="0.92"/>
+                  <rect y="11.08" width="16" height="0.92"/>
+                </g>
+                <rect width="6.4" height="6.46" fill="#3c3b6e"/>
+                <g fill="#fff">
+                  <circle cx="1.2" cy="1.1" r="0.45"/><circle cx="3.2" cy="1.1" r="0.45"/><circle cx="5.2" cy="1.1" r="0.45"/>
+                  <circle cx="2.2" cy="2.2" r="0.45"/><circle cx="4.2" cy="2.2" r="0.45"/>
+                  <circle cx="1.2" cy="3.3" r="0.45"/><circle cx="3.2" cy="3.3" r="0.45"/><circle cx="5.2" cy="3.3" r="0.45"/>
+                  <circle cx="2.2" cy="4.4" r="0.45"/><circle cx="4.2" cy="4.4" r="0.45"/>
+                  <circle cx="1.2" cy="5.5" r="0.45"/><circle cx="3.2" cy="5.5" r="0.45"/><circle cx="5.2" cy="5.5" r="0.45"/>
+                </g>
+              </svg>
+              <span class="langOptionName">English</span>
+              <span class="langCheck" aria-hidden="true">✓</span>
+            </button>
+          </div>
+        </div>
         <button type="button" id="themeToggleBtn" class="themeToggleBtn" title="主题：亮色（点击切换为暗色）" aria-label="切换主题"></button>
         <a href="https://github.com/1parado/grok-build-switch" target="_blank" rel="noopener" class="navGithubBtn" title="GitHub 仓库" aria-label="GitHub">
           <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.012 8.012 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -1175,6 +1217,7 @@
   <script src="/vendor/katex/katex.min.js?v=0.18.0"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <!-- mermaid (~3.5MB) is lazy-loaded by app.js only when a diagram is present -->
-  <script src="/app.js?v=58"></script>
+  <script src="/i18n.js?v=2"></script>
+  <script src="/app.js?v=59"></script>
 </body>
 </html>

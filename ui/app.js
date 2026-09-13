@@ -2387,6 +2387,11 @@ function handleAgentEvent(event) {
       renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "", needs_bootstrap: false });
       stampTurnMeta();
       renderFileChangeCard();
+      // 回合落定的一次性脉冲：气泡边缘微光扫过即散。
+      if (lastAssistantMessageEl?.isConnected) {
+        lastAssistantMessageEl.classList.add("turnSettled");
+        lastAssistantMessageEl.addEventListener("animationend", () => lastAssistantMessageEl?.classList.remove("turnSettled"), { once: true });
+      }
       stopTelemetry();
       state.currentToolLabel = "";
       rebuildChatNodesFromDom();
@@ -2611,10 +2616,10 @@ function scrollChatToBottom(force = false) {
   const messages = $("chatMessages");
   if (!messages) return;
   if (!force && !state.chatStickToBottom) return;
-  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
   requestAnimationFrame(() => {
-    // smooth 仅在流式跟随时有意义；用户主动跳底保持瞬时。
-    messages.scrollTo({ top: messages.scrollHeight, behavior: force || reduceMotion ? "auto" : "smooth" });
+    // 流式跟随时每个 token chunk 都会走到这里——smooth 会排队动画
+    // 越滚越滞后，统一瞬时贴底；需要平滑滚动的节点跳转走自己的路径。
+    messages.scrollTo({ top: messages.scrollHeight, behavior: "auto" });
     state.chatStickToBottom = true;
   });
 }
@@ -2629,8 +2634,7 @@ function resetChatNodes() {
   chatNodes.length = 0;
   const scroller = $("chatNodeScroller");
   if (scroller) scroller.innerHTML = "";
-  const rail = $("chatNodeRail");
-  if (rail) rail.hidden = true;
+  syncChatNodeRailVisibility();
 }
 
 function addChatNodeFor(article) {
@@ -2655,8 +2659,8 @@ function addChatNodeFor(article) {
   node.append(idx, label);
   node.onclick = () => jumpToChatNode(id);
   scroller.append(node);
-  rail.hidden = false;
   chatNodes.push({ id, article, el: node });
+  syncChatNodeRailVisibility();
 }
 
 function jumpToChatNode(id) {
@@ -2704,8 +2708,13 @@ function pruneChatNodes() {
       chatNodes.splice(i, 1);
     }
   }
+  syncChatNodeRailVisibility();
+}
+
+// 短会话用不上导航轨道——少于 4 条用户消息时不占宽。
+function syncChatNodeRailVisibility() {
   const rail = $("chatNodeRail");
-  if (rail) rail.hidden = chatNodes.length === 0;
+  if (rail) rail.hidden = chatNodes.length < 4;
 }
 
 // Rebuild the whole node rail from the current DOM order. Used after
@@ -2713,7 +2722,6 @@ function pruneChatNodes() {
 function rebuildChatNodesFromDom() {
   chatNodes.length = 0;
   const scroller = $("chatNodeScroller");
-  const rail = $("chatNodeRail");
   if (scroller) scroller.innerHTML = "";
   const userArticles = [...$("chatMessages")?.querySelectorAll(".chatMessage[data-role='user']") || []];
   userArticles.forEach((article, index) => {
@@ -2744,7 +2752,7 @@ function rebuildChatNodesFromDom() {
     scroller?.append(node);
     chatNodes.push({ id, article, el: node });
   });
-  if (rail) rail.hidden = chatNodes.length === 0;
+  syncChatNodeRailVisibility();
 }
 
 // A "turn" is this user message plus everything until the next user message.
@@ -3303,6 +3311,8 @@ function createChatMessage(role, text, model = "", final = false, attachments = 
 function appendChatMessage(role, text, model = "", final = false, attachments = null, media = null, sessionID = "") {
   if (!historyMountSilent) removeChatEmpty();
   const article = createChatMessage(role, text, model, final, attachments, media, sessionID);
+  // 历史回放是整体挂载,不打入场动画;实时追加才走 msgIn。
+  if (!historyMountSilent) article.classList.add("msgIn");
   chatMessagesRoot().append(article);
   renderMessageMarkdown(article, final);
   if (role === "user" && Array.isArray(attachments) && attachments.length) {
@@ -4245,6 +4255,11 @@ function showAgentPermission(permission) {
     $("permissionSessionBtn").textContent = always?.name || "本会话允许";
     $("permissionSessionBtn").hidden = !always && options.length > 0 && !options.some((o) => /always/i.test(o.kind || ""));
   }
+  // "总是允许"把规则沉淀进 permissions.json（跨会话持久）——仅 native
+  // 引擎实现了 RespondPermissionUser；ACP 没有这个持久层，不显示入口。
+  if ($("permissionAlwaysBtn")) {
+    $("permissionAlwaysBtn").hidden = state.settings?.agent_engine !== "native";
+  }
   if ($("permissionRejectBtn")) {
     $("permissionRejectBtn").dataset.optionId = reject?.id || "";
   }
@@ -4348,7 +4363,7 @@ async function respondAgentPlan(outcome) {
   appendAgentNotice(outcome === "approved" ? "已批准计划" : outcome === "cancelled" ? "已请求修改计划" : "已忽略计划");
 }
 
-function respondAgentPermission(allow, sessionScope = false) {
+function respondAgentPermission(allow, persist = "") {
   const permission = state.agentPermission;
   if (!permission) return;
   if (!agentSocket || agentSocket.readyState !== WebSocket.OPEN) {
@@ -4356,19 +4371,23 @@ function respondAgentPermission(allow, sessionScope = false) {
     return;
   }
   const optionId = allow
-    ? (sessionScope ? ($("permissionSessionBtn")?.dataset.optionId || "") : ($("permissionAllowBtn")?.dataset.optionId || ""))
+    ? (persist === "session" ? ($("permissionSessionBtn")?.dataset.optionId || "")
+      : persist === "user" ? "" : ($("permissionAllowBtn")?.dataset.optionId || ""))
     : ($("permissionRejectBtn")?.dataset.optionId || "");
-  const remember = allow && sessionScope;
+  const remember = allow && persist === "session";
   agentSocket.send(JSON.stringify({
     type: "permission_response",
     request_id: permission.request_id,
     allow,
     remember,
     option_id: optionId || undefined,
+    scope: allow && persist === "user" ? "user" : undefined,
   }));
   state.agentPermission = null;
   $("permissionBar").hidden = true;
-  if (allow && remember) {
+  if (allow && persist === "user") {
+    appendAgentNotice("已允许，并已记住（对所有会话生效）");
+  } else if (allow && remember) {
     renderAgentStatus({ ...state.agentStatus, session_auto_approve: true });
     if ($("agentSessionAutoApprove")) $("agentSessionAutoApprove").checked = true;
     appendAgentNotice("已允许，并在本会话自动批准后续工具");
@@ -7332,12 +7351,24 @@ bindChatPanelResizer("left");
 bindChatPanelResizer("right");
 bindAppDialog();
 // agentCwd is a hidden state field; updates go through pickWorkingDirectory / openProjectById.
-$("permissionAllowBtn").onclick = () => respondAgentPermission(true, false);
-$("permissionSessionBtn") && ($("permissionSessionBtn").onclick = () => respondAgentPermission(true, true));
-$("permissionRejectBtn").onclick = () => respondAgentPermission(false, false);
+$("permissionAllowBtn").onclick = () => respondAgentPermission(true, "");
+$("permissionSessionBtn") && ($("permissionSessionBtn").onclick = () => respondAgentPermission(true, "session"));
+$("permissionAlwaysBtn") && ($("permissionAlwaysBtn").onclick = () => respondAgentPermission(true, "user"));
+$("permissionRejectBtn").onclick = () => respondAgentPermission(false, "");
 $("planApproveBtn") && ($("planApproveBtn").onclick = () => respondAgentPlan("approved"));
 $("planReviseBtn") && ($("planReviseBtn").onclick = () => respondAgentPlan("cancelled"));
 $("planDismissBtn") && ($("planDismissBtn").onclick = () => respondAgentPlan("abandoned"));
+// YOLO（进程级）已隐含包含会话级自动批准——两个开关语义重叠，
+// YOLO 勾选时禁用会话开关并提示，避免"都开了到底谁生效"的困惑。
+function syncApprovalToggles() {
+  const yolo = !!$("agentAlwaysApprove")?.checked;
+  const session = $("agentSessionAutoApprove");
+  if (session) {
+    session.disabled = yolo;
+    session.closest("label")?.classList.toggle("isImplicit", yolo);
+    session.title = yolo ? "进程级自动批准已开启，已包含本会话" : "本会话自动允许工具，无需重启进程";
+  }
+}
 $("agentSessionAutoApprove")?.addEventListener("change", () => {
   const enabled = !!$("agentSessionAutoApprove").checked;
   if (agentSocket && agentSocket.readyState === WebSocket.OPEN) {
@@ -7346,7 +7377,11 @@ $("agentSessionAutoApprove")?.addEventListener("change", () => {
   renderAgentStatus({ ...state.agentStatus, session_auto_approve: enabled });
   syncComposerAccessSelect();
 });
-$("agentAlwaysApprove")?.addEventListener("change", () => syncComposerAccessSelect());
+$("agentAlwaysApprove")?.addEventListener("change", () => {
+  syncApprovalToggles();
+  syncComposerAccessSelect();
+});
+syncApprovalToggles();
 $("addProjectBtn")?.addEventListener("click", () => addProjectFromPrompt().catch((err) => toast(err.message, "error")));
 $("chatWorkspaceFileBtn")?.addEventListener("click", () => openWorkspaceFilePicker().catch((err) => toast(err.message, "error")));
 $("workspaceFileCloseBtn")?.addEventListener("click", () => hideWorkspaceFilePicker());

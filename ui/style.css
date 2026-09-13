@@ -6459,3 +6459,46 @@ body.resizingChatPanels * {
 }
 .chatEmptyRecentTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
 .chatEmptyRecentMeta { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- 消息入场 / 回合落定 / 细节动效 ---- */
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+.chatMessage.msgIn { animation: msgIn 160ms ease-out both; }
+
+/* 回合完成时气泡边缘一次微光脉冲 */
+@keyframes settlePulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 30%, transparent); }
+  100% { box-shadow: 0 0 0 10px transparent; }
+}
+.chatMessage.turnSettled { animation: settlePulse 550ms ease-out 1; border-radius: inherit; }
+
+/* 工具卡/思考块展开时内容淡入——容器 snap 交给原生 <details>,
+   只对内容做轻过渡,不为展开高度写 JS 量测 */
+@keyframes toolBodyIn {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.agentTool[open] .agentToolBody,
+.agentTool[open] > pre,
+.agentThought[open] > pre { animation: toolBodyIn 150ms ease-out; }
+
+/* 排队 chip 入场 */
+@keyframes queueIn {
+  from { opacity: 0; transform: scale(.94); }
+  to { opacity: 1; transform: none; }
+}
+.promptQueueItem { animation: queueIn 140ms ease-out; }
+
+/* YOLO 勾选时会话级开关呈"已隐含"态 */
+.check.isImplicit { opacity: .48; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chatMessage.msgIn,
+  .chatMessage.turnSettled,
+  .agentTool[open] .agentToolBody,
+  .agentTool[open] > pre,
+  .agentThought[open] > pre,
+  .promptQueueItem { animation: none; }
+}

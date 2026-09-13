@@ -1056,6 +1056,58 @@
         <input type="file" id="grokPoolDirectory" accept="application/json,.json" webkitdirectory directory multiple hidden>
         <p class="muted tiny">「从认证目录导入」使用上方配置的本机路径；「选择目录导入」通过浏览器选取（不写回路径）。铸造产出与热加载共用 CPA 认证目录。原文件不会被移动。</p>
 
+        <div class="webChannelCard" id="webPoolCard" style="margin-top:18px">
+          <div class="rowBetween">
+            <div>
+              <h3 class="sectionTitle" style="font-size:15px;margin:0">Web 通道号池（思考）</h3>
+              <p class="muted tiny" style="margin:4px 0 0">grok2api 式网页通道：SSO cookie 调 grok.com 网页 API，对外提供 /web/v1 OpenAI 兼容端点，思考以 reasoning_content 返回。与 CLI OAuth 号池并列。</p>
+            </div>
+            <span id="webPoolBadge" class="badge">0 个账号</span>
+          </div>
+
+          <div class="poolSettings" style="margin-top:10px">
+            <label class="check"><input type="checkbox" id="webPoolEnabled"> 启用 /web/v1 端点</label>
+            <label class="field">出口代理（建议与号池一致：cf_clearance 绑定注册时的出口 IP）
+              <input id="webPoolProxyUrl" class="mono" placeholder="例如 http://127.0.0.1:7890">
+            </label>
+            <label class="field">Cloudflare 通行证（cf_clearance，过期较快；点「采集通行证」自动获取）
+              <input id="webPoolClearance" class="mono" type="password" autocomplete="off" placeholder="也可从本机浏览器复制 grok.com 的 cf_clearance">
+            </label>
+            <button type="button" id="saveWebPoolSettingsBtn" class="btn">保存 Web 通道设置</button>
+          </div>
+
+          <div class="inlineActions" style="margin-top:10px">
+            <button type="button" id="syncWebPoolCookiesBtn" class="btn primary">从注册机导入 Cookie</button>
+            <button type="button" id="harvestWebPoolClearanceBtn" class="btn" title="启动可见浏览器访问 grok.com 过盾并采集 cf_clearance（必要时可手动点击验证码）">采集通行证</button>
+            <button type="button" id="importWebPoolSSOBtn" class="btn">粘贴导入 SSO…</button>
+            <button type="button" id="connectWebPoolBtn" class="btn" title="把 Web 通道注册为内置工作台的供应商 Profile（native 引擎自动显示思考）">接入内置工作台</button>
+          </div>
+          <p id="webPoolStatus" class="muted tiny" style="margin-top:8px">尚未导入 Web 通道账号。</p>
+
+          <div id="webPoolConnection" hidden>
+            <label class="field">Web 通道 Base URL
+              <div class="keyRow">
+                <input id="webPoolBaseUrl" class="mono" readonly>
+                <button type="button" id="copyWebPoolUrlBtn" class="btn sm">复制</button>
+              </div>
+            </label>
+            <label class="field">Web 通道 API Key
+              <div class="keyRow authKeyRow">
+                <input id="webPoolApiKey" class="mono" type="password" readonly autocomplete="off">
+                <button type="button" id="toggleWebPoolKeyBtn" class="btn sm">显示</button>
+                <button type="button" id="copyWebPoolKeyBtn" class="btn sm">复制</button>
+              </div>
+            </label>
+          </div>
+
+          <div class="webPoolAccounts" id="webPoolAccounts"></div>
+          <textarea id="webPoolSSOInput" class="mono" hidden style="width:100%;min-height:90px;margin-top:8px" placeholder="每行一枚 SSO cookie，或用逗号分隔"></textarea>
+          <div class="inlineActions" id="webPoolSSOActions" hidden style="margin-top:8px">
+            <button type="button" id="confirmWebPoolSSOBtn" class="btn primary">导入</button>
+            <button type="button" id="cancelWebPoolSSOBtn" class="btn">取消</button>
+          </div>
+        </div>
+
         <div class="accountManager">
           <div class="accountToolbar">
             <div class="accountSearch">

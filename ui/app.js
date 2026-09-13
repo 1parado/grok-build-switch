@@ -5497,6 +5497,7 @@ async function loadAccountsView() {
   if ($("accountSort")) $("accountSort").value = accountListSort;
   if ($("accountSearch")) $("accountSearch").value = accountListQuery;
   await loadGrokPool();
+  await Promise.all([loadWebPool(), loadWebPoolKey()]);
   await loadAccountsList();
 }
 
@@ -8371,4 +8372,175 @@ async function clearImagineGallery() {
   } catch (err) {
     toast("清空失败：" + (err.message || err), "error");
   }
+}
+
+// ── Web 通道号池（grok2api 式网页通道：SSO cookie → grok.com 网页 API） ──
+
+const WEB_POOL_CLASS_LABELS = {
+  healthy: "健康",
+  rate_limited: "限流中",
+  blocked: "被屏蔽",
+  unknown: "待使用",
+};
+
+async function loadWebPool() {
+  try {
+    state.webPool = await api("/api/web-pool");
+    renderWebPool(state.webPool);
+  } catch (err) {
+    if ($("webPoolStatus")) {
+      $("webPoolStatus").textContent = `Web 通道状态加载失败：${err.message}`;
+    }
+  }
+}
+
+function renderWebPool(pool) {
+  if (!pool) return;
+  const summary = pool.summary || {};
+  const accounts = pool.accounts || [];
+  if ($("webPoolBadge")) {
+    $("webPoolBadge").textContent = `${summary.total || 0} 个账号 · ${summary.available || 0} 可用`;
+  }
+  if ($("webPoolStatus")) {
+    const settings = pool.settings || {};
+    const stateText = settings.enabled ? "已启用（/web/v1 可用）" : "未启用";
+    const line = `${stateText} · 健康 ${summary.healthy || 0} / 限流 ${summary.rate_limited || 0} / 屏蔽 ${summary.blocked || 0} / 停用 ${summary.disabled || 0}`;
+    $("webPoolStatus").textContent = line;
+  }
+  if ($("webPoolEnabled")) {
+    $("webPoolEnabled").checked = !!(pool.settings?.enabled);
+    $("webPoolProxyUrl").value = pool.settings?.proxy_url || "";
+    if ($("webPoolClearance") && !$("webPoolClearance").dataset.touched) {
+      $("webPoolClearance").value = pool.settings?.cf_clearance || "";
+    }
+    $("webPoolConnection").hidden = accounts.length === 0;
+  }
+  renderWebPoolAccounts(accounts);
+}
+
+function renderWebPoolAccounts(accounts) {
+  const box = $("webPoolAccounts");
+  if (!box) return;
+  if (!accounts.length) {
+    box.innerHTML = `<p class="muted tiny">暂无账号。点击「从注册机导入 Cookie」把注册机的 SSO 快照导入本通道。</p>`;
+    return;
+  }
+  const rows = accounts.slice(0, 50).map((acc) => {
+    const label = WEB_POOL_CLASS_LABELS[acc.class] || acc.class || "待使用";
+    const email = acc.email || acc.id?.slice(0, 12) || "";
+    const stats = `成功 ${acc.success_count || 0} · 失败 ${acc.failure_count || 0}`;
+    const disabled = acc.disabled ? "（已停用）" : "";
+    return `<div class="webPoolAccountRow">
+      <span class="webPoolAccountEmail mono">${escapeHtml(email)}${disabled}</span>
+      <span class="webPoolAccountState" data-class="${acc.class || "unknown"}">${label}</span>
+      <span class="muted tiny">${stats}</span>
+      <button type="button" class="btn sm" data-web-toggle="${acc.id}">${acc.disabled ? "启用" : "停用"}</button>
+      <button type="button" class="btn sm danger" data-web-delete="${acc.id}">删除</button>
+    </div>`;
+  });
+  const more = accounts.length > 50 ? `<p class="muted tiny">…以及另外 ${accounts.length - 50} 个账号</p>` : "";
+  box.innerHTML = rows.join("") + more;
+  box.querySelectorAll("[data-web-toggle]").forEach((btn) => {
+    btn.onclick = () => run(async () => {
+      state.webPool = await api(`/api/web-pool/accounts/${btn.dataset.webToggle}`, {
+        method: "PATCH",
+        body: JSON.stringify({ disabled: btn.textContent.trim() === "停用" }),
+      });
+      renderWebPool(state.webPool);
+    }, { button: btn, busyLabel: "处理中…" }).catch(() => {});
+  });
+  box.querySelectorAll("[data-web-delete]").forEach((btn) => {
+    btn.onclick = () => run(async () => {
+      state.webPool = await api(`/api/web-pool/accounts/${btn.dataset.webDelete}`, { method: "DELETE" });
+      renderWebPool(state.webPool);
+    }, { button: btn, busyLabel: "删除中…" }).catch(() => {});
+  });
+}
+
+$("saveWebPoolSettingsBtn").onclick = () => run(async () => {
+  state.webPool = await api("/api/web-pool", {
+    method: "PUT",
+    body: JSON.stringify({
+      enabled: $("webPoolEnabled").checked,
+      proxy_url: $("webPoolProxyUrl").value.trim(),
+      cf_clearance: ($("webPoolClearance")?.value || "").trim(),
+    }),
+  });
+  renderWebPool(state.webPool);
+}, { button: $("saveWebPoolSettingsBtn"), busyLabel: "保存中…", success: "Web 通道设置已保存" });
+
+$("syncWebPoolCookiesBtn").onclick = () => run(async () => {
+  const response = await api("/api/web-pool/sync", { method: "POST", body: "{}" });
+  await loadWebPool();
+  toast(response.message || "导入完成", "success");
+  return response;
+}, { button: $("syncWebPoolCookiesBtn"), busyLabel: "导入中…", success: "注册机 Cookie 已导入" });
+
+$("importWebPoolSSOBtn").onclick = () => {
+  $("webPoolSSOInput").hidden = !$("webPoolSSOInput").hidden;
+  $("webPoolSSOActions").hidden = $("webPoolSSOInput").hidden;
+};
+
+$("cancelWebPoolSSOBtn").onclick = () => {
+  $("webPoolSSOInput").hidden = true;
+  $("webPoolSSOActions").hidden = true;
+};
+
+$("confirmWebPoolSSOBtn").onclick = () => run(async () => {
+  const raw = $("webPoolSSOInput").value.trim();
+  if (!raw) {
+    toast("请先粘贴 SSO cookie", "error");
+    return false;
+  }
+  const response = await api("/api/web-pool/manual", {
+    method: "POST",
+    body: JSON.stringify({ sso: raw }),
+  });
+  state.webPool = response.status;
+  renderWebPool(state.webPool);
+  $("webPoolSSOInput").hidden = true;
+  $("webPoolSSOActions").hidden = true;
+  $("webPoolSSOInput").value = "";
+  toast(`已导入 ${response.imported || 0} 枚 SSO`, "success");
+  return response;
+}, { button: $("confirmWebPoolSSOBtn"), busyLabel: "导入中…" });
+
+$("connectWebPoolBtn").onclick = () => run(async () => {
+  const response = await api("/api/web-pool/connect", { method: "POST", body: "{}" });
+  toast(response.message || "已接入内置工作台", "success");
+  return response;
+}, { button: $("connectWebPoolBtn"), busyLabel: "接入中…" });
+
+$("harvestWebPoolClearanceBtn").onclick = () => run(async () => {
+  const response = await api("/api/web-pool/clearance", { method: "POST", body: "{}" });
+  toast(response.message || "浏览器已启动采集", "info");
+  setTimeout(() => loadWebPool().catch(() => {}), 90000);
+  return response;
+}, { button: $("harvestWebPoolClearanceBtn"), busyLabel: "启动中…" });
+if ($("webPoolClearance")) {
+  $("webPoolClearance").addEventListener("input", () => { $("webPoolClearance").dataset.touched = "1"; });
+}
+
+$("copyWebPoolUrlBtn").onclick = async () => {
+  if (await copyText($("webPoolBaseUrl").value)) toast("已复制 Base URL", "info");
+};
+
+$("copyWebPoolKeyBtn").onclick = async () => {
+  if (await copyText($("webPoolApiKey").value)) toast("已复制 API Key", "info");
+};
+
+$("toggleWebPoolKeyBtn").onclick = () => {
+  const input = $("webPoolApiKey");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  $("toggleWebPoolKeyBtn").textContent = show ? "隐藏" : "显示";
+};
+
+// Web 通道 Base URL / Key 懒加载（点开连接区时获取一次）。
+async function loadWebPoolKey() {
+  try {
+    const info = await api("/api/web-pool/key");
+    if ($("webPoolBaseUrl")) $("webPoolBaseUrl").value = info.base_url || "";
+    if ($("webPoolApiKey")) $("webPoolApiKey").value = info.api_key || "";
+  } catch (_) { /* 忽略 */ }
 }

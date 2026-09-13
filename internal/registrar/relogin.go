@@ -341,6 +341,72 @@ func waitForLoginPasswordOrSSO(ctx context.Context, timeout time.Duration) (bool
 	return false, fmt.Errorf("邮箱提交后未出现密码输入框，也未拿到 SSO（可能要求邮箱验证码或账号异常）")
 }
 
+// dismissAccountsCookieBanner 关闭 accounts.x.ai 登录页的 Cookie 同意
+// 横幅（Cloudflare CMP）。横幅是第一方 UI，合成点击有效；不管它会把
+// 登录按钮盖住，真实鼠标点击会被截走。
+func dismissAccountsCookieBanner(ctx context.Context) {
+	script := `(() => {
+	  const scan = (root) => {
+	    for (const btn of root.querySelectorAll('button')) {
+	      const t = (btn.textContent || '').trim();
+	      if (t.includes('接受所有') || t.includes('全部拒绝') || t.includes('Accept all') || t.includes('Reject all')) {
+	        btn.click(); return true;
+	      }
+	    }
+	    return false;
+	  };
+	  let hit = scan(document);
+	  if (!hit) { for (const f of document.querySelectorAll('iframe')) { try { hit = scan(f.contentDocument) || hit; } catch (e) {} } }
+	  return hit;
+	})()`
+	var dismissed bool
+	_ = chromedp.Run(ctx, chromedp.Evaluate(script, &dismissed))
+}
+
+// loginSSOReady 检查 sso cookie 是否已出现。
+func loginSSOReady(ctx context.Context) bool {
+	var ready bool
+	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		cookies, err := storage.GetCookies().Do(ctx)
+		if err != nil {
+			return err
+		}
+		for _, c := range cookies {
+			if c.Name == "sso" && c.Value != "" {
+				ready = true
+				return nil
+			}
+		}
+		return nil
+	}))
+	return ready
+}
+
+// submitLoginPasswordWithRealClick：关横幅 → 真实点击「登录」→ 短等 SSO；
+// 未出现则再关一次横幅重试（最多 3 轮）。返回是否看到 SSO。
+func submitLoginPasswordWithRealClick(ctx context.Context) bool {
+	labels := []string{"登录", "继续", "Sign in", "Log in"}
+	for attempt := 0; attempt < 3; attempt++ {
+		dismissAccountsCookieBanner(ctx)
+		time.Sleep(400 * time.Millisecond)
+		if err := realClickExact(ctx, labels); err != nil {
+			continue
+		}
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			if loginSSOReady(ctx) {
+				return true
+			}
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Second):
+			}
+		}
+	}
+	return loginSSOReady(ctx)
+}
+
 func fillAndSubmitLoginPassword(ctx context.Context, password string) error {
 	passwordJSON, _ := json.Marshal(password)
 	deadline := time.Now().Add(40 * time.Second)
@@ -361,6 +427,15 @@ func fillAndSubmitLoginPassword(ctx context.Context, password string) error {
 			continue
 		}
 		time.Sleep(500 * time.Millisecond)
+		// 登录按钮要求可信事件（isTrusted）：合成 .click() 会被 SPA 忽略，
+		// 页面停在登录页且无任何网络请求（2026-09 实测）。与 mint 的
+		// consent「允许」一致，走 input.DispatchMouseEvent 真实点击。
+		// 另外登录页新出现的 Cookie 同意横幅可能盖住按钮截走坐标命中，
+		// 点击前先关掉横幅；点完短等 SSO，未出现则再关一次横幅重试。
+		if submitLoginPasswordWithRealClick(ctx) {
+			return nil
+		}
+		// 回退：合成点击 / Enter（旧路径，个别环境仍有效）。
 		var submitState string
 		if err := chromedp.Run(ctx, chromedp.Evaluate(submitLoginPasswordScript, &submitState)); err != nil {
 			if ctx.Err() != nil {

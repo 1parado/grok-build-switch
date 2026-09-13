@@ -37,6 +37,7 @@ import (
 	"grok_switch/internal/settings"
 	"grok_switch/internal/switcher"
 	"grok_switch/internal/updatecheck"
+	"grok_switch/internal/webpool"
 )
 
 type Server struct {
@@ -73,6 +74,11 @@ type Server struct {
 
 	// Imagine 是基于 grok.com 网页端 /imagine 协议的本地生图引擎（走 registrar 账号 Cookie 轮询）。
 	Imagine *ImagineEngine
+
+	// WebPool 是 grok2api 式的网页通道号池（SSO cookie → grok.com
+	// 网页 API），对外暴露 /web/v1 OpenAI 兼容端点，思考以
+	// reasoning_content 返回。
+	WebPool *webpool.Manager
 
 	imagineMu   sync.Mutex
 	imagineJobs *imagineJobList
@@ -288,6 +294,15 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/agent/ws", s.handleAgentWebSocket)
 	mux.HandleFunc("/grok/v1", s.handleGrokProxy)
 	mux.HandleFunc("/grok/v1/", s.handleGrokProxy)
+	mux.HandleFunc("/web/v1", s.handleWebV1)
+	mux.HandleFunc("/web/v1/", s.handleWebV1)
+	mux.HandleFunc("/api/web-pool", s.handleWebPool)
+	mux.HandleFunc("/api/web-pool/sync", s.handleWebPoolImport)
+	mux.HandleFunc("/api/web-pool/manual", s.handleWebPoolImport)
+	mux.HandleFunc("/api/web-pool/accounts/", s.handleWebPoolAccount)
+	mux.HandleFunc("/api/web-pool/key", s.handleWebPoolKey)
+	mux.HandleFunc("/api/web-pool/connect", s.handleWebPoolConnect)
+	mux.HandleFunc("/api/web-pool/clearance", s.handleWebPoolClearance)
 	mux.HandleFunc("/imagine/v1", s.handleImagineProxy)
 	mux.HandleFunc("/imagine/v1/", s.handleImagineProxy)
 	mux.HandleFunc("/api/imagine/generate", s.handleImagineGenerate)

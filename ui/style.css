@@ -6119,3 +6119,43 @@ body.resizingChatPanels * {
   text-overflow: ellipsis;
   pointer-events: none;
 }
+
+/* ── Web 通道号池（grok2api 式） ── */
+.webChannelCard {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.webPoolAccounts {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+.webPoolAccountRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 12px;
+}
+.webPoolAccountEmail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.webPoolAccountState {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.webPoolAccountState[data-class="healthy"] { color: var(--success); border-color: color-mix(in srgb, var(--success) 40%, var(--line)); }
+.webPoolAccountState[data-class="rate_limited"] { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.webPoolAccountState[data-class="blocked"] { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }

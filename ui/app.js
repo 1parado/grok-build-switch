@@ -42,6 +42,16 @@ const state = {
   promptQueue: [],
   // 会话置顶（localStorage 持久；两引擎会话通用，不依赖 store 字段）。
   pinnedSessions: new Set(JSON.parse(localStorage.getItem("gs.session_pins") || "[]")),
+  // 会话累计用量（usage 事件累加；input 取最新值≈当前上下文体积）。
+  sessionUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  // 当前 turn 遥测：输出 token 累计、起始时间、当前工具、工具数、文件改动。
+  turnOutTokens: 0,
+  turnStartTs: 0,
+  currentToolLabel: "",
+  turnToolCount: 0,
+  turnFileChanges: new Map(),
+  // 任务清单最近快照（todos 事件 / 历史回放回填）。
+  sessionTodos: [],
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -58,6 +68,7 @@ let cpaMintTerminalNotice = "";
 let agentSocket = null;
 let agentReconnectTimer = null;
 let draftSaveTimer = null;
+let telemetryTimer = null;
 let promptQueueSeq = 0;
 // 输入历史回忆状态：-1 = 未在浏览历史。
 let inputHistIdx = -1;
@@ -1398,7 +1409,9 @@ function renderSidebarTree() {
 function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
   const button = document.createElement("div");
   const missing = !!session.cwd_missing;
-  button.className = `sessionItem${nested ? " sessionItemNested" : ""}${session.id === state.activeAgentSession?.id ? " active" : ""}${missing ? " cwdMissing" : ""}`;
+  const isActive = session.id === state.activeAgentSession?.id;
+  const isBusy = isActive && (state.agentStatus?.state === "busy" || state.agentStatus?.busy);
+  button.className = `sessionItem${nested ? " sessionItemNested" : ""}${isActive ? " active" : ""}${missing ? " cwdMissing" : ""}${isBusy ? " isBusy" : ""}`;
   button.role = "button";
   button.tabIndex = 0;
   button.dataset.sessionId = session.id;
@@ -1408,6 +1421,14 @@ function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
   const title = document.createElement("span");
   title.className = "sessionItemTitle";
   title.textContent = session.title || "未命名会话";
+
+  // 末条消息摘要(PR1 store 下发的 preview 字段;ACP 会话无此字段则省略)。
+  let previewEl = null;
+  if (session.preview) {
+    previewEl = document.createElement("span");
+    previewEl.className = "sessionItemPreview";
+    previewEl.textContent = session.preview;
+  }
 
   const meta = document.createElement("span");
   meta.className = "sessionItemMeta";
@@ -1453,7 +1474,9 @@ function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
   };
   actions.append(pinBtn, renameBtn, deleteBtn);
 
-  button.append(title, meta);
+  button.append(title);
+  if (previewEl) button.append(previewEl);
+  button.append(meta);
   if (showPath) {
     const path = document.createElement("span");
     path.className = "sessionItemPath";
@@ -1771,6 +1794,7 @@ async function resumeAgentSession(session) {
     setProjectExpanded(matchedProject.id, true);
   }
   clearAgentTranscript(false);
+  resetSessionTelemetry();
   renderStoredHistory(history.messages || []);
   restoreSessionDraft();
   renderPromptQueue();
@@ -2206,8 +2230,9 @@ function renderAgentStatus(status) {
   if (hint && statusRow) {
     hint.classList.toggle("composerBusyHint", busy);
     if (busy) {
-      hint.textContent = "正在生成…点击停止 · Esc 也可停止";
+      hint.textContent = "Esc 或点击停止";
       statusRow.hidden = false;
+      startTelemetry();
     } else {
       hint.textContent = "";
       statusRow.hidden = true;
@@ -2308,8 +2333,33 @@ function handleAgentEvent(event) {
       appendThoughtChunk(event.text || "");
       break;
     case "tool_call":
+      if (!state.turnStartTs) state.turnStartTs = Date.now();
+      state.turnToolCount++; // 每次调用一次;update 可能多次,不在那里计
+      state.currentToolLabel = toolTelemetryLabel(event.tool);
+      startTelemetry();
+      renderTelemetry();
+      renderAgentTool(event.tool || {}, false, event.session_id || "");
+      break;
     case "tool_update":
-      renderAgentTool(event.tool || {}, event.type === "tool_update", event.session_id || "");
+      extractFileChange(event.tool || {}, agentTools.get(event.tool?.id));
+      renderAgentTool(event.tool || {}, true, event.session_id || "");
+      break;
+    case "usage":
+      if (event.usage) {
+        const u = state.sessionUsage;
+        u.input = event.usage.input || 0;   // 最新输入≈当前上下文体积(非累加)
+        u.output += event.usage.output || 0;
+        u.cacheRead += event.usage.cache_read || 0;
+        u.cacheWrite += event.usage.cache_write || 0;
+        state.turnOutTokens += event.usage.output || 0;
+        renderUsageMeter();
+        renderTelemetry();
+        startTelemetry();
+      }
+      break;
+    case "todos":
+      state.sessionTodos = Array.isArray(event.todos) ? event.todos : [];
+      renderTodoPanel();
       break;
     case "permission_request":
       showAgentPermission(event.permission);
@@ -2334,6 +2384,10 @@ function handleAgentEvent(event) {
         appendAgentNotice("已停止生成");
       }
       renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "", needs_bootstrap: false });
+      stampTurnMeta();
+      renderFileChangeCard();
+      stopTelemetry();
+      state.currentToolLabel = "";
       rebuildChatNodesFromDom();
       loadAgentSessions().catch(() => {});
       flushPromptQueue();
@@ -2341,7 +2395,10 @@ function handleAgentEvent(event) {
     case "error":
       finalizeAssistantMessage();
       appendAgentNotice(event.error || "Grok Agent 出错", true);
+      stopTelemetry();
+      state.currentToolLabel = "";
       renderAgentStatus({ ...state.agentStatus, state: agentIsRunning() ? "ready" : "dead", busy: false, error: event.error || "" });
+      renderSidebarTree();
       break;
   }
 }
@@ -2788,6 +2845,7 @@ function mountHistoryRange(start, end, { mode = "replace" } = {}) {
   rebuildChatNodesFromDom();
   ensureHistorySentinel(historyRenderedStart, pendingHistory.length);
   refreshMessageActionButtons();
+  backfillTodosFromHistory();
 }
 
 function appendHistoryMessage(message) {
@@ -3006,6 +3064,7 @@ async function resendEditedUserMessage(article, rawText) {
   const _rawSSend = $("composerStrengthSelect")?.value || "";
   const _sSend = _rawSSend === "auto" ? "" : _rawSSend;
   agentSocket.send(JSON.stringify({ type: "user_message", text, model: _mSend, strength: _sSend }));
+  beginTurnTelemetry();
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
   if (rewind?.ok) {
     appendAgentNotice("已回退引擎上下文并重新发送");
@@ -3168,7 +3227,10 @@ function createChatMessage(role, text, model = "", final = false, attachments = 
       regenBtn.title = "删除本条界面气泡并重发上一轮用户消息；引擎仍保留上一轮回复上下文";
       regenBtn.onclick = () => regenerateLastAssistant(article).catch((err) => toast(err.message || String(err), "error"));
       actions.append(regenBtn);
-      if (!historyMountSilent) lastAssistantMessageEl = article;
+      if (!historyMountSilent) {
+        lastAssistantMessageEl = article;
+        state.turnAssistantEl = article; // 本 turn 的角标落点(区别于历史回放的旧消息)
+      }
     } else {
       const editBtn = document.createElement("button");
       editBtn.type = "button";
@@ -3833,7 +3895,10 @@ function renderAgentTool(tool, isUpdate, sessionID = "") {
     }
   }
   // 双栏存储：输入输出分别保留，有输出不再丢输入。
-  if (tool.raw_input != null) details._toolInput = formatAgentPayload(tool.raw_input);
+  if (tool.raw_input != null) {
+    details._toolInput = formatAgentPayload(tool.raw_input);
+    details._toolArgs = typeof tool.raw_input === "string" ? tryParseToolJson(tool.raw_input) : tool.raw_input;
+  }
   if (tool.raw_output != null) details._toolOutput = formatAgentPayload(tool.raw_output);
   else if (tool.raw_input == null && !details._toolInput && !details._toolOutput) {
     details._toolInput = "";
@@ -4144,6 +4209,7 @@ async function startAgent() {
     }
     restoreSessionDraft();
     renderPromptQueue();
+    resetSessionTelemetry();
   }
   renderAgentStatus(status);
   updateConversationIdentity();
@@ -4205,6 +4271,7 @@ async function newAgentSession(projectOrNull) {
   }
   restoreSessionDraft();
   renderPromptQueue();
+  resetSessionTelemetry();
   renderAgentStatus(status);
   updateConversationIdentity();
   persistLastChatContext({
@@ -4307,6 +4374,7 @@ async function regenerateLastAssistant(article = lastAssistantMessageEl) {
   const _rawSSend = $("composerStrengthSelect")?.value || "";
   const _sSend = _rawSSend === "auto" ? "" : _rawSSend;
   agentSocket.send(JSON.stringify({ type: "user_message", text, model: _mSend, strength: _sSend }));
+  beginTurnTelemetry();
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
   if (rewind?.ok) {
     appendAgentNotice("正在重新生成…（已回退引擎上一轮）");
@@ -4893,6 +4961,268 @@ function reportClientVisibility() {
   }
 }
 
+// ---- 用量 meter / 任务清单 / 实时遥测 / 文件改动卡（呈现层) ----
+
+function formatTokens(n) {
+  n = Math.max(0, Math.round(Number(n) || 0));
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+// turn 开始（发送/重新生成）时重置遥测累计器。
+function beginTurnTelemetry() {
+  state.turnStartTs = Date.now();
+  state.turnOutTokens = 0;
+  state.turnToolCount = 0;
+  state.turnFileChanges = new Map();
+  state.currentToolLabel = "";
+  state.turnAssistantEl = null;
+}
+
+function contextWindowForModel(name) {
+  const profile = activeProfile();
+  for (const m of profile?.models || []) {
+    if (String(m?.name || m?.model || "") === name) return m.context_window || 0;
+  }
+  return 0;
+}
+
+function renderUsageMeter() {
+  const sec = $("usageSection");
+  if (!sec) return;
+  const u = state.sessionUsage;
+  if (!u.input && !u.output) {
+    sec.hidden = true;
+    return;
+  }
+  sec.hidden = false;
+  const win = contextWindowForModel(state.agentStatus?.model || "") || 200000;
+  const pct = Math.min(100, Math.round((u.input / win) * 100));
+  const fill = $("usageMeterFill");
+  fill.style.width = `${pct}%`;
+  fill.dataset.level = pct >= 90 ? "high" : pct >= 70 ? "mid" : "low";
+  $("usageTotals").textContent = `${formatTokens(u.input)} / ${formatTokens(win)}`;
+  const parts = [`输出 ${formatTokens(u.output)}`];
+  if (u.cacheRead) parts.push(`缓存读 ${formatTokens(u.cacheRead)}`);
+  $("usageDetail").textContent = parts.join(" · ");
+  $("usageSection").title = `最新输入 ${u.input.toLocaleString()} tok · 累计输出 ${u.output.toLocaleString()} tok` +
+    (u.cacheRead ? ` · 缓存读 ${u.cacheRead.toLocaleString()}` : "") +
+    (u.cacheWrite ? ` · 缓存写 ${u.cacheWrite.toLocaleString()}` : "");
+}
+
+// 会话切换/新会话时重置遥测与呈现状态。
+function resetSessionTelemetry() {
+  state.sessionUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  state.turnOutTokens = 0;
+  state.turnStartTs = 0;
+  state.currentToolLabel = "";
+  state.turnToolCount = 0;
+  state.turnFileChanges = new Map();
+  state.sessionTodos = [];
+  state.turnAssistantEl = null;
+  stopTelemetry();
+  renderUsageMeter();
+  renderTodoPanel();
+}
+
+function renderTodoPanel() {
+  const sec = $("todoSection");
+  const list = $("todoList");
+  if (!sec || !list) return;
+  const items = state.sessionTodos || [];
+  sec.hidden = items.length === 0;
+  $("todoCount").textContent = items.length
+    ? `${items.filter((i) => i.status === "completed").length}/${items.length}`
+    : "";
+  list.innerHTML = "";
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.className = `todoItem ${item.status || "pending"}`;
+    const icon = document.createElement("span");
+    icon.className = "todoIcon";
+    icon.textContent = item.status === "completed" ? "●" : item.status === "in_progress" ? "◐" : "○";
+    const text = document.createElement("span");
+    text.className = "todoText";
+    text.textContent = item.content || "";
+    li.append(icon, text);
+    list.append(li);
+  }
+}
+
+// 历史回放后回填任务清单：todo_list 的入参 items 即全量快照,取最后一次调用。
+function backfillTodosFromHistory() {
+  for (let i = pendingHistory.length - 1; i >= 0; i--) {
+    const tool = pendingHistory[i]?.tool;
+    if (!tool || String(tool.title || "").toLowerCase() !== "todo_list") continue;
+    const input = typeof tool.raw_input === "string" ? tryParseToolJson(tool.raw_input) : tool.raw_input;
+    if (Array.isArray(input?.items)) {
+      state.sessionTodos = input.items.filter((it) => it && it.content).map((it) => ({
+        content: String(it.content),
+        status: ["pending", "in_progress", "completed"].includes(it.status) ? it.status : "pending",
+      }));
+    }
+    break;
+  }
+  renderTodoPanel();
+}
+
+// 实时遥测行:busy 期间 1s 刷新,显示当前工具 / 已耗时 / 输出 tokens。
+function startTelemetry() {
+  if (telemetryTimer) return;
+  telemetryTimer = setInterval(renderTelemetry, 1000);
+  renderTelemetry();
+}
+
+function stopTelemetry() {
+  clearInterval(telemetryTimer);
+  telemetryTimer = null;
+  const el = $("composerTelemetry");
+  if (el) {
+    el.hidden = true;
+    el.textContent = "";
+  }
+}
+
+function renderTelemetry() {
+  const el = $("composerTelemetry");
+  if (!el) return;
+  const busy = state.agentStatus?.state === "busy" || state.agentStatus?.busy;
+  if (!busy) {
+    el.hidden = true;
+    return;
+  }
+  const secs = state.turnStartTs ? Math.max(0, Math.floor((Date.now() - state.turnStartTs) / 1000)) : 0;
+  const parts = [state.currentToolLabel ? `执行 ${state.currentToolLabel}` : "生成中"];
+  if (secs >= 1) parts.push(`${secs}s`);
+  if (state.turnOutTokens) parts.push(`↓${formatTokens(state.turnOutTokens)} tok`);
+  el.textContent = parts.join(" · ");
+  el.hidden = false;
+}
+
+// 工具调用标签:read/write/edit 带文件短名,其余用工具名。
+function toolTelemetryLabel(tool) {
+  const name = String(tool?.title || tool?.kind || "");
+  if (["read", "write", "edit"].includes(name)) {
+    const input = typeof tool.raw_input === "string" ? tryParseToolJson(tool.raw_input) : tool.raw_input;
+    const file = input?.path ? shortPath(input.path) : "";
+    if (file) return `${name} ${file}`;
+  }
+  return name || "工具";
+}
+
+function shortPath(p) {
+  const s = String(p || "").replace(/\\/g, "/");
+  const parts = s.split("/").filter(Boolean);
+  return parts.length > 2 ? parts.slice(-2).join("/") : s;
+}
+
+function countLines(s) {
+  s = String(s || "");
+  return s ? s.split("\n").length : 0;
+}
+
+// 聚合本 turn 的 write/edit 文件改动（行数从入参 old/new 或 content 推算）。
+function extractFileChange(tool, details) {
+  const kind = String(tool?.kind || tool?.title || "");
+  if (kind !== "write" && kind !== "edit") return;
+  const input = details?._toolArgs ?? (typeof tool.raw_input === "string" ? tryParseToolJson(tool.raw_input) : tool.raw_input);
+  const path = String(input?.path || "");
+  if (!path) return;
+  if (kind === "write") {
+    state.turnFileChanges.set(path, { kind, added: countLines(input.content), removed: 0, el: details });
+    return;
+  }
+  const blocks = Array.isArray(input?.edits) && input.edits.length
+    ? input.edits
+    : [{ old_string: input?.old_string, new_string: input?.new_string }];
+  let added = 0;
+  let removed = 0;
+  for (const b of blocks) {
+    added += countLines(b?.new_string);
+    removed += countLines(b?.old_string);
+  }
+  const prev = state.turnFileChanges.get(path);
+  state.turnFileChanges.set(path, {
+    kind,
+    added: (prev?.added || 0) + added,
+    removed: (prev?.removed || 0) + removed,
+    el: details || prev?.el,
+  });
+}
+
+// turn 结束渲染文件改动卡:文件列表 + +/− 行数,点击定位到对应工具卡。
+function renderFileChangeCard() {
+  if (!state.turnFileChanges.size) return;
+  const card = document.createElement("div");
+  card.className = "fileChangeCard";
+  const head = document.createElement("div");
+  head.className = "fileChangeHead";
+  head.textContent = `改动 ${state.turnFileChanges.size} 个文件`;
+  card.append(head);
+  const list = document.createElement("ul");
+  for (const [path, ch] of state.turnFileChanges) {
+    const li = document.createElement("li");
+    li.className = "fileChangeItem";
+    const name = document.createElement("code");
+    name.className = "fileChangePath";
+    name.textContent = shortPath(path);
+    name.title = path;
+    const stats = document.createElement("span");
+    stats.className = "fileChangeStats";
+    if (ch.added) {
+      const a = document.createElement("span");
+      a.className = "fileChangeAdd";
+      a.textContent = `+${ch.added}`;
+      stats.append(a);
+    }
+    if (ch.removed) {
+      const d = document.createElement("span");
+      d.className = "fileChangeDel";
+      d.textContent = `−${ch.removed}`;
+      stats.append(d);
+    }
+    if (ch.el?.isConnected) {
+      li.classList.add("clickable");
+      li.title = "定位到工具调用";
+      li.onclick = () => {
+        ch.el.open = true;
+        ch.el.dataset.userOpened = "1";
+        renderToolPayloadBody(ch.el);
+        ch.el.scrollIntoView({ block: "center", behavior: "smooth" });
+      };
+    }
+    li.append(name, stats);
+    list.append(li);
+  }
+  card.append(list);
+  chatMessagesRoot().append(card);
+  scrollChatToBottom();
+}
+
+// turn 结束在 assistant 消息头打角标:耗时 · 输出 tok · 工具数。
+function stampTurnMeta() {
+  // 只标本 turn 新建的 assistant 消息;纯工具回合(无文本)不打旧消息的标。
+  const article = state.turnAssistantEl;
+  if (!article?.isConnected) return;
+  const secs = state.turnStartTs ? Math.max(0, (Date.now() - state.turnStartTs) / 1000) : 0;
+  const parts = [];
+  if (secs >= 0.5) parts.push(`${secs.toFixed(1)}s`);
+  if (state.turnOutTokens) parts.push(`↑${formatTokens(state.turnOutTokens)} tok`);
+  if (state.turnToolCount) parts.push(`${state.turnToolCount} 工具`);
+  if (!parts.length) return;
+  const header = article.querySelector(".chatMessageHeader");
+  if (!header) return;
+  let meta = header.querySelector(".turnMeta");
+  if (!meta) {
+    meta = document.createElement("span");
+    meta.className = "turnMeta";
+    const actions = header.querySelector(".chatMessageActions");
+    header.insertBefore(meta, actions || null);
+  }
+  meta.textContent = parts.join(" · ");
+}
+
 function updateChatComposerState() {
   // Refresh send button enablement to account for attachments-only messages.
   if (state.agentStatus?.state !== "ready" || state.agentEngineState === "loading") return;
@@ -4981,6 +5311,8 @@ async function dispatchAgentPrompt(text, attachments) {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
+  // turn 遥测起点：耗时/输出/工具数/文件改动从这一刻累计。
+  beginTurnTelemetry();
   pushInputHistory(text);
   clearSessionDraft();
   inputHistIdx = -1;
@@ -4993,6 +5325,7 @@ async function dispatchAgentPrompt(text, attachments) {
   const _s = _rawS === "auto" ? "" : _rawS;
   agentSocket.send(JSON.stringify({ type: "user_message", text, attachments: buildOutboundAttachments(attachments), model: _m, strength: _s }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
+  renderSidebarTree(); // 侧栏会话项的"生成中"呼吸点
 }
 
 function renderEmptyState() {

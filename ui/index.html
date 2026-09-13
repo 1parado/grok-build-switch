@@ -469,6 +469,7 @@
               <div id="composerStatusRow" class="composerStatusRow" hidden>
                 <span class="typingDots" aria-hidden="true"><i></i><i></i><i></i></span>
                 <span class="composerHint" id="composerHint"></span>
+                <span class="composerTelemetry" id="composerTelemetry" hidden></span>
               </div>
               <div id="composerToolbar" class="composerFooterRow">
                 <div class="composerFooterLeft">
@@ -538,6 +539,11 @@
             <span class="contextLabel">会话 ID</span>
             <code id="contextSessionId">—</code>
           </div>
+          <div class="contextSection usageSection" id="usageSection" hidden>
+            <div class="contextSectionHead"><span class="contextLabel">上下文用量</span><span id="usageTotals" class="usageTotals"></span></div>
+            <div class="usageMeter" role="progressbar" aria-label="上下文窗口占用"><div id="usageMeterFill" class="usageMeterFill"></div></div>
+            <div id="usageDetail" class="usageDetail"></div>
+          </div>
           <label class="check autoApproveCheck" title="自动允许 Grok Build 执行工具（进程级 YOLO）">
             <input type="checkbox" id="agentAlwaysApprove"> 自动批准工具（YOLO）
           </label>
@@ -547,6 +553,11 @@
           <div class="contextActions">
             <button type="button" id="agentStartBtn" class="btn primary">启动 Agent</button>
             <button type="button" id="agentStopBtn" class="btn danger" disabled>停止</button>
+          </div>
+
+          <div class="contextSection todoSection" id="todoSection" hidden>
+            <div class="contextSectionHead"><span class="contextLabel">任务清单</span><span id="todoCount"></span></div>
+            <ul id="todoList" class="todoList"></ul>
           </div>
 
           <div class="contextSection activitySection">

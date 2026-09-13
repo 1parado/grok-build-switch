@@ -6238,3 +6238,159 @@ body.resizingChatPanels * {
   border-color: var(--primary-border);
   color: var(--primary);
 }
+
+/* ===== Agent workbench · presentation layer (PR3) ===== */
+
+/* usage meter in the context rail */
+.usageSection .usageTotals {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.usageMeter {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.usageMeterFill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--primary);
+  transition: width 0.3s ease;
+}
+.usageMeterFill[data-level="mid"] { background: var(--warn); }
+.usageMeterFill[data-level="high"] { background: var(--danger); }
+.usageDetail {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* persistent task list (todos) in the context rail */
+.todoList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.todoItem {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 11px;
+  color: var(--text);
+  line-height: 1.45;
+}
+.todoIcon {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  color: var(--muted);
+}
+.todoItem.in_progress .todoIcon { color: var(--primary); }
+.todoItem.completed { color: var(--muted); }
+.todoItem.completed .todoText { text-decoration: line-through; }
+.todoItem.completed .todoIcon { color: var(--success); }
+.todoText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+#todoCount {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* live telemetry inside the composer status row */
+.composerTelemetry {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composerTelemetry[hidden] { display: none; }
+
+/* session list: last-message preview + busy breathing dot */
+.sessionItemPreview {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sessionItem.isBusy .sessionItemTitle::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  vertical-align: 2px;
+  animation: sessionBusyPulse 1.2s ease-in-out infinite;
+}
+@keyframes sessionBusyPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+/* per-turn file-change card under the transcript */
+.fileChangeCard {
+  margin: 2px 0 10px 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.fileChangeHead {
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--line);
+}
+.fileChangeCard ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+.fileChangeItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+.fileChangeItem.clickable { cursor: pointer; }
+.fileChangeItem.clickable:hover { background: var(--primary-soft); }
+.fileChangePath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.fileChangeStats {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.fileChangeAdd { color: var(--success); }
+.fileChangeDel { color: var(--danger); }
+
+/* turn meta badge in assistant message header */
+.turnMeta {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}

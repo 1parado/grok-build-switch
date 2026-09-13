@@ -38,6 +38,10 @@ const state = {
   updateHidden: false,
   // Monotonic token so out-of-order session switches discard stale UI updates.
   sessionSwitchToken: 0,
+  // 生成中排队的消息：{id, text, attachments, sessionID}；turn_done 后按序发送。
+  promptQueue: [],
+  // 会话置顶（localStorage 持久；两引擎会话通用，不依赖 store 字段）。
+  pinnedSessions: new Set(JSON.parse(localStorage.getItem("gs.session_pins") || "[]")),
 };
 
 const OFFICIAL_PROVIDER_KEY = "official";
@@ -53,6 +57,11 @@ let cpaMintSession = null;
 let cpaMintTerminalNotice = "";
 let agentSocket = null;
 let agentReconnectTimer = null;
+let draftSaveTimer = null;
+let promptQueueSeq = 0;
+// 输入历史回忆状态：-1 = 未在浏览历史。
+let inputHistIdx = -1;
+let inputHistStash = "";
 
 // Account list state for viewAccounts (paginated/grouped, supports thousands).
 const ACCOUNT_FILTERS = [
@@ -1215,6 +1224,7 @@ async function restoreLastChatContext(status, last = readLastChatContext()) {
         model: status.model,
         title: state.activeAgentSession?.title,
       });
+      restoreSessionDraft();
     }
     return;
   }
@@ -1407,6 +1417,19 @@ function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
 
   const actions = document.createElement("div");
   actions.className = "sessionItemActions";
+  const pinned = state.pinnedSessions.has(session.id);
+  if (pinned) button.classList.add("isPinned");
+  const pinBtn = document.createElement("button");
+  pinBtn.type = "button";
+  pinBtn.className = `sessionActionBtn sessionPinBtn${pinned ? " isPinned" : ""}`;
+  pinBtn.title = pinned ? "取消置顶" : "置顶会话";
+  pinBtn.setAttribute("aria-label", `${pinned ? "取消置顶" : "置顶"}会话 ${session.title || ""}`);
+  pinBtn.textContent = "⤒";
+  pinBtn.onclick = (event) => {
+    event.stopPropagation();
+    toggleSessionPin(session);
+  };
+
   const renameBtn = document.createElement("button");
   renameBtn.type = "button";
   renameBtn.className = "sessionActionBtn sessionRenameBtn";
@@ -1428,7 +1451,7 @@ function buildSessionItemEl(session, { nested = false, showPath = true } = {}) {
     event.stopPropagation();
     deleteAgentSession(session).catch((err) => toast(err.message || String(err), "error"));
   };
-  actions.append(renameBtn, deleteBtn);
+  actions.append(pinBtn, renameBtn, deleteBtn);
 
   button.append(title, meta);
   if (showPath) {
@@ -1594,7 +1617,7 @@ function renderAgentSessionList() {
     if (expanded) {
       const children = document.createElement("div");
       children.className = "projectSessionList";
-      for (const session of group.sessions) {
+      for (const session of sortSessionsPinned(group.sessions)) {
         children.append(buildSessionItemEl(session, { nested: true, showPath: false }));
       }
       folder.append(children);
@@ -1703,6 +1726,7 @@ async function deleteAgentSession(session) {
 
 async function resumeAgentSession(session) {
   if (!session?.id) return false;
+  saveSessionDraft(); // 旧会话草稿先落盘,再切走
   const token = ++state.sessionSwitchToken;
   if (state.sessionSwitchAbort) {
     try { state.sessionSwitchAbort.abort(); } catch { /* ignore */ }
@@ -1748,6 +1772,8 @@ async function resumeAgentSession(session) {
   }
   clearAgentTranscript(false);
   renderStoredHistory(history.messages || []);
+  restoreSessionDraft();
+  renderPromptQueue();
   setAgentEngineState("loading", "正在恢复引擎上下文…");
   updateConversationIdentity();
   connectAgentSocket();
@@ -2141,21 +2167,23 @@ function renderAgentStatus(status) {
   if (status.needs_bootstrap) state.agentNeedsBootstrap = true;
   const loading = state.agentEngineState === "loading";
   const composerReady = (stateName === "ready" && !loading) || state.agentEngineState === "bootstrap";
+  // busy 时输入区保持可用：消息进入排队 chip,turn 结束后自动发送。
+  const composerUsable = composerReady || busy;
   if ($("chatInput")) {
-    $("chatInput").disabled = !composerReady || busy;
+    $("chatInput").disabled = !composerUsable;
     $("chatInput").placeholder = busy
-      ? "正在生成…可点击停止"
+      ? "正在生成…输入将排队,完成后自动发送"
       : composerReady
         ? "随心输入…  输入 / 打开命令与 Skills"
         : "启动 Agent 后即可发送消息";
   }
   if ($("composerAccessSelect")) $("composerAccessSelect").disabled = !composerReady && !running;
   if ($("chatSendBtn")) {
-    $("chatSendBtn").hidden = busy;
     const hasContent = !!$("chatInput")?.value.trim() || state.pendingAttachments.length > 0;
-    $("chatSendBtn").disabled = !composerReady || busy || !hasContent;
+    $("chatSendBtn").disabled = !composerUsable || !hasContent;
+    $("chatSendBtn").title = busy ? "加入发送队列" : "";
   }
-  if ($("chatAttachBtn")) $("chatAttachBtn").disabled = !composerReady || busy;
+  if ($("chatAttachBtn")) $("chatAttachBtn").disabled = !composerUsable;
   if ($("composerModelSelect")) $("composerModelSelect").disabled = !composerReady || busy;
   if ($("composerStrengthSelect")) $("composerStrengthSelect").disabled = !composerReady || busy;
   if ($("chatStopBtn")) {
@@ -2172,7 +2200,7 @@ function renderAgentStatus(status) {
       ? "工具：本会话自动允许 · "
       : "";
     input.title = busy
-      ? "正在生成… Esc 或点击停止"
+      ? "正在生成… Enter 将消息加入队列 · Esc 或点击停止"
       : `${accessTip}Enter 发送 · Shift+Enter 换行`;
   }
   if (hint && statusRow) {
@@ -2201,6 +2229,7 @@ function connectAgentSocket() {
     // 服务端在 Subscribe 时会重放挂起审批，这里再主动拉取一次兜底
     // （也覆盖 plan_request 等挂起请求），恢复卡住的审批入口。
     fetchPendingAgentRequests();
+    reportClientVisibility();
   };
   socket.onmessage = (message) => {
     try {
@@ -2307,6 +2336,7 @@ function handleAgentEvent(event) {
       renderAgentStatus({ ...state.agentStatus, state: "ready", running: true, busy: false, error: "", needs_bootstrap: false });
       rebuildChatNodesFromDom();
       loadAgentSessions().catch(() => {});
+      flushPromptQueue();
       break;
     case "error":
       finalizeAssistantMessage();
@@ -3911,7 +3941,22 @@ function formatAgentPayloadObject(obj) {
 
 function appendAgentNotice(text, isError = false) {
   const notice = appendChatMessage("system", text);
-  if (isError) notice.classList.add("error");
+  if (isError) {
+    notice.classList.add("error");
+    // 失败回合内联重试：复用重新生成路径（重发上一轮用户消息）。
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "noticeRetryBtn";
+    retry.textContent = "重试";
+    retry.onclick = () => {
+      retry.disabled = true;
+      regenerateLastAssistant().catch((err) => {
+        retry.disabled = false;
+        toast(err.message || String(err), "error");
+      });
+    };
+    notice.append(retry);
+  }
 }
 
 function showAgentPermission(permission) {
@@ -4091,6 +4136,14 @@ async function startAgent() {
   state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
   if (!resumable) {
     state.activeAgentSession = { id: status.session_id, title: "新对话", cwd: status.cwd || cwd, model: status.model || "" };
+    // 无会话时打的草稿挂在 _new 键下;新会话落地后迁移过去。
+    const strayDraft = localStorage.getItem("gs.agent.draft._new");
+    if (strayDraft) {
+      localStorage.setItem(sessionStoreKey("draft"), strayDraft);
+      localStorage.removeItem("gs.agent.draft._new");
+    }
+    restoreSessionDraft();
+    renderPromptQueue();
   }
   renderAgentStatus(status);
   updateConversationIdentity();
@@ -4130,6 +4183,7 @@ async function newAgentSession(projectOrNull) {
   }
   if (matched) setProjectExpanded(matched.id, true);
 
+  saveSessionDraft(); // 旧会话草稿先落盘,再切到新会话
   state.activeAgentSession = null;
   let status;
   if (!agentIsRunning()) {
@@ -4143,6 +4197,14 @@ async function newAgentSession(projectOrNull) {
   setAgentEngineState("attached");
   state.activeAgentSession = { id: status.session_id, title: "新对话", cwd: status.cwd || cwd, model: status.model || "" };
   state.settings = { ...(state.settings || {}), agent_default_cwd: status.cwd || cwd };
+  // 无会话时打的草稿挂在 _new 键下;新会话落地后迁移过去,避免输入丢失。
+  const strayDraft = localStorage.getItem("gs.agent.draft._new");
+  if (strayDraft) {
+    localStorage.setItem(sessionStoreKey("draft"), strayDraft);
+    localStorage.removeItem("gs.agent.draft._new");
+  }
+  restoreSessionDraft();
+  renderPromptQueue();
   renderAgentStatus(status);
   updateConversationIdentity();
   persistLastChatContext({
@@ -4627,8 +4689,8 @@ function mediaReferenceIdentity(value, kind) {
   return `${kind}|${name || clean.toLowerCase()}`;
 }
 
-function buildOutboundAttachments() {
-  return state.pendingAttachments.map((att) => {
+function buildOutboundAttachments(atts = state.pendingAttachments) {
+  return atts.map((att) => {
     if (att.path) {
       return {
         kind: att.kind || "path",
@@ -4645,22 +4707,215 @@ function buildOutboundAttachments() {
   });
 }
 
+// ---- 会话草稿 / 输入历史 / 消息排队 / 置顶（localStorage,按会话隔离) ----
+
+function sessionStoreKey(kind, sessionId) {
+  return `gs.agent.${kind}.${sessionId || state.activeAgentSession?.id || "_new"}`;
+}
+
+function saveSessionDraft() {
+  const input = $("chatInput");
+  if (!input) return;
+  const key = sessionStoreKey("draft");
+  if (input.value.trim()) localStorage.setItem(key, input.value);
+  else localStorage.removeItem(key);
+}
+
+function scheduleDraftSave() {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(saveSessionDraft, 300);
+}
+
+function restoreSessionDraft() {
+  const input = $("chatInput");
+  if (!input) return;
+  input.value = localStorage.getItem(sessionStoreKey("draft")) || "";
+  inputHistIdx = -1;
+  autoGrowChatInput();
+  updateChatComposerState();
+}
+
+function clearSessionDraft() {
+  localStorage.removeItem(sessionStoreKey("draft"));
+}
+
+function loadInputHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(sessionStoreKey("hist"))) || [];
+  } catch {
+    return [];
+  }
+}
+
+function pushInputHistory(text) {
+  const value = (text || "").trim();
+  if (!value) return;
+  const items = loadInputHistory().filter((v) => v !== value);
+  items.unshift(value);
+  localStorage.setItem(sessionStoreKey("hist"), JSON.stringify(items.slice(0, 50)));
+}
+
+function recallInputHistory(direction) {
+  const input = $("chatInput");
+  if (!input) return;
+  const hist = loadInputHistory();
+  if (!hist.length) return;
+  if (direction < 0) {
+    // ↑:空输入或光标仍在第一行时才接管（多行文本内移动不劫持）。
+    const beforeCursor = input.value.slice(0, input.selectionStart ?? 0);
+    if (inputHistIdx < 0 && beforeCursor.includes("\n")) return;
+    if (inputHistIdx < 0) {
+      inputHistStash = input.value;
+      inputHistIdx = 0;
+    } else if (inputHistIdx < hist.length - 1) {
+      inputHistIdx++;
+    } else {
+      return;
+    }
+    input.value = hist[inputHistIdx];
+  } else {
+    if (inputHistIdx < 0) return;
+    inputHistIdx--;
+    input.value = inputHistIdx < 0 ? inputHistStash : hist[inputHistIdx];
+  }
+  input.setSelectionRange(input.value.length, input.value.length);
+  autoGrowChatInput();
+  updateChatComposerState();
+}
+
+function enqueuePrompt(text, attachments) {
+  state.promptQueue.push({
+    id: ++promptQueueSeq,
+    text,
+    attachments,
+    sessionID: state.activeAgentSession?.id || state.agentStatus?.session_id || "",
+  });
+  $("chatInput").value = "";
+  clearSessionDraft();
+  clearChatAttachments();
+  autoGrowChatInput();
+  if ($("chatSendBtn")) $("chatSendBtn").disabled = true;
+  renderPromptQueue();
+}
+
+function renderPromptQueue() {
+  const wrap = $("chatPromptQueue");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const sid = state.agentStatus?.session_id || state.activeAgentSession?.id || "";
+  // 只展示属于当前会话的排队消息;切走的条目留在队列里不显示。
+  const items = state.promptQueue.filter((it) => !it.sessionID || it.sessionID === sid);
+  wrap.hidden = items.length === 0;
+  if (!items.length) return;
+  for (const item of items) {
+    const chip = document.createElement("div");
+    chip.className = "promptQueueItem";
+    const label = document.createElement("span");
+    label.className = "promptQueueText";
+    label.textContent = item.text || `${item.attachments?.length || 0} 个附件`;
+    label.title = "点击编辑 · " + (item.text || "");
+    label.onclick = () => {
+      // 取回编辑：内容回到输入框，条目移出队列。
+      state.promptQueue = state.promptQueue.filter((q) => q.id !== item.id);
+      $("chatInput").value = item.text;
+      state.pendingAttachments = (item.attachments || []).slice();
+      renderChatAttachments();
+      autoGrowChatInput();
+      updateChatComposerState();
+      // busy 中 updateChatComposerState 早退,这里直接按内容恢复发送键。
+      if ($("chatSendBtn")) {
+        $("chatSendBtn").disabled = !($("chatInput").value.trim() || state.pendingAttachments.length);
+      }
+      $("chatInput").focus();
+      renderPromptQueue();
+    };
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "promptQueueRemove";
+    del.setAttribute("aria-label", "移出队列");
+    del.textContent = "×";
+    del.onclick = () => {
+      (item.attachments || []).forEach(releaseAttachmentPreview);
+      state.promptQueue = state.promptQueue.filter((q) => q.id !== item.id);
+      renderPromptQueue();
+    };
+    chip.append(label, del);
+    wrap.append(chip);
+  }
+  const stopSend = document.createElement("button");
+  stopSend.type = "button";
+  stopSend.className = "promptQueueStopSend";
+  stopSend.textContent = "停止并发送";
+  stopSend.title = "中断当前生成,立即发送队首消息";
+  stopSend.onclick = async () => {
+    await cancelAgentGeneration();
+    // cancel 后 turn_done 事件会触发 flush;若已空闲则直接发。
+    if (!(state.agentStatus?.busy || state.agentStatus?.state === "busy")) {
+      flushPromptQueue();
+    }
+  };
+  wrap.append(stopSend);
+}
+
+function flushPromptQueue() {
+  const sid = state.agentStatus?.session_id || state.activeAgentSession?.id || "";
+  // 只发属于当前引擎会话的排队消息;切了会话的条目留在队列里。
+  const idx = state.promptQueue.findIndex((it) => !it.sessionID || it.sessionID === sid);
+  if (idx < 0) {
+    renderPromptQueue();
+    return;
+  }
+  const [item] = state.promptQueue.splice(idx, 1);
+  renderPromptQueue();
+  dispatchAgentPrompt(item.text, item.attachments).catch((err) => toast(err.message || String(err), "error"));
+}
+
+function toggleSessionPin(session) {
+  if (!session?.id) return;
+  if (state.pinnedSessions.has(session.id)) state.pinnedSessions.delete(session.id);
+  else state.pinnedSessions.add(session.id);
+  localStorage.setItem("gs.session_pins", JSON.stringify([...state.pinnedSessions]));
+  renderSidebarTree();
+}
+
+function sortSessionsPinned(sessions) {
+  if (!state.pinnedSessions.size) return sessions;
+  return sessions.slice().sort((a, b) => {
+    const pa = state.pinnedSessions.has(a.id) ? 0 : 1;
+    const pb = state.pinnedSessions.has(b.id) ? 0 : 1;
+    return pa - pb;
+  });
+}
+
+function reportClientVisibility() {
+  if (agentSocket?.readyState === WebSocket.OPEN) {
+    agentSocket.send(JSON.stringify({ type: "client_visibility", hidden: document.hidden }));
+  }
+}
+
 function updateChatComposerState() {
   // Refresh send button enablement to account for attachments-only messages.
   if (state.agentStatus?.state !== "ready" || state.agentEngineState === "loading") return;
   const hasText = !!$("chatInput")?.value.trim();
   const hasAttachments = !!state.pendingAttachments.length;
-  if ($("chatSendBtn")) $("chatSendBtn").disabled = (!hasText && !hasAttachments) || state.agentStatus?.busy;
+  if ($("chatSendBtn")) $("chatSendBtn").disabled = !hasText && !hasAttachments;
 }
 
 async function sendAgentMessage() {
   const text = $("chatInput").value.trim();
-  const attachments = buildOutboundAttachments();
+  // 队列存显示形状附件（保留 preview/dataUrl);出站转换在 dispatch 内做。
+  const attachments = state.pendingAttachments.slice();
   if (!text && !attachments.length) return;
+  // 生成中不拒绝输入：进入排队 chip,turn 结束后按序自动发送。
   if (state.agentStatus?.state === "busy" || state.agentStatus?.busy) {
-    toast("正在生成回复，请先停止或等待完成", "error");
+    enqueuePrompt(text, attachments);
     return;
   }
+  await dispatchAgentPrompt(text, attachments);
+}
+
+// dispatchAgentPrompt 执行真正的发送（busy 检查已由调用方完成）。
+async function dispatchAgentPrompt(text, attachments) {
   // 工作区一致性守卫：用户切换了项目/目录（agentCwd）但引擎还挂在旧目录的
   // 会话上时，直接发消息会让工具继续跑在旧目录（检索到错误的项目）。
   // 此时自动把引擎迁到新目录的新会话，保证"当前工作区 = 会话 cwd"。
@@ -4704,10 +4959,18 @@ async function sendAgentMessage() {
     return;
   }
   state.lastUserMessage = text;
-  appendChatMessage("user", text, "", true, state.pendingAttachments.slice());
+  appendChatMessage("user", text, "", true, (attachments || []).slice());
   if (state.activeAgentSession && (!state.activeAgentSession.title || state.activeAgentSession.title === "新对话")) {
     state.activeAgentSession.title = (text || "附件消息").replace(/\s+/g, " ").slice(0, 60);
     updateConversationIdentity();
+    // 标题回写 store:ACP 会话经侧车文件落盘(native 服务端已自动命名,
+    // 这里发同名标题是幂等覆盖,顺带兜底 WS 时序)。
+    if (state.activeAgentSession.id) {
+      api("/api/agent/session/rename", {
+        method: "POST",
+        body: JSON.stringify({ session_id: state.activeAgentSession.id, title: state.activeAgentSession.title }),
+      }).then(() => loadAgentSessions().catch(() => {})).catch(() => {});
+    }
   }
   persistLastChatContext({
     sessionId: state.activeAgentSession?.id || state.agentStatus?.session_id,
@@ -4718,6 +4981,9 @@ async function sendAgentMessage() {
   agentActiveAssistant = null;
   agentActiveThought = null;
   agentRetryNotice = null;
+  pushInputHistory(text);
+  clearSessionDraft();
+  inputHistIdx = -1;
   $("chatInput").value = "";
   autoGrowChatInput();
   clearChatAttachments();
@@ -4725,7 +4991,7 @@ async function sendAgentMessage() {
   const _m = $("composerModelSelect")?.value || "";
   const _rawS = $("composerStrengthSelect")?.value || "";
   const _s = _rawS === "auto" ? "" : _rawS;
-  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments, model: _m, strength: _s }));
+  agentSocket.send(JSON.stringify({ type: "user_message", text, attachments: buildOutboundAttachments(attachments), model: _m, strength: _s }));
   renderAgentStatus({ ...state.agentStatus, state: "busy", running: true, busy: true });
 }
 
@@ -6567,6 +6833,7 @@ $("chatInput").oninput = () => {
   autoGrowChatInput();
   renderAgentStatus(state.agentStatus);
   showSkillsPopup();
+  scheduleDraftSave();
 };
 // 输入框自动增高：多行内容在固定 50px 盒内滚动是最直观的粗糙感。
 function autoGrowChatInput() {
@@ -6611,6 +6878,21 @@ $("chatInput").onkeydown = (event) => {
     const prev = skillsPopupIdx <= 0 ? skillsPopupVisible.length - 1 : skillsPopupIdx - 1;
     skillsPopupIdx = prev;
     highlightSkillsPopupItems();
+    return;
+  }
+  // popup 关闭时 ↑/↓ 接管为输入历史回忆（shell 式）。
+  if (event.key === "ArrowUp" && !popupOpen) {
+    const hist = loadInputHistory();
+    const beforeCursor = event.target.value.slice(0, event.target.selectionStart ?? 0);
+    if (hist.length && (inputHistIdx >= 0 || !beforeCursor.includes("\n"))) {
+      event.preventDefault();
+      recallInputHistory(-1);
+    }
+    return;
+  }
+  if (event.key === "ArrowDown" && !popupOpen && inputHistIdx >= 0) {
+    event.preventDefault();
+    recallInputHistory(1);
   }
 };
 if ($("skillsSearch")) {
@@ -7276,7 +7558,11 @@ function scheduleRefresh() {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") scheduleRefresh();
+  reportClientVisibility();
 });
+
+// 草稿保存有 300ms 节流;关页前把最后一版落盘,避免丢尾字。
+window.addEventListener("beforeunload", saveSessionDraft);
 
 $("updateDismissBtn")?.addEventListener("click", () => {
   state.updateHidden = true;
@@ -7762,7 +8048,7 @@ function renderAgentProjects() {
           : (project.trusted ? "暂无会话，点 ✎ 新建" : "信任后可在此创建会话");
         children.append(empty);
       } else {
-        for (const session of sessions) {
+        for (const session of sortSessionsPinned(sessions)) {
           // Nested under project: path is implied by parent workspace.
           children.append(buildSessionItemEl(session, { nested: true, showPath: false }));
         }

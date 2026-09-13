@@ -27,6 +27,11 @@ type SessionSummary struct {
 	// CwdMissing is true when the recorded working directory no longer exists.
 	// Such sessions remain listed so the user can fix the path or delete them.
 	CwdMissing bool `json:"cwd_missing,omitempty"`
+	// Preview 是末条用户/助手消息的短摘要（会话列表第二行）；仅 native
+	// 引擎填充，ACP 会话恒为空。
+	Preview string `json:"preview,omitempty"`
+	// ForkedFrom 记录分叉来源会话 ID（仅 native 分叉会话非空）。
+	ForkedFrom string `json:"forked_from,omitempty"`
 }
 
 type HistoryMessage struct {

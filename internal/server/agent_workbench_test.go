@@ -274,6 +274,18 @@ func TestNotifyAgentEventIfHidden(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("可见客户端时不应通知: %v", got)
 	}
+	srv.agentVisible.Add(-1)
+	// 客户端关闭通知（notify_muted）时静默。
+	srv.agentMuted.Add(1)
+	srv.notifyAgentEventIfHidden(agentbridge.Event{Type: "turn_done", SessionID: "s2"})
+	if len(got) != 1 {
+		t.Fatalf("静音连接存在时不应通知: %v", got)
+	}
+	srv.agentMuted.Add(-1)
+	srv.notifyAgentEventIfHidden(agentbridge.Event{Type: "turn_done", SessionID: "s3"})
+	if len(got) != 2 {
+		t.Fatalf("解除静音后应恢复通知: %v", got)
+	}
 }
 
 // stubACPService 是不实现 ForkStoredSession 的桩（模拟 ACP 引擎）。

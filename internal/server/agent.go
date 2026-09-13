@@ -497,6 +497,9 @@ type agentSocketMessage struct {
 	Scope string `json:"scope,omitempty"`
 	// Hidden 仅 client_visibility 使用：页面 visibilitychange 上报。
 	Hidden bool `json:"hidden,omitempty"`
+	// NotifyMuted 仅 client_visibility 使用：指针区分"未携带"与显式 false，
+	// 未携带时保持该连接原静音状态。
+	NotifyMuted *bool `json:"notify_muted,omitempty"`
 }
 
 func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -528,13 +531,17 @@ func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 每连接可见性：默认可见，client_visibility 消息翻转；全局计数
 	// 为 0 时桌面通知接管（见 startAgentNotifyLoop）。
 	connHidden := &atomic.Bool{}
+	connMuted := &atomic.Bool{}
 	s.agentVisible.Add(1)
 	defer func() {
 		if !connHidden.Load() {
 			s.agentVisible.Add(-1)
 		}
+		if connMuted.Load() {
+			s.agentMuted.Add(-1)
+		}
 	}()
-	go s.readAgentSocket(ctx, cancel, conn, replies, connHidden)
+	go s.readAgentSocket(ctx, cancel, conn, replies, connHidden, connMuted)
 
 	status := s.Agent.Status()
 	auto := status.SessionAutoApprove
@@ -560,7 +567,7 @@ func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, replies chan<- agentbridge.Event, connHidden *atomic.Bool) {
+func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, replies chan<- agentbridge.Event, connHidden, connMuted *atomic.Bool) {
 	defer cancel()
 	for {
 		var message agentSocketMessage
@@ -606,6 +613,15 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 				}
 			} else if connHidden.Swap(false) {
 				s.agentVisible.Add(1)
+			}
+			if message.NotifyMuted != nil {
+				if *message.NotifyMuted {
+					if !connMuted.Swap(true) {
+						s.agentMuted.Add(1)
+					}
+				} else if connMuted.Swap(false) {
+					s.agentMuted.Add(-1)
+				}
 			}
 			continue
 		case "plan_response":
@@ -947,7 +963,7 @@ func (s *Server) startAgentNotifyLoop() {
 // notifyAgentEventIfHidden 在 permission_request / turn_done 且页面不可见时
 // 发桌面通知。同 key 5 秒内去重（pending 审批重放不会连环轰炸）。
 func (s *Server) notifyAgentEventIfHidden(ev agentbridge.Event) {
-	if s.agentVisible.Load() > 0 {
+	if s.agentVisible.Load() > 0 || s.agentMuted.Load() > 0 {
 		return
 	}
 	var title, body, key string

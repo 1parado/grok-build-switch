@@ -1274,6 +1274,7 @@ async function loadAgentSessions(query = $("agentSessionSearch")?.value || "") {
   const sessions = await api(`/api/agent/sessions?limit=100&query=${encodeURIComponent(query.trim())}`);
   state.agentSessions = Array.isArray(sessions) ? sessions : [];
   renderSidebarTree();
+  renderEmptyRecentSessions(); // 空态"最近会话"卡随列表刷新
   return state.agentSessions;
 }
 
@@ -2446,6 +2447,7 @@ function chatEmptyMarkup() {
       <button type="button" class="chatEmptyPrompt" data-prompt="帮我写一个自动化脚本，完成一个小而完整的任务。">写一个自动化脚本</button>
       <button type="button" class="chatEmptyPrompt" data-prompt="生成一张配图：">生成一张配图</button>
     </div>
+    <div id="chatEmptyRecent" class="chatEmptyRecent" hidden></div>
   </div>`;
 }
 
@@ -2548,6 +2550,41 @@ function renderChatEmptyState(status = state.agentStatus) {
       <button type="button" id="chatEmptyOpenContextBtn" class="btn sm">会话信息</button>`;
     bindChatEmptyActions();
   }
+  renderEmptyRecentSessions();
+}
+
+// 空态放"最近会话"快捷续聊卡——没会话时这块隐藏。
+function renderEmptyRecentSessions() {
+  const wrap = $("chatEmptyRecent");
+  if (!wrap) return;
+  const recent = (state.agentSessions || [])
+    .slice()
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
+    .slice(0, 3);
+  wrap.innerHTML = "";
+  if (!recent.length) {
+    wrap.hidden = true;
+    return;
+  }
+  const label = document.createElement("span");
+  label.className = "chatEmptyRecentLabel";
+  label.textContent = "继续最近会话";
+  wrap.append(label);
+  for (const session of recent) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chatEmptyRecentItem";
+    const name = document.createElement("span");
+    name.className = "chatEmptyRecentTitle";
+    name.textContent = session.title || "未命名会话";
+    const sub = document.createElement("span");
+    sub.className = "chatEmptyRecentMeta";
+    sub.textContent = [formatSessionTime(session.updated_at), session.preview].filter(Boolean).join(" · ");
+    btn.append(name, sub);
+    btn.onclick = () => resumeAgentSession(session).catch((err) => toast(err.message || String(err), "error"));
+    wrap.append(btn);
+  }
+  wrap.hidden = false;
 }
 
 function removeChatEmpty() {
@@ -2853,12 +2890,21 @@ function appendHistoryMessage(message) {
   switch (message.role) {
     case "user": {
       const { text, attachments, media } = historyUserPresentation(message);
-      appendChatMessage("user", text, "", true, attachments, media, sessionID);
+      const el = appendChatMessage("user", text, "", true, attachments, media, sessionID);
+      if (message.seq) {
+        el.dataset.seq = message.seq;
+        addForkActionIfSeq(el);
+      }
       break;
     }
-    case "assistant":
-      appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true, null, message.media || [], sessionID);
+    case "assistant": {
+      const el = appendChatMessage("assistant", message.content || "", message.model || state.activeAgentSession?.model || "", true, null, message.media || [], sessionID);
+      if (message.seq) {
+        el.dataset.seq = message.seq;
+        addForkActionIfSeq(el);
+      }
       break;
+    }
     case "thought":
       appendThoughtChunk(message.content || "");
       agentActiveThought = null;
@@ -3267,6 +3313,163 @@ function appendChatMessage(role, text, model = "", final = false, attachments = 
   if (!historyMountSilent) scrollChatToBottom();
   return article;
 }
+
+// 带 transcript seq 的消息(native 历史)追加"分叉"操作:从此处开新会话。
+// ACP 会话与流式新消息没有 seq,不显示该入口。
+function addForkActionIfSeq(article) {
+  if (!article?.dataset.seq) return;
+  const actions = article.querySelector(".chatMessageActions");
+  if (!actions || actions.querySelector('[data-action="fork"]')) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "messageActionBtn";
+  btn.dataset.action = "fork";
+  btn.textContent = "分叉";
+  btn.title = "把截至这条消息的对话复制为新会话,继续从这里聊";
+  btn.onclick = () => forkSessionFrom(Number(article.dataset.seq)).catch((err) => toast(err.message || String(err), "error"));
+  actions.append(btn);
+}
+
+async function forkSessionFrom(uptoSeq) {
+  const sid = state.activeAgentSession?.id || state.agentStatus?.session_id;
+  if (!sid) throw new Error("当前没有会话");
+  const res = await api("/api/agent/session/fork", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sid, upto_seq: uptoSeq || 0 }),
+  });
+  if (!res?.session?.id) throw new Error("分叉失败：服务端未返回新会话");
+  toast("已分叉到新会话", "success");
+  await loadAgentSessions().catch(() => {});
+  await resumeAgentSession(res.session);
+}
+
+function exportSessionMarkdown() {
+  const sid = state.activeAgentSession?.id || state.agentStatus?.session_id;
+  if (!sid) {
+    toast("当前没有可导出的会话", "info");
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = `/api/agent/session/export?id=${encodeURIComponent(sid)}`;
+  a.download = "";
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+// ---- ⌘K 命令面板 ----
+
+let cmdkIdx = 0;
+let cmdkItems = [];
+
+function cmdkCommands() {
+  const busy = state.agentStatus?.state === "busy" || state.agentStatus?.busy;
+  const hasSession = !!(state.activeAgentSession?.id || state.agentStatus?.session_id);
+  const lastText = lastAssistantMessageEl?._rawText || "";
+  return [
+    { icon: "＋", label: "新会话", hint: "在当前工作目录开新对话", run: () => newAgentSession().catch((e) => toast(e.message, "error")) },
+    { icon: "■", label: "停止生成", hint: "中断当前回复", when: busy, run: () => cancelAgentGeneration().catch(() => {}) },
+    { icon: "↻", label: "重新生成最后回复", hint: "回退上轮并重发", when: hasSession && !busy, run: () => regenerateLastAssistant().catch((e) => toast(e.message, "error")) },
+    { icon: "⤓", label: "导出会话 Markdown", hint: "下载当前会话 .md", when: hasSession, run: exportSessionMarkdown },
+    { icon: "⑃", label: "会话内查找", hint: "⌘F", run: () => openChatFindBar?.() },
+    { icon: "◧", label: "切换会话信息栏", hint: "右侧 Context 栏", run: () => toggleContextRail() },
+    { icon: "☰", label: "切换会话侧栏", hint: "左侧会话列表", run: () => toggleSessionSidebar() },
+    { icon: "⧉", label: "复制最后回复", hint: "复制助手最后一条消息", when: !!lastText, run: () => copyText(lastText, "已复制回复") },
+    { icon: "⌨", label: "聚焦输入框", run: () => $("chatInput")?.focus() },
+  ];
+}
+
+function cmdkFiltered(query) {
+  const q = String(query || "").trim().toLowerCase();
+  const cmds = cmdkCommands().filter((c) => c.when === undefined || c.when)
+    .filter((c) => !q || c.label.toLowerCase().includes(q))
+    .map((c) => ({ kind: "cmd", ...c }));
+  const sessions = (state.agentSessions || [])
+    .filter((s) => !q || (s.title || "").toLowerCase().includes(q) || (s.preview || "").toLowerCase().includes(q))
+    .slice(0, q ? 8 : 4)
+    .map((s) => ({
+      kind: "session", icon: "◔", label: s.title || "未命名会话",
+      hint: s.preview || s.cwd || "",
+      run: () => resumeAgentSession(s).catch((e) => toast(e.message, "error")),
+    }));
+  return [...cmds, ...sessions];
+}
+
+function openCmdk() {
+  const overlay = $("cmdkOverlay");
+  if (!overlay) return;
+  overlay.hidden = false;
+  const input = $("cmdkInput");
+  input.value = "";
+  cmdkIdx = 0;
+  renderCmdkList("");
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeCmdk() {
+  const overlay = $("cmdkOverlay");
+  if (overlay) overlay.hidden = true;
+}
+
+function renderCmdkList(query) {
+  const list = $("cmdkList");
+  if (!list) return;
+  cmdkItems = cmdkFiltered(query);
+  cmdkIdx = Math.min(cmdkIdx, Math.max(0, cmdkItems.length - 1));
+  list.innerHTML = "";
+  if (!cmdkItems.length) {
+    list.innerHTML = `<div class="cmdkEmpty">没有匹配的命令或会话</div>`;
+    return;
+  }
+  cmdkItems.forEach((item, i) => {
+    const row = document.createElement("div");
+    row.className = `cmdkItem${i === cmdkIdx ? " active" : ""}`;
+    row.setAttribute("role", "option");
+    row.innerHTML = `<span class="cmdkIcon"></span><span class="cmdkLabel"></span><span class="cmdkHint"></span>`;
+    row.querySelector(".cmdkIcon").textContent = item.icon;
+    row.querySelector(".cmdkLabel").textContent = item.label;
+    row.querySelector(".cmdkHint").textContent = item.hint || "";
+    row.onclick = () => { closeCmdk(); item.run(); };
+    row.onmousemove = () => { if (cmdkIdx !== i) { cmdkIdx = i; markCmdkActive(); } };
+    list.append(row);
+  });
+}
+
+function markCmdkActive() {
+  $("cmdkList")?.querySelectorAll(".cmdkItem").forEach((el, i) => {
+    el.classList.toggle("active", i === cmdkIdx);
+    if (i === cmdkIdx) el.scrollIntoView({ block: "nearest" });
+  });
+}
+
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    const overlay = $("cmdkOverlay");
+    if (overlay && !overlay.hidden) closeCmdk(); else openCmdk();
+    return;
+  }
+  const overlay = $("cmdkOverlay");
+  if (!overlay || overlay.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCmdk();
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (cmdkItems.length) { cmdkIdx = (cmdkIdx + 1) % cmdkItems.length; markCmdkActive(); }
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (cmdkItems.length) { cmdkIdx = cmdkIdx <= 0 ? cmdkItems.length - 1 : cmdkIdx - 1; markCmdkActive(); }
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    const item = cmdkItems[cmdkIdx];
+    if (item) { closeCmdk(); item.run(); }
+  }
+});
+$("cmdkInput")?.addEventListener("input", (e) => { cmdkIdx = 0; renderCmdkList(e.target.value); });
+$("cmdkOverlay")?.addEventListener("click", (e) => { if (e.target.id === "cmdkOverlay") closeCmdk(); });
+$("openCmdkBtn")?.addEventListener("click", openCmdk);
+$("exportSessionBtn")?.addEventListener("click", exportSessionMarkdown);
 
 function refreshMessageActionButtons() {
   const busy = state.agentStatus?.state === "busy" || !!state.agentStatus?.busy;
@@ -4957,8 +5160,21 @@ function sortSessionsPinned(sessions) {
 
 function reportClientVisibility() {
   if (agentSocket?.readyState === WebSocket.OPEN) {
-    agentSocket.send(JSON.stringify({ type: "client_visibility", hidden: document.hidden }));
+    agentSocket.send(JSON.stringify({
+      type: "client_visibility",
+      hidden: document.hidden,
+      // "后台时通知我"开关反转后上报；指针语义,未携带字段时服务端保持原值
+      notify_muted: !($("agentNotifyToggle")?.checked ?? true),
+    }));
   }
+}
+// 通知开关持久化在本地;变更后立即随可见性报文同步给服务端。
+$("agentNotifyToggle")?.addEventListener("change", (e) => {
+  localStorage.setItem("gs_agent_notify", e.target.checked ? "1" : "0");
+  reportClientVisibility();
+});
+if (localStorage.getItem("gs_agent_notify") === "0" && $("agentNotifyToggle")) {
+  $("agentNotifyToggle").checked = false;
 }
 
 // ---- 用量 meter / 任务清单 / 实时遥测 / 文件改动卡（呈现层) ----

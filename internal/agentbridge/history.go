@@ -40,6 +40,9 @@ type HistoryMessage struct {
 	Model   string         `json:"model,omitempty"`
 	Tool    *ToolEvent     `json:"tool,omitempty"`
 	Media   []MediaContent `json:"media,omitempty"`
+	// Seq 是 native transcript 的记录序号,"从此处分叉"按它传 upto_seq;
+	// ACP 会话没有该字段(恒 0,前端不显示分叉入口)。
+	Seq int64 `json:"seq,omitempty"`
 }
 
 type SessionHistory struct {

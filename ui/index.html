@@ -357,6 +357,8 @@
                 <button type="button" id="pickCwdTopBtn" class="openLocationCaret" title="选择工作目录" aria-label="选择工作目录">▾</button>
               </div>
               <span id="agentModelBadge" class="modelBadge" hidden>MODEL —</span>
+              <button type="button" id="openCmdkBtn" class="nativeIconBtn" aria-label="命令面板" title="命令面板 ⌘K">⌘K</button>
+              <button type="button" id="exportSessionBtn" class="nativeIconBtn" aria-label="导出会话 Markdown" title="导出会话为 Markdown">⤓</button>
               <button type="button" id="openChatThemeBtn" class="nativeIconBtn themeToggle"
                 aria-label="设置聊天背景" aria-haspopup="dialog" title="聊天背景">◐</button>
               <button type="button" id="openContextRailBtn" class="nativeIconBtn railToggle" aria-label="打开会话信息" title="会话信息">···</button>
@@ -391,6 +393,7 @@
                 <button type="button" class="chatEmptyPrompt" data-prompt="帮我写一个自动化脚本，完成一个小而完整的任务。">写一个自动化脚本</button>
                 <button type="button" class="chatEmptyPrompt" data-prompt="生成一张配图：">生成一张配图</button>
               </div>
+              <div id="chatEmptyRecent" class="chatEmptyRecent" hidden></div>
             </div>
           </div>
 
@@ -433,7 +436,7 @@
               <div class="composerStage">
                 <div class="composerInputWrap">
                   <div class="composerFieldGlow" aria-hidden="true"></div>
-                  <textarea id="chatInput" rows="2" placeholder="随心输入…  输入 / 打开命令与 Skills" aria-label="消息" disabled></textarea>
+                  <textarea id="chatInput" rows="1" placeholder="随心输入…  输入 / 打开命令与 Skills" aria-label="消息" disabled></textarea>
                   <div id="skillsPopup" class="skillsPopup slashPopup" hidden role="listbox" aria-label="斜杠命令与 Skills">
                     <div class="skillsPopupHead">
                       <div class="skillsPopupHeadLeft">
@@ -549,6 +552,9 @@
           </label>
           <label class="check autoApproveCheck" title="本会话自动允许工具，无需重启进程">
             <input type="checkbox" id="agentSessionAutoApprove"> 本会话自动批准
+          </label>
+          <label class="check autoApproveCheck" title="页面切到后台时，权限请求与回合完成发桌面通知">
+            <input type="checkbox" id="agentNotifyToggle" checked> 后台时通知我
           </label>
           <div class="contextActions">
             <button type="button" id="agentStartBtn" class="btn primary">启动 Agent</button>
@@ -1266,6 +1272,15 @@
     <p class="chatThemeHint">支持 PNG、JPEG、WebP，最大 16 MB。图片会在本机压缩后保存；建议使用不含文字和界面元素的 16:9 背景。</p>
   </dialog>
 
+  <!-- ⌘K 命令面板：命令 + 会话跳转 -->
+  <div id="cmdkOverlay" class="cmdkOverlay" hidden>
+    <div class="cmdkPanel" role="dialog" aria-modal="true" aria-label="命令面板">
+      <input id="cmdkInput" class="cmdkInput" placeholder="输入命令或会话名…" autocomplete="off" spellcheck="false">
+      <div id="cmdkList" class="cmdkList" role="listbox"></div>
+      <div class="cmdkFoot"><span>↑↓ 选择</span><span>Enter 执行</span><span>Esc 关闭</span></div>
+    </div>
+  </div>
+
   <!-- 统一确认/输入对话框：替代 window.confirm / window.prompt（API 见 app.js appConfirm/appPrompt） -->
   <dialog id="appDialog" class="appDialog" aria-labelledby="appDialogTitle">
     <form method="dialog" class="appDialogForm">
@@ -1287,6 +1302,6 @@
   <script src="/vendor/katex/contrib/auto-render.min.js?v=0.18.0"></script>
   <!-- mermaid (~3.5MB) is lazy-loaded by app.js only when a diagram is present -->
   <script src="/i18n.js?v=2"></script>
-  <script src="/app.js?v=59"></script>
+  <script src="/app.js?v=60"></script>
 </body>
 </html>

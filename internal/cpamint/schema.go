@@ -38,7 +38,12 @@ const (
 	DeviceApproveURL   = "https://auth.x.ai/oauth2/device/approve"
 	DefaultBaseURL     = "https://cli-chat-proxy.grok.com/v1"
 	DefaultRedirectURI = "http://127.0.0.1:56121/callback"
-	Scope              = "openid profile email offline_access grok-cli:access api:access"
+	// Scope 对齐官方 grok CLI（xai-org/grok-build
+	// crates/codegen/xai-grok-login/src/config.rs 的 default_oauth2_scopes）。
+	// 此前缺 conversations:read/write 与 workspaces:read/write：实测上游
+	// cli-chat-proxy 对只有基础 scope 的 token 只回加密 reasoning（summary
+	// 恒为空），明文思考疑似被 conversations/workspaces scope 门控。
+	Scope = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write"
 )
 
 var defaultClientHeaders = map[string]string{

@@ -31,6 +31,7 @@ import (
 	"grok_switch/internal/switcher"
 	"grok_switch/internal/tray"
 	"grok_switch/internal/updatecheck"
+	"grok_switch/internal/webpool"
 )
 
 func main() {
@@ -105,6 +106,12 @@ func main() {
 		fatal(err)
 	}
 	defer registrarService.Close()
+	// Web 通道号池（grok2api 式）：SSO cookie → grok.com 网页 API。
+	// 与 CLI OAuth 号池并列；思考以 reasoning_content 返回。
+	webPool, err := webpool.NewManager(resolved.WebPoolDir)
+	if err != nil {
+		fatal(err)
+	}
 	sw := &switcher.Switcher{
 		ConfigPath: resolved.GrokConfig,
 		BackupsDir: resolved.BackupsDir,
@@ -133,6 +140,7 @@ func main() {
 		RemoteAccess:  remoteaccess.NewStore(resolved.RemoteAccessFile),
 		GrokAuth:      grokAuthStore,
 		GrokPool:      grokPool,
+		WebPool:       webPool,
 		CpaMint:       cpamint.NewService(),
 		Registrar:     registrarService,
 		Switcher:      sw,

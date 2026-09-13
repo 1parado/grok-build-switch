@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -87,6 +88,13 @@ type Server struct {
 	grokClientMu           sync.Mutex
 	grokUpstreamTransport  http.RoundTripper
 	grokUpstreamHTTPClient *http.Client
+
+	// agentVisible 计数当前"可见"的 agent WS 连接（页面 hidden 时经
+	// client_visibility 消息下调）。为 0 时 permission_request /
+	// turn_done 事件由常驻订阅者补发桌面通知。
+	agentVisible  atomic.Int64
+	agentNotifyMu sync.Mutex
+	agentNotifyAt map[string]time.Time
 }
 
 func (s *Server) SetOnChanged(fn func()) {
@@ -183,6 +191,7 @@ func (s *Server) Listen(preferred int) (*http.Server, int, error) {
 	s.bindHost = bindHost
 	s.httpServer = srv
 	s.listenerMu.Unlock()
+	s.startAgentNotifyLoop()
 	go func() {
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			fmt.Fprintf(os.Stderr, "http server: %v\n", err)
@@ -282,6 +291,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/agent/media", s.handleAgentMedia)
 	mux.HandleFunc("/api/agent/session/rename", s.handleAgentRename)
 	mux.HandleFunc("/api/agent/session/delete", s.handleAgentDelete)
+	mux.HandleFunc("/api/agent/session/fork", s.handleAgentFork)
+	mux.HandleFunc("/api/agent/session/export", s.handleAgentExport)
 	mux.HandleFunc("/api/agent/upload", s.handleAgentUpload)
 	mux.HandleFunc("/api/agent/rewind", s.handleAgentRewind)
 	mux.HandleFunc("/api/agent/plan", s.handleAgentPlan)

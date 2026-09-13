@@ -38,6 +38,11 @@ type SessionMeta struct {
 	Engine       string    `json:"engine"` // 固定 "native"
 	MessageCount int       `json:"message_count"`
 	UserTurns    int       `json:"user_turns"`
+	// Preview 是末条用户/助手消息的短摘要（列表第二行）；AppendRecord
+	// 顺手维护，不额外读 transcript。
+	Preview string `json:"preview,omitempty"`
+	// ForkedFrom 记录分叉来源会话 ID。
+	ForkedFrom string `json:"forked_from,omitempty"`
 }
 
 // NewStore 打开会话存储根目录。
@@ -200,7 +205,124 @@ func (s *Store) AppendRecord(id string, rec Record) error {
 	}
 	meta.MessageCount++
 	meta.UpdatedAt = time.Now()
+	// 列表摘要保持"最后一条有正文的人话"：工具记录的 Text 是结构化
+	// JSON（ResultJSON），直接展示是噪声。
+	if (rec.Origin == OriginUser || rec.Origin == OriginAssistant) && rec.Role != llm.RoleTool {
+		if preview := derivePreview(rec.Text); preview != "" {
+			meta.Preview = preview
+		}
+	}
 	return s.writeMetaLocked(meta)
+}
+
+// derivePreview 折叠空白并截断为列表摘要。
+func derivePreview(text string) string {
+	s := strings.Join(strings.Fields(text), " ")
+	const max = 80
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
+// Fork 复制会话中 seq<=uptoSeq 的记录为新会话（uptoSeq<=0 表示全部）。
+// 截断点若落在工具调用序列中间（assistant 带 ToolCalls 但 tool 结果未齐），
+// 会向前回退到最近一条干净边界，避免回放时产生悬空 tool_call。
+func (s *Store) Fork(id string, uptoSeq int64) (SessionMeta, error) {
+	src, err := s.GetMeta(id)
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	records, err := s.LoadRecords(id)
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	if uptoSeq > 0 {
+		cut := 0
+		for i, rec := range records {
+			if rec.Seq <= uptoSeq {
+				cut = i + 1
+			}
+		}
+		records = records[:cut]
+	}
+	records = trimToCleanForkBoundary(records)
+
+	meta, err := s.Create(SessionMeta{
+		Title:      forkTitle(src.Title),
+		Cwd:        src.Cwd,
+		Model:      src.Model,
+		ForkedFrom: src.ID,
+	})
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, err := os.OpenFile(s.transcriptPath(meta.ID), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	w := bufio.NewWriter(f)
+	var lastPreview string
+	for i, rec := range records {
+		rec.Seq = int64(i + 1)
+		if (rec.Origin == OriginUser || rec.Origin == OriginAssistant) && rec.Role != llm.RoleTool {
+			if preview := derivePreview(rec.Text); preview != "" {
+				lastPreview = preview
+			}
+		}
+		b, err := json.Marshal(rec)
+		if err != nil {
+			f.Close()
+			return SessionMeta{}, err
+		}
+		if _, err := w.Write(append(b, '\n')); err != nil {
+			f.Close()
+			return SessionMeta{}, err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		return SessionMeta{}, err
+	}
+	if err := f.Close(); err != nil {
+		return SessionMeta{}, err
+	}
+	s.seqs[meta.ID] = int64(len(records))
+	forked, err := s.readMetaLocked(meta.ID)
+	if err != nil {
+		return SessionMeta{}, err
+	}
+	forked.MessageCount = len(records)
+	forked.Preview = lastPreview
+	if err := s.writeMetaLocked(forked); err != nil {
+		return SessionMeta{}, err
+	}
+	return forked, nil
+}
+
+// trimToCleanForkBoundary 把截断点回退到最近一条非工具序列记录：
+// 尾部连续的 tool 记录与其 assistant ToolCalls 载体一并丢弃。
+func trimToCleanForkBoundary(records []Record) []Record {
+	for len(records) > 0 {
+		last := records[len(records)-1]
+		if last.Origin == OriginTool || (last.Origin == OriginAssistant && len(last.ToolCalls) > 0) {
+			records = records[:len(records)-1]
+			continue
+		}
+		break
+	}
+	return records
+}
+
+func forkTitle(title string) string {
+	base := strings.TrimSpace(title)
+	if base == "" {
+		base = "会话"
+	}
+	return base + "（分叉）"
 }
 
 // LoadRecords 读回全部记录（恢复/回放）。

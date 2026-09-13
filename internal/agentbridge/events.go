@@ -16,6 +16,22 @@ type Event struct {
 	SessionAutoApprove *bool            `json:"session_auto_approve,omitempty"`
 	NeedsBootstrap     *bool            `json:"needs_bootstrap,omitempty"`
 	UserTurnCount      *int             `json:"user_turn_count,omitempty"`
+	Usage              *UsageEvent      `json:"usage,omitempty"`
+	Todos              []TodoItem       `json:"todos,omitempty"`
+}
+
+// UsageEvent 是单步/单 turn 的真实 token 用量（type=usage 事件携带）。
+type UsageEvent struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read,omitempty"`
+	CacheWrite int64 `json:"cache_write,omitempty"`
+}
+
+// TodoItem 是 todo_list 工具快照中的单条任务（type=todos 事件携带）。
+type TodoItem struct {
+	Content string `json:"content"`
+	Status  string `json:"status"` // pending | in_progress | completed
 }
 
 // MediaContent is a structured image/video payload forwarded from ACP to the

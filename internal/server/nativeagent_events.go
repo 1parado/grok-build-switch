@@ -8,7 +8,8 @@ package server
 //	think_delta      → thought_chunk
 //	tool_call        → tool_call（回显参数）
 //	tool_result      → tool_update（含结果）
-//	usage            → （仅录制，不推 UI）
+//	usage            → usage（token 用量，上下文栏/meter 用）
+//	todo_list 结果    → todos（任务清单快照）
 //	step_* / turn_*  → （UI 由 turn_done 收口）
 import (
 	"context"
@@ -36,6 +37,7 @@ type nativeEventTranslator struct {
 	thinkBuf     strings.Builder
 	pendingCalls []llm.ToolCall
 	usage        *turnUsageHolder
+	todos        *tools.TodoStore
 }
 
 func (t *nativeEventTranslator) Dispatch(ev agentloop.Event) {
@@ -80,6 +82,16 @@ func (t *nativeEventTranslator) Dispatch(ev agentloop.Event) {
 					Media:     media,
 				},
 			})
+			// todo_list 执行后广播任务快照：常驻任务面板的数据源
+			// （工具结果文本本身是回显 JSON，另行解析没必要）。
+			if ev.ToolResult.Name == "todo_list" && t.todos != nil {
+				snapshot := t.todos.Snapshot()
+				items := make([]agentbridge.TodoItem, 0, len(snapshot))
+				for _, it := range snapshot {
+					items = append(items, agentbridge.TodoItem{Content: it.Content, Status: it.Status})
+				}
+				t.svc.broadcast(agentbridge.Event{Type: "todos", SessionID: t.sessionID, Todos: items})
+			}
 			// 工具结果落盘（含回显的 call 参数）。
 			t.mu.Lock()
 			var call *llm.ToolCall
@@ -108,8 +120,20 @@ func (t *nativeEventTranslator) Dispatch(ev agentloop.Event) {
 			})
 		}
 	case agentloop.EventUsage:
-		if ev.Usage != nil && t.usage != nil {
-			t.usage.record(*ev.Usage)
+		if ev.Usage != nil {
+			if t.usage != nil {
+				t.usage.record(*ev.Usage)
+			}
+			// 同步广播给 UI：上下文栏用量与占用 meter 的实时数据源。
+			t.svc.broadcast(agentbridge.Event{
+				Type: "usage", SessionID: t.sessionID,
+				Usage: &agentbridge.UsageEvent{
+					Input:      ev.Usage.InputTotal(),
+					Output:     ev.Usage.Output,
+					CacheRead:  ev.Usage.InputCacheRead,
+					CacheWrite: ev.Usage.InputCacheCreation,
+				},
+			})
 		}
 	case agentloop.EventTurnEnd, agentloop.EventTurnInterrupt:
 		// flush 累积文本（一段 assistant 回复一次落盘）。

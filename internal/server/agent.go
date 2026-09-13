@@ -14,12 +14,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
 	"grok_switch/internal/agentbridge"
+	"grok_switch/internal/notify"
 )
 
 type AgentService interface {
@@ -490,6 +492,11 @@ type agentSocketMessage struct {
 	Outcome     string                   `json:"outcome,omitempty"`
 	Feedback    string                   `json:"feedback,omitempty"`
 	Attachments []agentbridge.Attachment `json:"attachments,omitempty"`
+	// Scope 仅 permission_response 使用："user" 时"总是允许"沉淀为
+	// permissions.json 持久规则（native）；空/"session" 维持原语义。
+	Scope string `json:"scope,omitempty"`
+	// Hidden 仅 client_visibility 使用：页面 visibilitychange 上报。
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -518,7 +525,16 @@ func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
 	subscriberID, events := s.Agent.Subscribe()
 	defer s.Agent.Unsubscribe(subscriberID)
 	replies := make(chan agentbridge.Event, 16)
-	go s.readAgentSocket(ctx, cancel, conn, replies)
+	// 每连接可见性：默认可见，client_visibility 消息翻转；全局计数
+	// 为 0 时桌面通知接管（见 startAgentNotifyLoop）。
+	connHidden := &atomic.Bool{}
+	s.agentVisible.Add(1)
+	defer func() {
+		if !connHidden.Load() {
+			s.agentVisible.Add(-1)
+		}
+	}()
+	go s.readAgentSocket(ctx, cancel, conn, replies, connHidden)
 
 	status := s.Agent.Status()
 	auto := status.SessionAutoApprove
@@ -544,7 +560,7 @@ func (s *Server) handleAgentWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, replies chan<- agentbridge.Event) {
+func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, replies chan<- agentbridge.Event, connHidden *atomic.Bool) {
 	defer cancel()
 	for {
 		var message agentSocketMessage
@@ -568,11 +584,30 @@ func (s *Server) readAgentSocket(ctx context.Context, cancel context.CancelFunc,
 		case "cancel":
 			err = s.Agent.CancelPrompt()
 		case "permission_response":
-			if strings.TrimSpace(message.OptionID) != "" {
+			if message.Scope == "user" {
+				// "总是允许"写持久规则：native 走 AddUserRule；其他引擎
+				// 回落到其自身的 always-allow 语义（ACP 由 CLI 内部记住）。
+				if ruler, ok := s.Agent.(interface {
+					RespondPermissionUser(string, bool) error
+				}); ok {
+					err = ruler.RespondPermissionUser(message.RequestID, message.Allow)
+				} else {
+					err = s.Agent.RespondPermissionEx(message.RequestID, message.Allow, true)
+				}
+			} else if strings.TrimSpace(message.OptionID) != "" {
 				err = s.Agent.RespondPermissionOption(message.RequestID, message.OptionID, message.Remember)
 			} else {
 				err = s.Agent.RespondPermissionEx(message.RequestID, message.Allow, message.Remember)
 			}
+		case "client_visibility":
+			if message.Hidden {
+				if !connHidden.Swap(true) {
+					s.agentVisible.Add(-1)
+				}
+			} else if connHidden.Swap(false) {
+				s.agentVisible.Add(1)
+			}
+			continue
 		case "plan_response":
 			err = s.Agent.RespondPlan(message.RequestID, agentbridge.PlanDecision{
 				Outcome: message.Outcome, Feedback: message.Feedback,
@@ -754,6 +789,201 @@ func (s *Server) handleAgentBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, s.Agent.Status())
 }
+
+// handleAgentFork 复制 native 会话为新会话（POST {session_id, upto_seq}）。
+// ACP/Grok CLI 会话存储不透明，硬分叉不可靠——非 native 引擎返回 400。
+func (s *Server) handleAgentFork(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	var request struct {
+		SessionID string `json:"session_id"`
+		UptoSeq   int64  `json:"upto_seq"`
+	}
+	if err := decodeAgentJSON(r, &request); err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(request.SessionID) == "" {
+		writeError(w, errors.New("会话 ID 不能为空"), http.StatusBadRequest)
+		return
+	}
+	forker, ok := s.Agent.(interface {
+		ForkStoredSession(context.Context, string, int64) (agentbridge.SessionSummary, error)
+	})
+	if !ok {
+		writeError(w, errors.New("当前引擎不支持会话分叉"), http.StatusBadRequest)
+		return
+	}
+	meta, err := forker.ForkStoredSession(r.Context(), request.SessionID, request.UptoSeq)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeError(w, err, status)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "session": meta})
+}
+
+// handleAgentExport 把会话历史渲染为 Markdown 下载（GET ?id=）。
+// 两种引擎统一走 StoredSessionHistory（native 读 transcript 记录，
+// ACP 读 chat_history.jsonl）。
+func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.Agent == nil {
+		writeError(w, errors.New("Agent 服务未初始化"), http.StatusServiceUnavailable)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeError(w, errors.New("会话 ID 不能为空"), http.StatusBadRequest)
+		return
+	}
+	history, err := s.Agent.StoredSessionHistory(id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeError(w, err, status)
+		return
+	}
+	title := strings.TrimSpace(history.Session.Title)
+	if title == "" {
+		title = "会话 " + id
+	}
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "session-" + id + ".md"}))
+	_, _ = w.Write([]byte(sessionMarkdown(history, title)))
+}
+
+// sessionMarkdown 把会话历史渲染为 Markdown：正文直排，思考与工具
+// 调用收进 <details> 折叠块，保持导出文档可读而不丢信息。
+func sessionMarkdown(history agentbridge.SessionHistory, title string) string {
+	var b strings.Builder
+	b.WriteString("# " + title + "\n\n")
+	var meta []string
+	if history.Session.Model != "" {
+		meta = append(meta, "模型: "+history.Session.Model)
+	}
+	if history.Session.Cwd != "" {
+		meta = append(meta, "目录: `"+history.Session.Cwd+"`")
+	}
+	if !history.Session.UpdatedAt.IsZero() {
+		meta = append(meta, "更新于: "+history.Session.UpdatedAt.Format("2006-01-02 15:04"))
+	}
+	if len(meta) > 0 {
+		b.WriteString("*" + strings.Join(meta, " · ") + "*\n\n---\n")
+	}
+	fence := func(text string) {
+		// 输出含 ``` 时换用更长围栏，避免围栏被撞穿。
+		f := "```"
+		for strings.Contains(text, f) {
+			f += "`"
+		}
+		b.WriteString("\n" + f + "\n" + text + "\n" + f + "\n")
+	}
+	for _, m := range history.Messages {
+		switch m.Role {
+		case "user":
+			b.WriteString("\n## 用户\n\n" + strings.TrimSpace(m.Content) + "\n")
+		case "assistant":
+			head := "\n## Grok"
+			if m.Model != "" {
+				head += "（" + m.Model + "）"
+			}
+			b.WriteString(head + "\n\n" + strings.TrimSpace(m.Content) + "\n")
+		case "thought":
+			b.WriteString("\n<details><summary>思考过程</summary>\n")
+			fence(strings.TrimSpace(m.Content))
+			b.WriteString("</details>\n")
+		case "tool":
+			name := "tool"
+			if m.Tool != nil && m.Tool.Title != "" {
+				name = m.Tool.Title
+			}
+			b.WriteString("\n<details><summary>工具调用: " + name + "</summary>\n")
+			if m.Tool != nil && m.Tool.RawInput != nil {
+				if raw, err := json.Marshal(m.Tool.RawInput); err == nil {
+					fence(string(raw))
+				}
+			}
+			b.WriteString("</details>\n")
+		case "tool_result":
+			if strings.TrimSpace(m.Content) != "" {
+				b.WriteString("\n<details><summary>工具结果</summary>\n")
+				fence(strings.TrimSpace(m.Content))
+				b.WriteString("</details>\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+// startAgentNotifyLoop 常驻订阅 agent 事件：当没有任何可见的 agent 页面
+// （全部 hidden 或没有 WS 连接）时，审批请求与回合结束补发桌面通知。
+func (s *Server) startAgentNotifyLoop() {
+	if s.Agent == nil {
+		return
+	}
+	_, events := s.Agent.Subscribe()
+	go func() {
+		for ev := range events {
+			s.notifyAgentEventIfHidden(ev)
+		}
+	}()
+}
+
+// notifyAgentEventIfHidden 在 permission_request / turn_done 且页面不可见时
+// 发桌面通知。同 key 5 秒内去重（pending 审批重放不会连环轰炸）。
+func (s *Server) notifyAgentEventIfHidden(ev agentbridge.Event) {
+	if s.agentVisible.Load() > 0 {
+		return
+	}
+	var title, body, key string
+	switch ev.Type {
+	case "permission_request":
+		title = "Grok 需要审批"
+		body = "返回工作台确认工具执行"
+		key = "perm"
+		if ev.Permission != nil {
+			if ev.Permission.Summary != "" {
+				body = ev.Permission.Summary
+			}
+			key = "perm:" + ev.Permission.RequestID
+		}
+	case "turn_done":
+		title = "Grok 对话完成"
+		body = "点击回到工作台查看回复"
+		key = "turn:" + ev.SessionID
+	default:
+		return
+	}
+	s.agentNotifyMu.Lock()
+	if s.agentNotifyAt == nil {
+		s.agentNotifyAt = map[string]time.Time{}
+	}
+	if last, ok := s.agentNotifyAt[key]; ok && time.Since(last) < 5*time.Second {
+		s.agentNotifyMu.Unlock()
+		return
+	}
+	s.agentNotifyAt[key] = time.Now()
+	s.agentNotifyMu.Unlock()
+	agentNotifyInfo(title, body)
+}
+
+// agentNotifyInfo 是桌面通知出口（测试可替换，避免真弹系统通知）。
+var agentNotifyInfo = notify.Info
 
 func agentWebSocketOriginAllowed(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))

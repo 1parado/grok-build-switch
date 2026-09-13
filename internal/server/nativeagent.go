@@ -379,17 +379,19 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 	n.broadcast(agentbridge.Event{
 		Type: "user_message", SessionID: sessionID, Text: text,
 	})
+	n.autoTitleIfNeeded(sessionID, text)
 
 	// 工具注册表（每 turn 重建：生图开关与引擎就绪状态即时生效）。
 	var imageGen tools.ImageGenerator
 	if n.deps.ImageGenAdapter != nil {
 		imageGen = n.deps.ImageGenAdapter()
 	}
-	registry := tools.DefaultRegistry(func() agentfs.Env { return env }, imageGen, &nativePlanApprover{n: n}, &tools.TodoStore{})
+	todoStore := &tools.TodoStore{}
+	registry := tools.DefaultRegistry(func() agentfs.Env { return env }, imageGen, &nativePlanApprover{n: n}, todoStore)
 
 	// 引擎事件 → WS 事件翻译。usage 观测挂在服务上（跨 turn 保持）。
 	n.usageHolderOnce.Do(func() { n.usageHolder = &turnUsageHolder{} })
-	loopEvents := &nativeEventTranslator{svc: n, sessionID: sessionID, turnID: turnID, registry: registry, usage: n.usageHolder}
+	loopEvents := &nativeEventTranslator{svc: n, sessionID: sessionID, turnID: turnID, registry: registry, usage: n.usageHolder, todos: todoStore}
 
 	// compaction hook（D3/§6.4）：无状态重放下「上一步 input tokens」≈ 当前
 	// 全量历史体积；超阈值时在步边界压实（摘要走当前 Provider 一次调用）。
@@ -506,6 +508,26 @@ func (n *nativeAgentService) persist(sessionID string, rec agentkit.Record) {
 		n.errText = "会话记录写入失败: " + err.Error()
 		n.mu.Unlock()
 	}
+}
+
+// autoTitleIfNeeded 在会话还没有标题时，用首条用户消息推导标题并写回
+// meta——侧栏"未命名会话"海的兜底来源（前端也有一份推导用于 ACP 会话，
+// 服务端这条保证 native 会话不依赖前端时序）。
+func (n *nativeAgentService) autoTitleIfNeeded(sessionID, text string) {
+	title := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if sessionID == "" || title == "" {
+		return
+	}
+	meta, err := n.st.GetMeta(sessionID)
+	if err != nil || strings.TrimSpace(meta.Title) != "" {
+		return
+	}
+	const max = 60
+	r := []rune(title)
+	if len(r) > max {
+		title = string(r[:max]) + "…"
+	}
+	_ = n.st.Rename(sessionID, title)
 }
 
 func (n *nativeAgentService) CancelPrompt() error {
@@ -683,6 +705,33 @@ func (n *nativeAgentService) RespondPermissionEx(requestID string, allow bool, r
 	return nil
 }
 
+// RespondPermissionUser 与 Ex 相同，但"总是允许"沉淀为 user 级持久规则
+// （permissions.json，跨会话生效），且不附带开启会话级自动批准。
+func (n *nativeAgentService) RespondPermissionUser(requestID string, allow bool) error {
+	decision := agentloop.DecDeny
+	reason := "用户拒绝了该操作。"
+	if allow {
+		decision = agentloop.DecAllow
+		reason = ""
+	}
+	n.permMu.Lock()
+	req, ok := n.pendingPerm[requestID]
+	toolName := ""
+	if ok {
+		toolName = req.tool
+		delete(n.pendingPerm, requestID)
+	}
+	n.permMu.Unlock()
+	if !ok {
+		return agentbridge.ErrPermissionNotFound
+	}
+	if allow && n.perm != nil && toolName != "" {
+		_ = n.perm.AddUserRule(toolName+"(*)", permission.Allow)
+	}
+	req.ch <- agentloop.PermResult{Decision: decision, Reason: reason}
+	return nil
+}
+
 func (n *nativeAgentService) RespondPermissionOption(requestID, optionID string, remember bool) error {
 	switch optionID {
 	case "allow_once":
@@ -808,6 +857,8 @@ func (n *nativeAgentService) ListStoredSessions(cwd string, limit int) ([]agentb
 			CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
 			Model: m.Model, MessageCount: m.MessageCount,
 			CwdMissing: !dirExists(m.Cwd),
+			Preview:    m.Preview,
+			ForkedFrom: m.ForkedFrom,
 		})
 	}
 	return out, nil
@@ -886,6 +937,22 @@ func mediaRefsToBridge(refs []agentkit.MediaRef) []agentbridge.MediaContent {
 		out = append(out, agentbridge.MediaContent{Kind: r.Kind, MimeType: r.MimeType, URI: r.URI, Name: r.Name})
 	}
 	return out
+}
+
+// ForkStoredSession 复制既有会话为新会话（≤uptoSeq 的记录，0=全部）。
+// 仅 native 会话可分叉——Grok CLI 的会话存储不透明，硬分叉不可靠。
+func (n *nativeAgentService) ForkStoredSession(ctx context.Context, id string, uptoSeq int64) (agentbridge.SessionSummary, error) {
+	_ = ctx
+	meta, err := n.st.Fork(id, uptoSeq)
+	if err != nil {
+		return agentbridge.SessionSummary{}, err
+	}
+	return agentbridge.SessionSummary{
+		ID: meta.ID, Title: meta.Title, Cwd: meta.Cwd,
+		CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt,
+		Model: meta.Model, MessageCount: meta.MessageCount,
+		Preview: meta.Preview, ForkedFrom: meta.ForkedFrom,
+	}, nil
 }
 
 func (n *nativeAgentService) RenameStoredSession(id, title string) error {

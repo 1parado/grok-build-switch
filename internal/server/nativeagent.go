@@ -891,16 +891,17 @@ func (n *nativeAgentService) StoredSessionHistory(id string) (agentbridge.Sessio
 	for _, r := range records {
 		switch r.Origin {
 		case agentkit.OriginUser:
-			msgs = append(msgs, agentbridge.HistoryMessage{Role: "user", Content: r.Text, Media: mediaRefsToBridge(r.Media)})
+			msgs = append(msgs, agentbridge.HistoryMessage{Role: "user", Content: r.Text, Media: mediaRefsToBridge(r.Media), Seq: r.Seq})
 		case agentkit.OriginAssistant:
 			if r.Text != "" {
-				msgs = append(msgs, agentbridge.HistoryMessage{Role: "assistant", Content: r.Text, Model: meta.Model})
+				msgs = append(msgs, agentbridge.HistoryMessage{Role: "assistant", Content: r.Text, Model: meta.Model, Seq: r.Seq})
 			}
 			if len(r.ToolCalls) > 0 {
 				for _, tc := range r.ToolCalls {
 					msgs = append(msgs, agentbridge.HistoryMessage{
 						Role: "tool",
 						Tool: &agentbridge.ToolEvent{ID: tc.ID, Title: tc.Name, Kind: tc.Name, Status: "completed", RawInput: json.RawMessage(tc.Arguments)},
+						Seq:  r.Seq,
 					})
 				}
 			}
@@ -915,6 +916,7 @@ func (n *nativeAgentService) StoredSessionHistory(id string) (agentbridge.Sessio
 				Content: payload.Output,
 				Media:   mediaRefsToBridge(r.Media),
 				Tool:    &agentbridge.ToolEvent{ID: r.ToolCallID, Status: toolStatusFromPayload(payload.Error)},
+				Seq:     r.Seq,
 			})
 		}
 	}

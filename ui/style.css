@@ -998,6 +998,9 @@ body {
 
 @media (hover: none) {
   .chatMessageActions { opacity: 1; }
+  /* 触屏没有 hover,会话项的重命名/置顶/删除按钮必须常显 */
+  .sessionItemActions { opacity: 1; }
+  .sessionItem .sessionItemTitle { padding-right: 78px; }
 }
 
 .messageActionBtn {
@@ -4834,9 +4837,9 @@ body.resizingChatPanels * {
   transform: translateY(-1px);
 }
 .composerInputWrap textarea {
-  min-height: 50px;
+  min-height: 40px;
   max-height: 180px;
-  padding: 13px 16px 6px;
+  padding: 10px 16px 6px;
   border: 0;
   outline: 0;
   resize: none;
@@ -5372,8 +5375,10 @@ body.resizingChatPanels * {
   .chatMessage.user { max-width: min(88%, 620px); border-radius: 18px 18px 5px 18px; }
   .chatMessage.assistant { max-width: min(94%, 760px); border-radius: 18px 18px 18px 5px; }
   .chatComposer { padding: 10px 12px 12px; }
-  .composerStatusRow,
+  /* 保留状态行(typing dots + 遥测),只收掉长文案 hint——排队 chips 在
+     独立的 .promptQueue,本就在移动端可见 */
   .composerHint { display: none !important; }
+  .composerStatusRow { padding-bottom: 2px; }
 }
 
 @media (max-width: 520px) {
@@ -6394,3 +6399,63 @@ body.resizingChatPanels * {
   font-variant-numeric: tabular-nums;
   margin-left: 6px;
 }
+
+/* ---- ⌘K 命令面板 ---- */
+.cmdkOverlay {
+  position: fixed; inset: 0; z-index: 600;
+  background: rgba(10, 10, 14, .38);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: max(10vh, 48px) 16px 16px;
+}
+.cmdkPanel {
+  width: min(560px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--line-strong); border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .28), 0 2px 10px rgba(0, 0, 0, .14);
+  overflow: hidden;
+  animation: cmdkIn .14s ease-out;
+}
+@keyframes cmdkIn { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
+.cmdkInput {
+  width: 100%; border: 0; border-bottom: 1px solid var(--line); outline: 0;
+  background: transparent; color: var(--text);
+  padding: 13px 16px; font: 400 14px/1.4 var(--font);
+}
+.cmdkInput::placeholder { color: var(--muted); }
+.cmdkList { max-height: min(46vh, 380px); overflow-y: auto; padding: 6px; }
+.cmdkItem {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer; min-width: 0;
+}
+.cmdkItem.active { background: var(--primary-soft); }
+.cmdkIcon { flex-shrink: 0; width: 16px; text-align: center; color: var(--muted); font-size: 12px; }
+.cmdkLabel { font-size: 13px; color: var(--text); white-space: nowrap; }
+.cmdkHint { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: auto; }
+.cmdkEmpty { padding: 18px; text-align: center; font-size: 12px; color: var(--muted); }
+.cmdkFoot {
+  display: flex; gap: 14px; padding: 8px 14px;
+  border-top: 1px solid var(--line); font-size: 10.5px; color: var(--muted);
+}
+@media (prefers-reduced-motion: reduce) { .cmdkPanel { animation: none; } }
+
+/* ---- 空态最近会话 ---- */
+.chatEmptyRecent { margin-top: 20px; width: 100%; max-width: 360px; text-align: left; }
+.chatEmptyRecentLabel {
+  display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 8px;
+}
+.chatEmptyRecentItem {
+  display: flex; flex-direction: column; gap: 3px; width: 100%;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--chat-card); color: var(--text); cursor: pointer; text-align: left;
+  margin-bottom: 6px; font: 400 12.5px/1.35 var(--font);
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+.chatEmptyRecentItem:hover {
+  border-color: var(--primary-border);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px -2px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+.chatEmptyRecentTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+.chatEmptyRecentMeta { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

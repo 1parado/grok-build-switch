@@ -92,7 +92,11 @@ type Server struct {
 	// agentVisible 计数当前"可见"的 agent WS 连接（页面 hidden 时经
 	// client_visibility 消息下调）。为 0 时 permission_request /
 	// turn_done 事件由常驻订阅者补发桌面通知。
-	agentVisible  atomic.Int64
+	agentVisible atomic.Int64
+	// agentMuted 计数"关闭桌面通知"的连接（client_visibility 的
+	// notify_muted 字段）；>0 时通知整体静默——本应用单用户，
+	// 任一客户端关闭即全局生效。
+	agentMuted    atomic.Int64
 	agentNotifyMu sync.Mutex
 	agentNotifyAt map[string]time.Time
 }

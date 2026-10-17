@@ -39,3 +39,39 @@ func TestWaitFirstPageTargetIDPrefersBlankPage(t *testing.T) {
 		t.Fatalf("got target %q, want blank-1", id)
 	}
 }
+
+func TestDebuggerPollingRespectsOverallTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	_, portStr, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, poll := range map[string]func(int, time.Duration) error{
+		"version": func(port int, timeout time.Duration) error {
+			_, err := waitDebuggerURL(port, timeout)
+			return err
+		},
+		"targets": func(port int, timeout time.Duration) error {
+			_, err := waitFirstPageTargetID(port, timeout)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			if err := poll(port, 100*time.Millisecond); err == nil {
+				t.Fatal("expected timeout error")
+			}
+			if elapsed := time.Since(start); elapsed > time.Second {
+				t.Fatalf("poll took %s, want under 1s", elapsed)
+			}
+		})
+	}
+}

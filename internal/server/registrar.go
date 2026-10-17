@@ -45,7 +45,10 @@ func (s *Server) handleRegistrarProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	var config registrar.Config
 	if r.Body != nil && r.ContentLength != 0 {
-		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&config)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&config); err != nil {
+			writeError(w, fmt.Errorf("读取注册机探测配置: %w", err), http.StatusBadRequest)
+			return
+		}
 	}
 	if config.Version == 0 {
 		state := s.Registrar.Get()

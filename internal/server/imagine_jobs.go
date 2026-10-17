@@ -92,7 +92,9 @@ func (l *imagineJobList) snapshot() []imagineJob {
 	defer l.mu.Unlock()
 	out := make([]imagineJob, 0, len(l.jobs))
 	for i := len(l.jobs) - 1; i >= 0; i-- {
-		out = append(out, *l.jobs[i])
+		job := *l.jobs[i]
+		job.Images = append([]ImagineGalleryItem(nil), job.Images...)
+		out = append(out, job)
 	}
 	return out
 }

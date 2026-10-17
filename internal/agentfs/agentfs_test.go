@@ -19,7 +19,7 @@ func shellSleep(n int) string {
 		// ping -n N+1 127.0.0.1 每个间隔约 1 秒，总计约 N 秒。
 		return fmt.Sprintf("ping -n %d 127.0.0.1 >nul 2>&1", n+1)
 	}
-	return fmt.Sprintf("sleep %d", n)
+	return fmt.Sprintf("exec sleep %d", n)
 }
 
 // shellPwd 返回打印当前工作目录的当前平台命令（cmd 里等价是 cd）。
@@ -119,6 +119,32 @@ func TestShellRunAndTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("超时未及时终止")
+	}
+}
+
+func TestShellParentContextCancellation(t *testing.T) {
+	env := Env{Cwd: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan ShellResult, 1)
+	go func() {
+		result <- env.Shell(ctx, shellSleep(5), "", 30*time.Second)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	started := time.Now()
+	cancel()
+
+	select {
+	case res := <-result:
+		if res.ExitCode == 0 || res.TimedOut {
+			t.Fatalf("parent cancellation should stop the command without reporting timeout: %+v", res)
+		}
+		if time.Since(started) > 2*time.Second {
+			t.Fatalf("command did not stop promptly after parent cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("command continued running after parent cancellation")
 	}
 }
 

@@ -46,7 +46,7 @@ func (e Env) Shell(ctx context.Context, command, dir string, timeout time.Durati
 	if dir == "" {
 		dir = e.Cwd
 	}
-	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var stdout, stderr strings.Builder

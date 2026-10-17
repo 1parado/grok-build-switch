@@ -15,6 +15,8 @@ package webpool
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -50,6 +52,9 @@ func buildWebTransport(proxyURL string) (*webRoundTripper, error) {
 		parsed, err := url.Parse(raw)
 		if err != nil || parsed.Host == "" {
 			return nil, fmt.Errorf("代理地址无效")
+		}
+		if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return nil, fmt.Errorf("代理地址不能包含路径、查询参数或片段")
 		}
 		switch strings.ToLower(parsed.Scheme) {
 		case "http", "https", "socks5", "socks5h":
@@ -101,51 +106,106 @@ func dialRawConn(ctx context.Context, dialer *net.Dialer, proxy *url.URL, networ
 		d := &net.Dialer{Timeout: 20 * time.Second}
 		return viaSocks(ctx, d, proxy, network, addr)
 	}
-	proxyAddr := proxy.Host
-	if !strings.Contains(proxyAddr, ":") {
-		if strings.EqualFold(scheme, "https") {
-			proxyAddr += ":443"
-		} else {
-			proxyAddr += ":80"
-		}
+	proxyAddr, err := proxyAddress(proxy, scheme)
+	if err != nil {
+		return nil, err
 	}
 	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, fmt.Errorf("连接代理失败: %w", err)
 	}
+	// Capture the raw socket before conn is replaced with the TLS wrapper.
+	// The cancellation callback can run concurrently with that replacement.
+	rawConn := conn
+	stopCancel := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
+	defer stopCancel()
+	if scheme == "https" {
+		tlsConn := tls.Client(conn, &tls.Config{ServerName: proxy.Hostname(), MinVersion: tls.VersionTLS12})
+		if dialer.Timeout > 0 {
+			_ = tlsConn.SetDeadline(time.Now().Add(dialer.Timeout))
+		}
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("HTTPS 代理 TLS 握手失败: %w", err)
+		}
+		_ = tlsConn.SetDeadline(time.Time{})
+		conn = tlsConn
+	}
+	reader := bufio.NewReader(conn)
 	req := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Opaque: addr},
 		Host:   addr,
 		Header: make(http.Header),
 	}
+	if proxy.User != nil {
+		password, _ := proxy.User.Password()
+		credentials := proxy.User.Username() + ":" + password
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(credentials)))
+	}
 	if err := req.Write(conn); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	resp, err := http.ReadResponse(reader, req)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("代理 CONNECT 失败: %w", err)
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		_ = conn.Close()
 		return nil, fmt.Errorf("代理 CONNECT 返回 %d", resp.StatusCode)
 	}
-	return conn, nil
+	_ = resp.Body.Close()
+	if !stopCancel() {
+		_ = conn.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
+	}
+	return &bufferedConn{Conn: conn, reader: reader}, nil
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+func proxyAddress(proxy *url.URL, scheme string) (string, error) {
+	host := proxy.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("代理地址无效")
+	}
+	port := proxy.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 // viaSocks 极简 SOCKS5 拨号（无鉴权 / 用户名密码）。
 func viaSocks(ctx context.Context, d *net.Dialer, proxy *url.URL, network, addr string) (net.Conn, error) {
-	proxyAddr := proxy.Host
-	if !strings.Contains(proxyAddr, ":") {
-		proxyAddr += ":1080"
+	proxyAddr, err := proxyAddress(proxy, strings.ToLower(proxy.Scheme))
+	if err != nil {
+		return nil, err
 	}
 	conn, err := d.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
 		return nil, err
 	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	host, portStr, _ := net.SplitHostPort(addr)
 	port := 0
 	for _, c := range portStr {
@@ -227,6 +287,13 @@ func viaSocks(ctx context.Context, d *net.Dialer, proxy *url.URL, network, addr 
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
+	}
+	if !stopCancel() {
+		_ = conn.Close()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
 	}
 	return conn, nil
 }

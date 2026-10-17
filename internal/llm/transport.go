@@ -162,6 +162,8 @@ type sseEvent struct {
 func scanSSE(ctx context.Context, resp *http.Response, handle func(sseEvent) error) error {
 	idle := time.NewTimer(sseIdleTimeout)
 	defer idle.Stop()
+	done := make(chan struct{})
+	defer close(done)
 	events := make(chan sseEvent, 8)
 	errCh := make(chan error, 1)
 
@@ -171,21 +173,28 @@ func scanSSE(ctx context.Context, resp *http.Response, handle func(sseEvent) err
 		scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 		var event string
 		var data bytes.Buffer
-		flush := func() {
+		flush := func() bool {
 			if data.Len() == 0 && event == "" {
-				return
+				return true
 			}
 			payload := make([]byte, data.Len())
 			copy(payload, data.Bytes())
-			events <- sseEvent{Event: event, Data: payload}
+			select {
+			case events <- sseEvent{Event: event, Data: payload}:
+			case <-done:
+				return false
+			}
 			event = ""
 			data.Reset()
+			return true
 		}
 		for scanner.Scan() {
 			line := scanner.Text()
 			switch {
 			case line == "":
-				flush()
+				if !flush() {
+					return
+				}
 			case strings.HasPrefix(line, "event:"):
 				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			case strings.HasPrefix(line, "data:"):
@@ -195,7 +204,9 @@ func scanSSE(ctx context.Context, resp *http.Response, handle func(sseEvent) err
 				data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
 			}
 		}
-		flush()
+		if !flush() {
+			return
+		}
 		if err := scanner.Err(); err != nil {
 			errCh <- err
 		}

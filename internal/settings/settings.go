@@ -98,7 +98,8 @@ func Default() Settings {
 func (s *Store) Get() (Settings, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.readLocked()
+	current, err := s.readLocked()
+	return cloneSettings(current), err
 }
 
 func (s *Store) Update(next Settings) (Settings, error) {
@@ -291,4 +292,10 @@ func uniqueStrings(items []string) []string {
 		out = append(out, item)
 	}
 	return out
+}
+
+func cloneSettings(s Settings) Settings {
+	s.ProviderOrder = append([]string(nil), s.ProviderOrder...)
+	s.PinnedProviderIDs = append([]string(nil), s.PinnedProviderIDs...)
+	return s
 }

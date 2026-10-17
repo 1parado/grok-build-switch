@@ -65,6 +65,43 @@ type Profile struct {
 	IsActive              bool       `json:"is_active"`
 }
 
+func cloneProfile(p Profile) Profile {
+	p.AvailableModels = append([]string(nil), p.AvailableModels...)
+	p.Features = cloneMap(p.Features)
+	p.MediaModels = cloneMap(p.MediaModels)
+	p.FeatureModels = cloneMap(p.FeatureModels)
+	if p.ImageGeneration != nil {
+		image := *p.ImageGeneration
+		image.AvailableModels = append([]string(nil), image.AvailableModels...)
+		p.ImageGeneration = &image
+	}
+	p.Models = append([]ModelDef(nil), p.Models...)
+	for i := range p.Models {
+		p.Models[i].ExtraHeaders = cloneMap(p.Models[i].ExtraHeaders)
+		p.Models[i].ReasoningEfforts = append([]string(nil), p.Models[i].ReasoningEfforts...)
+	}
+	return p
+}
+
+func cloneProfiles(profiles []Profile) []Profile {
+	out := make([]Profile, len(profiles))
+	for i := range profiles {
+		out[i] = cloneProfile(profiles[i])
+	}
+	return out
+}
+
+func cloneMap[V any](source map[string]V) map[string]V {
+	if source == nil {
+		return nil
+	}
+	out := make(map[string]V, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
 func (p Profile) Matches(other Profile) bool {
 	p = Normalize(p)
 	other = Normalize(other)

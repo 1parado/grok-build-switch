@@ -127,6 +127,16 @@ func TestGlobTool(t *testing.T) {
 	if !strings.Contains(out.Text, "c.md") {
 		t.Fatalf("sub/**/*.md 匹配失败:\n%s", out.Text)
 	}
+	absolutePattern, _ := json.Marshal(filepath.Join(env.Cwd, "**", "*.go"))
+	out = runTool(t, GlobTool{}, `{"pattern": `+string(absolutePattern)+`}`, env)
+	if out.IsError || !strings.Contains(out.Text, filepath.Join("sub", "b.go")) {
+		t.Fatalf("绝对 glob 匹配失败: %+v", out)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if out := (GlobTool{}).Execute(cancelled, json.RawMessage(`{"pattern":"**/*"}`), env); !out.IsError {
+		t.Fatalf("glob 应响应取消: %+v", out)
+	}
 }
 
 func TestGrepTool(t *testing.T) {
@@ -144,6 +154,11 @@ func TestGrepTool(t *testing.T) {
 	}
 	if strings.Contains(out.Text, ".git") {
 		t.Fatalf("应跳过 .git:\n%s", out.Text)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if out := (GrepTool{}).Execute(cancelled, json.RawMessage(`{"pattern":"Alpha"}`), env); !out.IsError {
+		t.Fatalf("grep 应响应取消: %+v", out)
 	}
 
 	// glob 过滤。

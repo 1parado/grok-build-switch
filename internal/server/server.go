@@ -549,7 +549,12 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		Name   string `json:"name"`
 		Active bool   `json:"active"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+			writeError(w, fmt.Errorf("无效的导入请求: %w", err), http.StatusBadRequest)
+			return
+		}
+	}
 	if req.Name == "" {
 		req.Name = "Imported"
 	}

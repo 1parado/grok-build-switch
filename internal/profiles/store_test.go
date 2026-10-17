@@ -70,3 +70,37 @@ func TestStoreRecoversCorruptProfiles(t *testing.T) {
 		t.Fatalf("corrupt backups = %#v, err = %v", matches, err)
 	}
 }
+
+func TestStoreReturnsIndependentNestedProfileValues(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "profiles.json"))
+	created, err := store.Create(Profile{
+		Name:            "provider",
+		AvailableModels: []string{"model-a"},
+		Models: []ModelDef{{
+			Name: "model-a", Model: "model-a",
+			ExtraHeaders:     map[string]string{"X-Test": "original"},
+			ReasoningEfforts: []string{"low", "high"},
+		}},
+		ImageGeneration: &ImageGenerationConfig{Enabled: true, AvailableModels: []string{"image-a"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed[0].AvailableModels[0] = "changed"
+	listed[0].Models[0].ExtraHeaders["X-Test"] = "changed"
+	listed[0].Models[0].ReasoningEfforts[0] = "changed"
+	listed[0].ImageGeneration.AvailableModels[0] = "changed"
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AvailableModels[0] != "model-a" || got.Models[0].ExtraHeaders["X-Test"] != "original" ||
+		got.Models[0].ReasoningEfforts[0] != "low" || got.ImageGeneration.AvailableModels[0] != "image-a" {
+		t.Fatalf("mutating List result changed cached profile: %#v", got)
+	}
+}

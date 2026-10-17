@@ -718,8 +718,13 @@ func waitDebuggerURL(port int, timeout time.Duration) (string, error) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/json/version", port)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
-		resp, err := http.DefaultClient.Do(req)
+		remaining := time.Until(deadline)
+		requestTimeout := min(remaining, 2*time.Second)
+		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil {
+			return "", err
+		}
+		resp, err := (&http.Client{Timeout: requestTimeout}).Do(req)
 		if err != nil {
 			lastErr = err
 			time.Sleep(150 * time.Millisecond)
@@ -752,8 +757,10 @@ func waitFirstPageTargetID(port int, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/json/list", port)
 	var lastErr error
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{}
 	for time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		client.Timeout = min(remaining, 2*time.Second)
 		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 		if err != nil {
 			return "", err

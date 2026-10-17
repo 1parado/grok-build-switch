@@ -46,6 +46,9 @@ type BrowserProxy struct {
 	browserCtx  context.Context
 	pageCancel  context.CancelFunc
 	cancel      context.CancelFunc
+	profileDir  string
+	chromeProc  *os.Process
+	chromeWait  <-chan struct{}
 
 	// pageURL 当前页面地址（grok.com 或 about:blank）。
 	pageURL string
@@ -103,6 +106,18 @@ func (bp *BrowserProxy) closeLocked() {
 	if bp.allocCancel != nil {
 		bp.allocCancel()
 		bp.allocCancel = nil
+	}
+	if bp.chromeProc != nil {
+		_ = bp.chromeProc.Kill()
+		if bp.chromeWait != nil {
+			<-bp.chromeWait
+		}
+		bp.chromeProc = nil
+		bp.chromeWait = nil
+	}
+	if bp.profileDir != "" {
+		_ = os.RemoveAll(bp.profileDir)
+		bp.profileDir = ""
 	}
 	bp.browserCtx = nil
 	bp.pageURL = ""
@@ -183,10 +198,16 @@ func (bp *BrowserProxy) ensurePage(parent context.Context, cookies *CookieSet) e
 		_ = os.RemoveAll(profile)
 		return fmt.Errorf("启动 Chrome 失败: %w", startErr)
 	}
+	chromeWait := make(chan struct{})
+	go func() {
+		_ = chromeCmd.Wait()
+		close(chromeWait)
+	}()
 	// Chrome 启动需要 1-2 秒。
 	select {
 	case <-parent.Done():
 		_ = chromeCmd.Process.Kill()
+		<-chromeWait
 		_ = os.RemoveAll(profile)
 		return parent.Err()
 	case <-time.After(2 * time.Second):
@@ -211,6 +232,8 @@ func (bp *BrowserProxy) ensurePage(parent context.Context, cookies *CookieSet) e
 	); err != nil {
 		allocCancel()
 		cancel()
+		_ = chromeCmd.Process.Kill()
+		<-chromeWait
 		_ = os.RemoveAll(profile)
 		return fmt.Errorf("打开 grok.com 失败: %w", err)
 	}
@@ -240,6 +263,9 @@ func (bp *BrowserProxy) ensurePage(parent context.Context, cookies *CookieSet) e
 				`document.cookie`, &cookieCheck))
 			fmt.Fprintf(os.Stderr, "[webpool-debug] cookies after set: %s\n", cookieCheck[:min(len(cookieCheck), 200)])
 			bp.allocCancel = allocCancel
+			bp.chromeProc = chromeCmd.Process
+			bp.chromeWait = chromeWait
+			bp.profileDir = profile
 			bp.browserCtx = browserCtx
 			bp.cancel = cancel
 			bp.pageURL = pageURL
@@ -250,6 +276,8 @@ func (bp *BrowserProxy) ensurePage(parent context.Context, cookies *CookieSet) e
 		case <-browserCtx.Done():
 			allocCancel()
 			cancel()
+			_ = chromeCmd.Process.Kill()
+			<-chromeWait
 			_ = os.RemoveAll(profile)
 			return fmt.Errorf("等待 grok.com 页面加载超时")
 		case <-time.After(2 * time.Second):
@@ -258,6 +286,8 @@ func (bp *BrowserProxy) ensurePage(parent context.Context, cookies *CookieSet) e
 
 	allocCancel()
 	cancel()
+	_ = chromeCmd.Process.Kill()
+	<-chromeWait
 	_ = os.RemoveAll(profile)
 	return fmt.Errorf("grok.com CF 挑战未在 90 秒内通过")
 }

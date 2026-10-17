@@ -53,8 +53,10 @@ func (e *Engine) Check(tool string, args json.RawMessage) string {
 	tool = lower(tool)
 	e.mu.RLock()
 	mode := e.mode
-	session := e.session
-	user := e.user
+	// Copy while holding the read lock: AddSessionRule and RemoveUserRule may
+	// mutate the backing arrays as soon as the lock is released.
+	session := append([]parsedRule(nil), e.session...)
+	user := append([]parsedRule(nil), e.user...)
 	e.mu.RUnlock()
 
 	rules := append(append([]parsedRule{}, user...), session...)

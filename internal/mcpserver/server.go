@@ -98,6 +98,7 @@ func (s *server) loop() error {
 func (s *server) handleLine(line []byte) {
 	var req rpcRequest
 	if err := json.Unmarshal(line, &req); err != nil {
+		s.write(errJSON(-32700, "Parse error", nil))
 		return
 	}
 	var id json.RawMessage

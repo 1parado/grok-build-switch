@@ -79,3 +79,28 @@ func TestNormalizeThemeAcceptsThreeStates(t *testing.T) {
 		}
 	}
 }
+
+func TestGetReturnsIndependentSlices(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "settings.json"))
+	input := Default()
+	input.ProviderOrder = []string{"a", "b"}
+	input.PinnedProviderIDs = []string{"x", "y"}
+	if _, err := store.Update(input); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.ProviderOrder[0] = "changed"
+	got.PinnedProviderIDs[0] = "changed"
+
+	second, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ProviderOrder[0] != "a" || second.PinnedProviderIDs[0] != "x" {
+		t.Fatalf("mutating Get result changed cached settings: %#v", second)
+	}
+}

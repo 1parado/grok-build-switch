@@ -52,7 +52,7 @@ func (s *Store) Get(id string) (Profile, error) {
 	}
 	for _, profile := range profiles {
 		if profile.ID == id {
-			return profile, nil
+			return cloneProfile(profile), nil
 		}
 	}
 	return Profile{}, os.ErrNotExist
@@ -78,7 +78,7 @@ func (s *Store) Create(profile Profile) (Profile, error) {
 	if err := s.writeLocked(profiles); err != nil {
 		return Profile{}, err
 	}
-	return profile, nil
+	return cloneProfile(profile), nil
 }
 
 func (s *Store) Update(id string, next Profile) (Profile, error) {
@@ -99,7 +99,7 @@ func (s *Store) Update(id string, next Profile) (Profile, error) {
 			if err := s.writeLocked(profiles); err != nil {
 				return Profile{}, err
 			}
-			return next, nil
+			return cloneProfile(next), nil
 		}
 	}
 	return Profile{}, os.ErrNotExist
@@ -191,7 +191,7 @@ func (s *Store) readLocked() ([]Profile, error) {
 		cacheHit = s.cacheValid && modTime.Equal(s.cacheMod) && size == s.cacheSize
 	}
 	if cacheHit {
-		return append([]Profile(nil), s.cacheValue...), nil
+		return cloneProfiles(s.cacheValue), nil
 	}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -232,7 +232,7 @@ func (s *Store) readLocked() ([]Profile, error) {
 // size=-1 命中规则，保证下次写入后 mtime+size 校验必然失效重读。
 func (s *Store) storeCacheLocked(profiles []Profile, modTime time.Time, size int64) {
 	s.cacheValid = true
-	s.cacheValue = append([]Profile(nil), profiles...)
+	s.cacheValue = cloneProfiles(profiles)
 	s.cacheMod = modTime
 	s.cacheSize = size
 }
@@ -246,7 +246,7 @@ func (s *Store) writeLocked(profiles []Profile) error {
 		return err
 	}
 	// 写入成功后同步缓存；Stat 失败则失效缓存，下次读取时重建。
-	s.cacheValue = append([]Profile(nil), profiles...)
+	s.cacheValue = cloneProfiles(profiles)
 	if info, err := os.Stat(s.path); err == nil {
 		s.cacheValid = true
 		s.cacheMod = info.ModTime()

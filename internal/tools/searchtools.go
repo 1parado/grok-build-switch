@@ -44,6 +44,9 @@ type globArgs struct {
 const globMaxResults = 200
 
 func (GlobTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.Env) ToolOutput {
+	if err := ctx.Err(); err != nil {
+		return ToolOutput{Text: err.Error(), IsError: true}
+	}
 	var a globArgs
 	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.Pattern) == "" {
 		return argHelp("glob", err, `{"pattern": "**/*.go", "path"?: "."}`)
@@ -57,15 +60,30 @@ func (GlobTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 		base = abs
 	}
 	pattern := a.Pattern
-	if !filepath.IsAbs(pattern) {
-		pattern = filepath.Join(base, pattern)
-	} else if !env.WithinSandbox(pattern) {
-		return ToolOutput{Text: (&agentfs.SandboxError{Path: pattern}).Error(), IsError: true}
+	if filepath.IsAbs(pattern) {
+		if !env.WithinSandbox(pattern) {
+			return ToolOutput{Text: (&agentfs.SandboxError{Path: pattern}).Error(), IsError: true}
+		}
+		absPattern := pattern
+		patternRoot := ""
+		for _, root := range append([]string{env.Cwd}, env.SandboxExtra...) {
+			rel, err := filepath.Rel(root, absPattern)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+				if len(root) > len(patternRoot) {
+					patternRoot = root
+					pattern = filepath.ToSlash(rel)
+				}
+			}
+		}
+		if patternRoot == "" {
+			return ToolOutput{Text: (&agentfs.SandboxError{Path: a.Pattern}).Error(), IsError: true}
+		}
+		base = patternRoot
 	}
 
 	// 简易 glob：目录遍历 + pattern 匹配（filepath.Match + ** 展开）。
 	var matches []string
-	err := walkGlob(base, base, a.Pattern, &matches, 0)
+	err := walkGlob(ctx, base, pattern, &matches, 0)
 	if err != nil {
 		return ToolOutput{Text: fmt.Sprintf("glob 失败: %v", err), IsError: true}
 	}
@@ -94,7 +112,10 @@ func (GlobTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 }
 
 // walkGlob 用 filepath.Match 逐层匹配支持 ** 的简化实现。
-func walkGlob(root, dir, pattern string, out *[]string, depth int) error {
+func walkGlob(ctx context.Context, dir, pattern string, out *[]string, depth int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if depth > 12 {
 		return nil
 	}
@@ -103,7 +124,7 @@ func walkGlob(root, dir, pattern string, out *[]string, depth int) error {
 	for {
 		if strings.HasPrefix(rest, "**/") {
 			// 尝试在当前目录直接匹配剩余模式。
-			if err := walkGlob(root, dir, strings.TrimPrefix(rest, "**/"), out, depth+1); err != nil {
+			if err := walkGlob(ctx, dir, strings.TrimPrefix(rest, "**/"), out, depth+1); err != nil {
 				return err
 			}
 			// 并深入子目录继续。
@@ -112,8 +133,11 @@ func walkGlob(root, dir, pattern string, out *[]string, depth int) error {
 				return nil
 			}
 			for _, e := range entries {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-					if err := walkGlob(root, filepath.Join(dir, e.Name()), rest, out, depth+1); err != nil {
+					if err := walkGlob(ctx, filepath.Join(dir, e.Name()), rest, out, depth+1); err != nil {
 						return err
 					}
 				}
@@ -138,6 +162,9 @@ func walkGlob(root, dir, pattern string, out *[]string, depth int) error {
 	}
 	hasMeta := strings.ContainsAny(seg, "*?[")
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		name := e.Name()
 		ok := name == seg
 		if !ok && hasMeta {
@@ -153,7 +180,7 @@ func walkGlob(root, dir, pattern string, out *[]string, depth int) error {
 				*out = append(*out, full)
 			}
 		} else if e.IsDir() {
-			if err := walkGlob(root, full, next, out, depth+1); err != nil {
+			if err := walkGlob(ctx, full, next, out, depth+1); err != nil {
 				return err
 			}
 		}
@@ -209,6 +236,9 @@ const (
 )
 
 func (GrepTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.Env) ToolOutput {
+	if err := ctx.Err(); err != nil {
+		return ToolOutput{Text: err.Error(), IsError: true}
+	}
 	var a grepArgs
 	if err := json.Unmarshal(args, &a); err != nil || strings.TrimSpace(a.Pattern) == "" {
 		return argHelp("grep", err, `{"pattern": "regex", "path"?: ".", "glob"?: "*.go"}`)
@@ -251,11 +281,14 @@ func (GrepTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 		return ToolOutput{Text: fmt.Sprintf("路径不存在: %s", base), IsError: true}
 	}
 
-	grepState := &grepRun{re: re, env: env, glob: a.Glob, max: max, context: ctxLines}
+	grepState := &grepRun{ctx: ctx, re: re, env: env, glob: a.Glob, max: max, context: ctxLines}
 	if !st.IsDir {
 		grepState.searchFile(base)
 	} else {
 		grepState.walk(base, 0)
+	}
+	if err := ctx.Err(); err != nil {
+		return ToolOutput{Text: err.Error(), IsError: true}
 	}
 	return grepState.render(a.Pattern)
 }
@@ -270,6 +303,7 @@ type grepHit struct {
 }
 
 type grepRun struct {
+	ctx     context.Context
 	re      *regexp.Regexp
 	env     agentfs.Env
 	glob    string
@@ -281,7 +315,7 @@ type grepRun struct {
 }
 
 func (g *grepRun) walk(dir string, depth int) {
-	if depth > 10 || len(g.hits) >= g.max {
+	if g.ctx.Err() != nil || depth > 10 || len(g.hits) >= g.max {
 		return
 	}
 	entries, err := osReadDir(dir)
@@ -289,6 +323,9 @@ func (g *grepRun) walk(dir string, depth int) {
 		return
 	}
 	for _, e := range entries {
+		if g.ctx.Err() != nil {
+			return
+		}
 		if len(g.hits) >= g.max {
 			return
 		}
@@ -312,7 +349,7 @@ func (g *grepRun) walk(dir string, depth int) {
 }
 
 func (g *grepRun) searchFile(path string) {
-	if len(g.hits) >= g.max {
+	if g.ctx.Err() != nil || len(g.hits) >= g.max {
 		return
 	}
 	if st := g.env.Stat(path); !st.Exists || st.Size > grepMaxFileBytes {

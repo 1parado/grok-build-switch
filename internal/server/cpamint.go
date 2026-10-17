@@ -138,7 +138,12 @@ func (s *Server) handleCpaMint(w http.ResponseWriter, r *http.Request) {
 			var body struct {
 				ID string `json:"id"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			if r.Body != nil && r.ContentLength != 0 {
+				if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+					writeError(w, fmt.Errorf("读取取消请求: %w", err), http.StatusBadRequest)
+					return
+				}
+			}
 			id = strings.TrimSpace(body.ID)
 		}
 		if id == "" {

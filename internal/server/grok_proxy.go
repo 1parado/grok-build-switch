@@ -81,7 +81,10 @@ func (s *Server) grokProxyToken(ctx context.Context, r *http.Request, hints grok
 		token, accountID, lostContinuation, err = s.GrokPool.NextTokenSticky(ctx, sessionID, hints.PreviousResponseID)
 		if err != nil && s.singleGrokAuthConfigured() {
 			accountID = ""
-			lostContinuation = false
+			// The continuation id belongs to a pool account. Falling back to the
+			// single account must drop it; forwardGrokUpstream still keeps the
+			// field when the request carries tool output.
+			lostContinuation = hints.PreviousResponseID != ""
 			token, err = s.GrokAuth.Token(ctx)
 		}
 		return token, accountID, lostContinuation, err

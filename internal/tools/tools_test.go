@@ -106,6 +106,58 @@ func TestWriteAndEditTool(t *testing.T) {
 	}
 }
 
+func TestEditAppliesAgainstOriginalText(t *testing.T) {
+	env := testEnv(t)
+	path := filepath.Join(env.Cwd, "c.txt")
+
+	// 第二块的原文只存在于第一块插入的文本里，不能把插入结果再改掉。
+	if err := env.WriteText(path, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	out := runTool(t, EditTool{}, `{"path":"c.txt","edits":[{"old_string":"hello","new_string":"hello hello"},{"old_string":"hello hello","new_string":"bye"}]}`, env)
+	if !out.IsError || !strings.Contains(out.Text, "未命中") {
+		t.Fatalf("插入文本不应被后续块改写: %+v", out)
+	}
+	got, err := env.ReadText(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "hello" {
+		t.Fatalf("失败的编辑不应写盘: %q", got)
+	}
+
+	// 前一块的新文本包含后一块的 old_string，但两块在原文上不重叠。
+	if err := env.WriteText(path, "ab"); err != nil {
+		t.Fatal(err)
+	}
+	out = runTool(t, EditTool{}, `{"path":"c.txt","edits":[{"old_string":"a","new_string":"ab"},{"old_string":"b","new_string":"c"}]}`, env)
+	if out.IsError {
+		t.Fatalf("不重叠编辑应成功: %s", out.Text)
+	}
+	got, err = env.ReadText(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "abc" {
+		t.Fatalf("应基于原文得到 abc, got %q", got)
+	}
+
+	if err := env.WriteText(path, "abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	out = runTool(t, EditTool{}, `{"path":"c.txt","edits":[{"old_string":"bcd","new_string":"X"},{"old_string":"cde","new_string":"Y"}]}`, env)
+	if !out.IsError || !strings.Contains(out.Text, "重叠") {
+		t.Fatalf("重叠应拒绝: %+v", out)
+	}
+	got, err = env.ReadText(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "abcdef" {
+		t.Fatalf("重叠失败不应写盘: %q", got)
+	}
+}
+
 func TestGlobTool(t *testing.T) {
 	env := testEnv(t)
 	_ = env.WriteText(filepath.Join(env.Cwd, "a.go"), "package a\n")

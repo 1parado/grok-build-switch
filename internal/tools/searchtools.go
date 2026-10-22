@@ -375,7 +375,7 @@ func (g *grepRun) searchFile(path string) {
 		if g.re.MatchString(line) {
 			text := line
 			if len(text) > grepMaxLineLen {
-				text = text[:grepMaxLineLen] + "…[行截断，用 read 看全行]"
+				text = prefixText(text, grepMaxLineLen) + "…[行截断，用 read 看全行]"
 			}
 			hit := grepHit{Path: path, Line: i + 1, Text: text}
 			if g.context > 0 {
@@ -393,7 +393,7 @@ func (g *grepRun) searchFile(path string) {
 
 func truncateGrepLine(s string) string {
 	if len(s) > grepMaxLineLen {
-		return s[:grepMaxLineLen] + "…"
+		return prefixText(s, grepMaxLineLen) + "…"
 	}
 	return s
 }

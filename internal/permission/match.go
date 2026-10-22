@@ -2,7 +2,6 @@ package permission
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 )
 
@@ -47,7 +46,7 @@ func matchArg(rule parsedRule, tool, arg string) bool {
 	case "bash":
 		return matchCommand(pattern, arg)
 	default:
-		return MatchGlob(pattern, arg) || MatchGlob(pattern, filepath.ToSlash(arg))
+		return matchPath(pattern, arg)
 	}
 }
 

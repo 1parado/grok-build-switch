@@ -1240,10 +1240,13 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 // staticETag 计算资源的内容指纹（进程内缓存：嵌入资源不可变）。
+// 页面会并行请求多份资源，缓存的读写必须串行。
 func staticETag(name string, data []byte) string {
-	staticETagOnce.Do(func() {
+	staticETagMu.Lock()
+	defer staticETagMu.Unlock()
+	if staticETags == nil {
 		staticETags = map[string]string{}
-	})
+	}
 	if etag, ok := staticETags[name]; ok {
 		return etag
 	}
@@ -1254,8 +1257,8 @@ func staticETag(name string, data []byte) string {
 }
 
 var (
-	staticETagOnce sync.Once
-	staticETags    map[string]string
+	staticETagMu sync.Mutex
+	staticETags  map[string]string
 )
 
 // matchesETag 按 RFC 7232 处理 If-None-Match（* 与逗号分隔的标签列表）。

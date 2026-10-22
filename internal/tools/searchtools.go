@@ -315,7 +315,7 @@ type grepRun struct {
 }
 
 func (g *grepRun) walk(dir string, depth int) {
-	if g.ctx.Err() != nil || depth > 10 || len(g.hits) >= g.max {
+	if g.ctx.Err() != nil || depth > 10 || g.markCapped() {
 		return
 	}
 	entries, err := osReadDir(dir)
@@ -326,7 +326,7 @@ func (g *grepRun) walk(dir string, depth int) {
 		if g.ctx.Err() != nil {
 			return
 		}
-		if len(g.hits) >= g.max {
+		if g.markCapped() {
 			return
 		}
 		name := e.Name()
@@ -349,7 +349,7 @@ func (g *grepRun) walk(dir string, depth int) {
 }
 
 func (g *grepRun) searchFile(path string) {
-	if g.ctx.Err() != nil || len(g.hits) >= g.max {
+	if g.ctx.Err() != nil || g.markCapped() {
 		return
 	}
 	if st := g.env.Stat(path); !st.Exists || st.Size > grepMaxFileBytes {
@@ -366,7 +366,7 @@ func (g *grepRun) searchFile(path string) {
 		g.files = map[string]bool{}
 	}
 	g.files[path] = true
-	lines := strings.Split(content, "\n")
+	lines := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
 	for i, line := range lines {
 		if len(g.hits) >= g.max {
 			g.capped = true
@@ -403,6 +403,16 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// markCapped reports that the hit cap is full. Callers stop the walk and
+// the notice tells the model that later files were not searched.
+func (g *grepRun) markCapped() bool {
+	if len(g.hits) < g.max {
+		return false
+	}
+	g.capped = true
+	return true
 }
 
 func (g *grepRun) render(pattern string) ToolOutput {

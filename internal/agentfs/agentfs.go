@@ -74,6 +74,7 @@ func (e *SandboxError) Error() string {
 }
 
 // Guard 解析路径并强制沙箱。所有读写工具入口必须先走它。
+// 文字路径落在沙箱内还不够：目录中的符号链接会把后续读写带到沙箱外。
 func (e Env) Guard(path string) (string, error) {
 	abs, err := e.Resolve(path)
 	if err != nil {
@@ -82,11 +83,80 @@ func (e Env) Guard(path string) (string, error) {
 	if !e.WithinSandbox(abs) {
 		return "", &SandboxError{Path: abs}
 	}
+	if err := e.refuseEscapingSymlink(abs); err != nil {
+		return "", err
+	}
 	return abs, nil
+}
+
+// refuseEscapingSymlink 拒绝解析后落在沙箱外的路径。尚不存在的最后一段
+// 会回到最近的已存在父目录再解析，这样新建文件仍能通过，而父目录是指向
+// 外部的符号链接时会被拦住。
+func (e Env) refuseEscapingSymlink(abs string) error {
+	real, err := sandboxReal(abs)
+	if err != nil {
+		return err
+	}
+	if !e.withinResolved(real) {
+		return &SandboxError{Path: abs}
+	}
+	return nil
+}
+
+func (e Env) withinResolved(real string) bool {
+	if rootContains(e.Cwd, real) {
+		return true
+	}
+	for _, extra := range e.SandboxExtra {
+		if rootContains(extra, real) {
+			return true
+		}
+	}
+	return false
+}
+
+func rootContains(root, target string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	resolved, err := sandboxReal(root)
+	if err != nil {
+		resolved = filepath.Clean(root)
+	}
+	return withinRoot(resolved, target)
+}
+
+// sandboxReal 解析已存在的符号链接。路径尾部尚不存在时，解析最近的已存在
+// 父目录，再把剩余段落接回去。
+func sandboxReal(path string) (string, error) {
+	path = filepath.Clean(path)
+	var pending []string
+	cur := path
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			for i := len(pending) - 1; i >= 0; i-- {
+				real = filepath.Join(real, pending[i])
+			}
+			return filepath.Clean(real), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		pending = append(pending, filepath.Base(cur))
+		cur = parent
+	}
 }
 
 // ReadText 读取文件（上限 maxBytes；0 表示默认 2MB）。
 func (e Env) ReadText(abs string, maxBytes int64) (string, error) {
+	if err := e.refuseEscapingSymlink(abs); err != nil {
+		return "", err
+	}
 	if maxBytes <= 0 {
 		maxBytes = 2 << 20
 	}
@@ -111,6 +181,9 @@ func (e Env) ReadText(abs string, maxBytes int64) (string, error) {
 
 // WriteText 原子写入：写临时文件后 rename。
 func (e Env) WriteText(abs, content string) error {
+	if err := e.refuseEscapingSymlink(abs); err != nil {
+		return err
+	}
 	dir := filepath.Dir(abs)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

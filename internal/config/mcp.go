@@ -65,7 +65,7 @@ func RemoveMcpServerText(data []byte, name string) []byte {
 	lines := splitLines(string(data))
 	var out []string
 	for i := 0; i < len(lines); {
-		if parseHeader(lines[i]) == header {
+		if lineHeader(lines, i) == header {
 			i = skipSection(lines, i+1)
 			continue
 		}
@@ -88,7 +88,7 @@ func skipSectionWithSubtables(lines []string, start int, header string) int {
 	end := skipSection(lines, start)
 	prefix := header + "."
 	for end < len(lines) {
-		next := parseHeader(lines[end])
+		next := lineHeader(lines, end)
 		if !strings.HasPrefix(next, prefix) {
 			break
 		}
@@ -108,7 +108,7 @@ func EnsureMcpServerText(data []byte, cfg McpServerConfig) []byte {
 	var out []string
 	replaced := false
 	for i := 0; i < len(lines); {
-		current := parseHeader(lines[i])
+		current := lineHeader(lines, i)
 		if current == header {
 			end := skipSectionWithSubtables(lines, i+1, current)
 			// 已写入过（含重复段）则丢弃，保证最终只有一个。

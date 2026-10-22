@@ -311,6 +311,46 @@ func TestNativeServiceRewind(t *testing.T) {
 	}
 }
 
+func TestNativeServiceRewindDropsStoredTurn(t *testing.T) {
+	prov := &stubProvider{steps: []llm.StreamResult{textStep("回复")}}
+	svc := newTestNativeService(t, prov)
+	sub := subscribeNative(t, svc)
+	cwd := t.TempDir()
+	_ = svc.Start(t.Context(), agentbridge.StartOptions{Cwd: cwd})
+	<-sub.events
+	_ = svc.Prompt("q1", nil)
+	waitTurnDone(t, sub, 10*time.Second)
+	_ = svc.Prompt("q2", nil)
+	waitTurnDone(t, sub, 10*time.Second)
+
+	res := svc.RewindDropLastUser(t.Context(), false)
+	if !res.OK {
+		t.Fatalf("rewind 错误: %+v", res)
+	}
+	sessionID := svc.Status().SessionID
+	records, err := svc.st.LoadRecords(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range records {
+		if rec.Text == "q2" {
+			t.Fatalf("回退后 transcript 仍保留被丢弃的用户轮次: %+v", records)
+		}
+	}
+	if len(records) != 2 || records[0].Text != "q1" || records[1].Text != "回复" {
+		t.Fatalf("应只留下第一轮: %+v", records)
+	}
+
+	_ = svc.Stop()
+	if err := svc.Start(t.Context(), agentbridge.StartOptions{Cwd: cwd, SessionID: sessionID}); err != nil {
+		t.Fatal(err)
+	}
+	hist := svc.memory.History()
+	if len(hist) != 2 || hist[0].Text() != "q1" || hist[1].Text() != "回复" {
+		t.Fatalf("重新打开会话又装回了被回退的轮次: %+v", hist)
+	}
+}
+
 func TestNativeServiceEffortWiring(t *testing.T) {
 	prov := &stubProvider{steps: []llm.StreamResult{textStep("ok")}}
 	svc := newTestNativeService(t, prov)

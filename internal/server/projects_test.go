@@ -53,4 +53,12 @@ func TestLooksLikeGarbledPath(t *testing.T) {
 	if looksLikeGarbledPath("正常中文") {
 		t.Fatal("did not expect garbled for valid CJK")
 	}
+	if !looksLikeGarbledPath("bad�name") {
+		t.Fatal("expected the replacement character to count as garbled")
+	}
+	for _, name := range []string{"Café", "Résumé", "Århus", "Bjørn"} {
+		if looksLikeGarbledPath(name) {
+			t.Fatalf("real name %q was treated as mojibake", name)
+		}
+	}
 }

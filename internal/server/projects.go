@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"grok_switch/internal/atomicfile"
 )
 
 type chatProject struct {
@@ -75,38 +76,11 @@ func (s *Server) loadProjects() ([]chatProject, error) {
 }
 
 func (s *Server) saveProjects(list []chatProject) error {
-	path := s.projectsFile()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		if runtime.GOOS == "windows" {
-			// Windows 不允许 rename 覆盖已存在文件。
-			if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-				return err
-			}
-			return os.Rename(tmpName, path)
-		}
-		return err
-	}
-	return nil
+	return atomicfile.Write(s.projectsFile(), append(data, '\n'), atomicfile.Options{DirMode: 0o700})
 }
 
 func (s *Server) handleAgentProjects(w http.ResponseWriter, r *http.Request) {

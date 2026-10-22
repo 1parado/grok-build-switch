@@ -4,12 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 	"unicode"
+
+	"grok_switch/internal/atomicfile"
 )
 
 // xAI OAuth Device Authorization Grant (RFC 8628).
@@ -139,9 +139,6 @@ func WriteAuthFile(authDir string, auth AuthFile) (string, []byte, error) {
 	if authDir == "" {
 		return "", nil, fmt.Errorf("认证输出目录不能为空")
 	}
-	if err := os.MkdirAll(authDir, 0o700); err != nil {
-		return "", nil, err
-	}
 	name := CredentialFileName(auth.Email, auth.Sub)
 	dest := filepath.Join(authDir, name)
 	data, err := json.MarshalIndent(auth, "", "  ")
@@ -149,34 +146,9 @@ func WriteAuthFile(authDir string, auth AuthFile) (string, []byte, error) {
 		return "", nil, err
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(authDir, ".xai-*.tmp")
-	if err != nil {
+	if err := atomicfile.Write(dest, data, atomicfile.Options{DirMode: 0o700, FileMode: 0o600}); err != nil {
 		return "", nil, err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
-		tmp.Close()
-		return "", nil, err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return "", nil, err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", nil, err
-	}
-	if err := os.Rename(tmpName, dest); err != nil {
-		if runtime.GOOS == "windows" {
-			_ = os.Remove(dest)
-			if err = os.Rename(tmpName, dest); err != nil {
-				return "", nil, err
-			}
-		} else {
-			return "", nil, err
-		}
-	}
-	_ = os.Chmod(dest, 0o600)
 	return dest, data, nil
 }
 

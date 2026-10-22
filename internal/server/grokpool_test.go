@@ -133,6 +133,94 @@ func TestGrokProxyFallsBackToSingleAuthWhenPoolHasNoAvailableAccount(t *testing.
 	}
 }
 
+func TestGrokProxyFallbackDropsContinuationFromPoolAccount(t *testing.T) {
+	dir := t.TempDir()
+	pool, err := grokpool.NewManager(filepath.Join(dir, "pool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"grok-4.5"}]}`)
+		case "/responses":
+			_, _ = io.WriteString(w, `{"id":"ok"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	pool.SetUpstreamURL(upstream.URL)
+
+	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	_, err = pool.Import([]grokpool.ImportFile{{
+		Name:    "disabled.json",
+		Content: fmt.Sprintf(`{"type":"xai","access_token":"pool-access","expired":%q,"email":"disabled@example.com"}`, expiry),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID := pool.Status().Accounts[0].ID
+	if _, err := pool.SetDisabled(accountID, true); err != nil {
+		t.Fatal(err)
+	}
+	single := grokauth.NewStore(filepath.Join(dir, "single.json"))
+	if _, err := single.Import([]byte(fmt.Sprintf(`{"type":"xai","access_token":"single-access","expired":%q}`, expiry))); err != nil {
+		t.Fatal(err)
+	}
+	waitForInspection(t, pool)
+
+	previousTransport := http.DefaultTransport
+	var upstreamAuthorization string
+	var upstreamBody string
+	http.DefaultTransport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		upstreamAuthorization = request.Header.Get("Authorization")
+		raw, readErr := io.ReadAll(request.Body)
+		if readErr != nil {
+			return nil, readErr
+		}
+		upstreamBody = string(raw)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Request:    request,
+		}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+
+	server := &Server{GrokAuth: single, GrokPool: pool}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/grok/v1/responses", strings.NewReader(`{"model":"grok-4.5","previous_response_id":"resp_from_pool"}`))
+	request.Header.Set("Authorization", "Bearer "+pool.Status().LocalAPIKey)
+	server.handleGrokProxy(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("proxy status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if upstreamAuthorization != "Bearer single-access" {
+		t.Fatalf("upstream Authorization = %q", upstreamAuthorization)
+	}
+	if strings.Contains(upstreamBody, "previous_response_id") || strings.Contains(upstreamBody, "resp_from_pool") {
+		t.Fatalf("single account received the pool continuation id: %s", upstreamBody)
+	}
+	if !strings.Contains(upstreamBody, "grok-4.5") {
+		t.Fatalf("upstream body = %s", upstreamBody)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/grok/v1/responses", strings.NewReader(`{"model":"grok-4.5","previous_response_id":"resp_from_pool","input":[{"type":"function_call_output","call_id":"c1","output":"ok"}]}`))
+	request.Header.Set("Authorization", "Bearer "+pool.Status().LocalAPIKey)
+	server.handleGrokProxy(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("tool-output proxy status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(upstreamBody, "resp_from_pool") {
+		t.Fatalf("tool output must keep the continuation id: %s", upstreamBody)
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {

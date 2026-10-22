@@ -149,12 +149,26 @@ func (s *responsesStreamState) handle(data []byte, onDelta func(StreamedPart)) e
 		if json.Unmarshal(data, &e) == nil && e.Item.Type == "function_call" {
 			// done 携带完整 arguments：无论 added/delta 走过没有，都以它为准，
 			// 修正部分代理增量流不完整或缺失的中间态。
-			if idx := s.findCall(e.Item.CallID); idx >= 0 {
+			// output_index 是这条调用的稳定键。added 时常还没有 call_id，
+			// 若这里只按 call_id 查找，done 会再追加一条，同一次调用被执行两遍。
+			idx, ok := s.callIndex[e.OutputIndex]
+			if !ok && e.Item.CallID != "" {
+				if found := s.findCall(e.Item.CallID); found >= 0 {
+					idx, ok = found, true
+				}
+			}
+			if ok && idx >= 0 && idx < len(s.msg.ToolCalls) {
+				if e.Item.CallID != "" {
+					s.msg.ToolCalls[idx].ID = e.Item.CallID
+				}
+				if e.Item.Name != "" {
+					s.msg.ToolCalls[idx].Name = e.Item.Name
+				}
 				s.callArgs[e.OutputIndex] = e.Item.Arguments
 				s.msg.ToolCalls[idx].Arguments = json.RawMessage(orEmptyJSON(e.Item.Arguments))
 			} else {
 				// 兜底：若 added 事件缺失（部分代理实现），在此补齐。
-				idx := len(s.msg.ToolCalls)
+				idx = len(s.msg.ToolCalls)
 				s.callIndex[e.OutputIndex] = idx
 				s.callArgs[e.OutputIndex] = e.Item.Arguments
 				s.msg.ToolCalls = append(s.msg.ToolCalls, ToolCall{

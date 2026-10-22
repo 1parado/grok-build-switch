@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"grok_switch/internal/grokauth"
 	"grok_switch/internal/grokpool"
@@ -600,9 +601,25 @@ func reconcileGrokAuthModelRef(ref string, available []string) string {
 func truncateTextServer(text string, limit int) string {
 	text = strings.TrimSpace(text)
 	if len(text) > limit {
-		return text[:limit] + "…"
+		return utf8Prefix(text, limit) + "…"
 	}
 	return text
+}
+
+// utf8Prefix keeps the longest prefix of s that fits in max bytes and ends on
+// a rune boundary. A rune that does not fit is omitted.
+func utf8Prefix(s string, max int) string {
+	if max <= 0 || s == "" {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func (s *Server) ensureGrokAuthProfile() error {

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestImportPersistsMetadataWithoutTokensAndKeepsStableKey(t *testing.T) {
@@ -338,6 +339,14 @@ func TestProbeErrorTextIsBounded(t *testing.T) {
 	parsed := extractProbeError(message)
 	if len(parsed.Message) != 1003 || !strings.HasSuffix(parsed.Message, "…") {
 		t.Fatalf("bounded message length = %d", len(parsed.Message))
+	}
+
+	parsed = extractProbeError(strings.Repeat("你", 400))
+	if !utf8.ValidString(parsed.Message) || !strings.HasSuffix(parsed.Message, "…") {
+		t.Fatalf("probe error text = %q", parsed.Message)
+	}
+	if strings.ContainsRune(parsed.Message, utf8.RuneError) {
+		t.Fatal("probe error text split a rune")
 	}
 }
 

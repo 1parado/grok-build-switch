@@ -44,6 +44,42 @@ func TestExpandSkillPromptSupportsShortSyntaxAndNestedSkill(t *testing.T) {
 	}
 }
 
+func TestExpandSkillPromptKeepsArgsWhenNameSitsInsideSkills(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"ls", "skill"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, name, "SKILL.md"), []byte("Instructions for "+name+"."), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := expandSkillPromptWithRoots("/skills ls list the files", []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "Instructions for ls.") || strings.Contains(got, "ls list the files") || !strings.HasSuffix(got, "list the files") {
+		t.Fatalf("slash skill arguments were rewritten: %q", got)
+	}
+
+	got, err = expandSkillPromptWithRoots("/skills skill review this", []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "Instructions for skill.") || strings.Contains(got, "s skill review this") || !strings.HasSuffix(got, "review this") {
+		t.Fatalf("skill name that prefixes the keyword lost its arguments: %q", got)
+	}
+
+	got, err = expandSkillPromptWithRoots("/ls list the files", []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "Instructions for ls.") || !strings.HasSuffix(got, "list the files") {
+		t.Fatalf("short skill syntax changed: %q", got)
+	}
+}
+
 func TestExpandSkillPromptLeavesUnknownCommandsUntouched(t *testing.T) {
 	const input = "/skills does-not-exist do not rewrite this"
 	got, err := expandSkillPromptWithRoots(input, nil)

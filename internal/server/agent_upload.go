@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,9 @@ const (
 )
 
 var unsafeUploadName = regexp.MustCompile(`[^a-zA-Z0-9._\-\p{L}\p{N}]+`)
+
+// uploadNow 让测试把两次上传钉在同一毫秒。生产路径就是 time.Now。
+var uploadNow = time.Now
 
 func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -78,9 +82,8 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, http.StatusInternalServerError)
 		return
 	}
-	stamp := time.Now().UTC().Format("20060102-150405.000")
-	dest := filepath.Join(dir, stamp+"-"+name)
-	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	stamp := uploadNow().UTC().Format("20060102-150405.000")
+	dest, out, err := openUniqueUpload(dir, stamp, name)
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return
@@ -107,6 +110,24 @@ func (s *Server) handleAgentUpload(w http.ResponseWriter, r *http.Request) {
 		"mime_type": mimeType,
 		"size":      written,
 	})
+}
+
+// openUniqueUpload 以 O_EXCL 创建上传文件。同一毫秒里两份同名附件
+// （连续粘贴的 image.png）若先删再写，先返回的路径会被后一次截断。
+func openUniqueUpload(dir, stamp, name string) (string, *os.File, error) {
+	for n := 0; n < 1000; n++ {
+		suffix := ""
+		if n > 0 {
+			suffix = fmt.Sprintf("-%d", n)
+		}
+		dest := filepath.Join(dir, stamp+suffix+"-"+name)
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return dest, f, err
+	}
+	return "", nil, fmt.Errorf("无法分配上传文件名")
 }
 
 func mimeFromFilename(name string) string {

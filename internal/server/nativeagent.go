@@ -827,13 +827,23 @@ func (n *nativeAgentService) RewindDropLastUser(ctx context.Context, restoreFile
 		return agentbridge.RewindResult{OK: false, Error: "会话进行中，无法回退"}
 	}
 	target := mem.UserTurns()
-	if !mem.RewindToUserTurn(target) {
+	if target <= 0 {
 		return agentbridge.RewindResult{OK: false, Error: "没有可回退的用户消息"}
 	}
+	// 先落盘再改内存：磁盘失败时内存仍是回退前的对话，重开不会和界面各说各话。
+	if sessionID != "" {
+		truncated, err := n.st.TruncateBeforeLastUser(sessionID)
+		if err != nil {
+			return agentbridge.RewindResult{OK: false, Error: "会话记录回退失败: " + err.Error()}
+		}
+		if !truncated {
+			return agentbridge.RewindResult{OK: false, Error: "没有可回退的用户消息"}
+		}
+	}
+	mem.RewindToUserTurn(target)
 	n.mu.Lock()
 	n.errText = ""
 	n.mu.Unlock()
-	_ = sessionID
 	return agentbridge.RewindResult{OK: true, UserTurnCount: mem.UserTurns()}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const inspectionClientVersion = "0.2.93"
@@ -391,10 +392,25 @@ func extractProbeError(body string) probeError {
 
 func compactProbeText(text string) string {
 	text = strings.TrimSpace(text)
-	if len(text) > 1000 {
-		return text[:1000] + "…"
+	const limit = 1000
+	if len(text) <= limit {
+		return text
 	}
-	return text
+	return utf8Prefix(text, limit) + "…"
+}
+
+func utf8Prefix(s string, max int) string {
+	if max <= 0 || s == "" {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 func isFreeUsageExhausted(code, message string) bool {

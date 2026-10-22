@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"grok_switch/internal/atomicfile"
 )
 
 // Env 是一次工具执行的上下文：工作目录 + 环境抽象。
@@ -111,25 +113,7 @@ func (e Env) ReadText(abs string, maxBytes int64) (string, error) {
 
 // WriteText 原子写入：写临时文件后 rename。
 func (e Env) WriteText(abs, content string) error {
-	dir := filepath.Dir(abs)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".agentfs-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	_, writeErr := tmp.WriteString(content)
-	closeErr := tmp.Close()
-	if writeErr != nil || closeErr != nil {
-		os.Remove(tmpName)
-		if writeErr != nil {
-			return writeErr
-		}
-		return closeErr
-	}
-	return os.Rename(tmpName, abs)
+	return atomicfile.Write(abs, []byte(content), atomicfile.Options{DirMode: 0o755})
 }
 
 // ListDir 返回目录条目名（排序）。

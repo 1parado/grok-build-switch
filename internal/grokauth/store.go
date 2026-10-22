@@ -14,14 +14,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"grok_switch/internal/atomicfile"
 	"grok_switch/internal/netproxy"
 	"grok_switch/internal/recovery"
 )
@@ -579,41 +578,8 @@ func compactError(body []byte) string {
 }
 
 func atomicWrite(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	// rename 前把数据块刷盘，避免掉电时丢失刚轮换的 refresh_token 等关键凭据。
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		if runtime.GOOS == "windows" {
-			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				return err
-			}
-			return os.Rename(tmpName, path)
-		}
-		return err
-	}
-	return nil
+	// Sync before publish so a power loss cannot leave a rotated refresh token half-written.
+	return atomicfile.Write(path, data, atomicfile.Options{DirMode: 0o700, FileMode: 0o600, Sync: true})
 }
 
 func UpstreamURL() string { return defaultUpstreamURL }

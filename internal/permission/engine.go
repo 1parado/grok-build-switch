@@ -3,9 +3,10 @@ package permission
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+
+	"grok_switch/internal/atomicfile"
 )
 
 // Engine 是权限决策器：模式 + 两级规则表。并发安全。
@@ -226,26 +227,7 @@ func (e *Engine) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(e.path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(e.path), ".perm-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, e.path)
+	return atomicfile.Write(e.path, data, atomicfile.Options{DirMode: 0o755})
 }
 
 func lower(s string) string {

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"grok_switch/internal/atomicfile"
 	grokconfig "grok_switch/internal/config"
 	"grok_switch/internal/profiles"
 )
@@ -308,30 +308,5 @@ func (s *Switcher) WriteConfig(content []byte) error {
 }
 
 func atomicWrite(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		if runtime.GOOS == "windows" {
-			if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-				return err
-			}
-			return os.Rename(tmpName, path)
-		}
-		return err
-	}
-	return nil
+	return atomicfile.Write(path, data, atomicfile.Options{DirMode: 0o755})
 }

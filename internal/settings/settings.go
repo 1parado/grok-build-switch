@@ -7,10 +7,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
+	"grok_switch/internal/atomicfile"
 	"grok_switch/internal/recovery"
 )
 
@@ -193,29 +193,7 @@ func (s *Store) writeLocked(current Settings) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), filepath.Base(s.path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		if runtime.GOOS == "windows" {
-			if removeErr := os.Remove(s.path); removeErr != nil && !os.IsNotExist(removeErr) {
-				return err
-			}
-			return os.Rename(tmpName, s.path)
-		}
+	if err := atomicfile.Write(s.path, append(data, '\n'), atomicfile.Options{DirMode: 0o755}); err != nil {
 		return err
 	}
 	// 写入成功后同步缓存；Stat 失败则失效缓存，下次读取时重建。

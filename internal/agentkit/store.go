@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"grok_switch/internal/atomicfile"
 	"grok_switch/internal/llm"
 )
 
@@ -401,22 +402,7 @@ func countLines(path string) int {
 }
 
 func atomicWriteJSON(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".meta-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, data, atomicfile.Options{DirMode: 0o755})
 }
 
 func newSessionID() string {

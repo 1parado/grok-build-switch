@@ -1,6 +1,7 @@
 package remoteaccess
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -39,5 +40,45 @@ func TestResetSessionsRevokesExistingToken(t *testing.T) {
 	}
 	if authorized {
 		t.Fatal("old session token remained authorized after reset")
+	}
+}
+
+func TestResetSessionsDropsCachedTokenWhenMtimeStays(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "remote_access.json")
+	store := NewStore(path)
+	before, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, err := store.Authorized(before.SessionToken)
+	if err != nil || !authorized {
+		t.Fatalf("prime cache: authorized=%v err=%v", authorized, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResetSessions(); err != nil {
+		t.Fatal(err)
+	}
+	// A new token is the same length, so the file size does not change.
+	// Filesystems that do not advance mtime would keep the cache hit.
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	authorized, err = store.Authorized(before.SessionToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorized {
+		t.Fatal("revoked session token stayed authorized from the mtime cache")
+	}
+	after, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, err = store.Authorized(after.SessionToken)
+	if err != nil || !authorized {
+		t.Fatalf("new token after reset: authorized=%v err=%v", authorized, err)
 	}
 }

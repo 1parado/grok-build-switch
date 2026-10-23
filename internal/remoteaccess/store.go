@@ -206,14 +206,20 @@ func (s *Store) saveLocked(state persistedState) error {
 		return err
 	}
 	if err := os.Rename(tmpName, s.path); err != nil {
-		if runtime.GOOS == "windows" {
-			if removeErr := os.Remove(s.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				return err
-			}
-			return os.Rename(tmpName, s.path)
+		if runtime.GOOS != "windows" {
+			return err
 		}
-		return err
+		if removeErr := os.Remove(s.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return err
+		}
+		if err := os.Rename(tmpName, s.path); err != nil {
+			return err
+		}
 	}
+	// The session token is a fixed length, so a reset does not change the
+	// file size. The cache key is mtime plus size. A filesystem that does
+	// not advance mtime would keep authorizing the revoked token.
+	s.tokenValid = false
 	return nil
 }
 

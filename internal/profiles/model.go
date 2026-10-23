@@ -309,7 +309,7 @@ func migrateImageGeneration(p Profile) *ImageGenerationConfig {
 	}
 	config := &ImageGenerationConfig{Enabled: true, Model: selected}
 	for _, model := range p.Models {
-		if modelKey(model) != selected && model.Model != selected && model.Name != "grok-imagine-image" {
+		if modelKey(model) != selected && model.Model != selected && model.Name != selected {
 			continue
 		}
 		config.Model = model.Model

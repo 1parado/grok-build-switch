@@ -240,20 +240,44 @@ func (s *server) generateImage(args json.RawMessage) ([]map[string]any, bool) {
 		Height    int      `json:"height"`
 		ErrCode   string   `json:"err_code"`
 		ErrMsg    string   `json:"err_msg"`
+		Job       struct {
+			ID string `json:"id"`
+		} `json:"job"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return []map[string]any{textContent("解析生图响应失败: " + err.Error())}, true
 	}
-	if resp.StatusCode >= 400 || !result.OK || len(result.Images) == 0 {
+	imageURL := ""
+	modelName := result.ModelName
+	width, height := result.Width, result.Height
+	// /api/imagine/generate 现在立刻返回任务，图片在 /api/imagine/jobs 里。
+	// 只看这一次响应的话 images 为空，工具会把正在生成的图报成失败。
+	if result.OK && result.Job.ID != "" && len(result.Images) == 0 {
+		job, err := s.waitImagineJob(result.Job.ID)
+		if err != nil {
+			return []map[string]any{textContent(err.Error())}, true
+		}
+		if job.State == "error" || len(job.Images) == 0 {
+			msg := job.Error
+			if msg == "" {
+				msg = "生图失败"
+			}
+			return []map[string]any{textContent(msg)}, true
+		}
+		imageURL = job.Images[0].URL
+		modelName = job.Images[0].Model
+		width, height = job.Images[0].Width, job.Images[0].Height
+	} else if resp.StatusCode >= 400 || !result.OK || len(result.Images) == 0 {
 		msg := result.ErrMsg
 		if msg == "" {
 			msg = fmt.Sprintf("生图失败（HTTP %d）", resp.StatusCode)
 		}
 		return []map[string]any{textContent(msg)}, true
+	} else {
+		imageURL = result.Images[0]
 	}
 
 	// 下载图片并转 base64，让模型在对话中直接看到结果。
-	imageURL := result.Images[0]
 	data, err := s.fetchBytes(imageURL)
 	if err != nil {
 		return []map[string]any{textContent("下载图片失败: " + err.Error())}, true
@@ -262,7 +286,7 @@ func (s *server) generateImage(args json.RawMessage) ([]map[string]any, bool) {
 	if strings.HasSuffix(strings.ToLower(imageURL), ".png") {
 		mimeType = "image/png"
 	}
-	text := fmt.Sprintf("图片已生成：%s（%dx%d，模型 %s）", s.baseURL+imageURL, result.Width, result.Height, result.ModelName)
+	text := fmt.Sprintf("图片已生成：%s（%dx%d，模型 %s）", s.baseURL+imageURL, width, height, modelName)
 	return []map[string]any{
 		map[string]any{
 			"type":     "image",
@@ -271,6 +295,53 @@ func (s *server) generateImage(args json.RawMessage) ([]map[string]any, bool) {
 		},
 		textContent(text),
 	}, false
+}
+
+type imagineJobView struct {
+	ID     string `json:"id"`
+	State  string `json:"state"`
+	Error  string `json:"error"`
+	Images []struct {
+		URL    string `json:"url"`
+		Model  string `json:"model"`
+		Width  int    `json:"width"`
+		Height int    `json:"height"`
+	} `json:"images"`
+}
+
+// waitImagineJob 轮询任务直到结束。生成接口只负责建任务，图片要等终态才有。
+func (s *server) waitImagineJob(id string) (imagineJobView, error) {
+	deadline := time.Now().Add(140 * time.Second)
+	for {
+		resp, err := s.client.Get(s.baseURL + "/api/imagine/jobs")
+		if err != nil {
+			return imagineJobView{}, err
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return imagineJobView{}, readErr
+		}
+		if resp.StatusCode >= 400 {
+			return imagineJobView{}, fmt.Errorf("查询生图任务失败（HTTP %d）", resp.StatusCode)
+		}
+		var payload struct {
+			Jobs []imagineJobView `json:"jobs"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return imagineJobView{}, err
+		}
+		for _, job := range payload.Jobs {
+			if job.ID != id || job.State == "" || job.State == "running" {
+				continue
+			}
+			return job, nil
+		}
+		if !time.Now().Before(deadline) {
+			return imagineJobView{}, fmt.Errorf("生图任务超时")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func textContent(text string) map[string]any {

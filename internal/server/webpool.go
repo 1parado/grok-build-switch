@@ -122,7 +122,15 @@ func (s *Server) streamWebChat(w http.ResponseWriter, ctx context.Context, id, m
 		if err != nil {
 			return false
 		}
-		if _, err := w.Write(append(data, '\n')); err != nil {
+		// OpenAI 客户端和内置 ChatCompletionsProvider 只读取 data: 字段。
+		// 裸 JSON 行会被当成注释丢掉，流式回复变成空的。
+		if _, err := w.Write([]byte("data: ")); err != nil {
+			return false
+		}
+		if _, err := w.Write(data); err != nil {
+			return false
+		}
+		if _, err := w.Write([]byte("\n\n")); err != nil {
 			return false
 		}
 		if flusher != nil {

@@ -1,6 +1,8 @@
 package webpool
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -60,6 +62,62 @@ func ModelList() []map[string]any {
 type OpenAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+// UnmarshalJSON 同时接受字符串 content，以及
+// [{"type":"text","text":"..."}] 这种分段。只拼接非空 text，
+// 图片等没有 text 的分段被跳过。
+func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	content, err := flattenOpenAIContent(raw.Content)
+	if err != nil {
+		return err
+	}
+	m.Role = raw.Role
+	m.Content = content
+	return nil
+}
+
+func flattenOpenAIContent(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", nil
+	}
+	switch raw[0] {
+	case '"':
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return "", err
+		}
+		return text, nil
+	case '[':
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &parts); err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for _, part := range parts {
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(text)
+		}
+		return b.String(), nil
+	default:
+		return "", fmt.Errorf("content 必须是字符串或文本分段")
+	}
 }
 
 // maxTranscriptChars 超长转录截断（v1 不做文件上传，见设计文档「明确不做」）。

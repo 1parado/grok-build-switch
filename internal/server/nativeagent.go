@@ -478,12 +478,7 @@ func buildUserMessage(text string, attachments []agentbridge.Attachment) llm.Mes
 		msg.Parts = append(msg.Parts, llm.TextPart{Text: text})
 	}
 	for _, a := range attachments {
-		if a.Kind == "image" && a.Data != "" {
-			msg.Parts = append(msg.Parts, llm.ImagePart{Data: a.Data, MimeType: a.MimeType})
-		} else if a.Path != "" {
-			// 路径附件作为文本上下文注入（P3 决策：不推 base64）。
-			msg.Parts = append(msg.Parts, llm.TextPart{Text: fmt.Sprintf("[附件 %s: %s]", a.Name, a.Path)})
-		}
+		msg.Parts = append(msg.Parts, nativeAttachmentParts(a)...)
 	}
 	return msg
 }

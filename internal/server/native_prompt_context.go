@@ -45,14 +45,16 @@ func loadProjectContext(cwd string) string {
 			break
 		}
 	}
-	// 祖先在前、cwd 在后？pi 是全局 + 祖先链去重；此处按发现逆序（根→cwd）使 cwd 覆盖。
-	for i, j := 0, len(files)-1; i < j; i, j = i+1, j-1 {
-		files[i], files[j] = files[j], files[i]
-	}
-	var b strings.Builder
-	total := 0
+	// files 从 cwd 向外排列。预算从最近的文件开始扣，否则两个祖先文件
+	// 就能把 16 KiB 占满，用户正在打开的 AGENTS.md 进不了系统提示。
+	// 输出仍是远到近，最近的文件留在最后。
 	const perFile = 8000
 	const totalBudget = 16000
+	type projectDoc struct {
+		path string
+		text string
+	}
+	docs := make([]projectDoc, 0, len(files))
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil || len(data) == 0 {
@@ -65,9 +67,21 @@ func loadProjectContext(cwd string) string {
 		if len(text) > perFile {
 			text = text[:perFile] + "\n\n[…项目上下文单文件截断]"
 		}
-		if total+len(text) > totalBudget {
+		docs = append(docs, projectDoc{path: f, text: text})
+	}
+	total := 0
+	keep := 0
+	for _, doc := range docs {
+		if total+len(doc.text) > totalBudget {
 			break
 		}
+		total += len(doc.text)
+		keep++
+	}
+	var b strings.Builder
+	for i := keep - 1; i >= 0; i-- {
+		f := docs[i].path
+		text := docs[i].text
 		rel, _ := filepath.Rel(abs, f)
 		if rel == "" {
 			rel = f
@@ -75,7 +89,6 @@ func loadProjectContext(cwd string) string {
 		b.WriteString("\n\n<project_context path=\"" + f + "\">\n")
 		b.WriteString(text)
 		b.WriteString("\n</project_context>")
-		total += len(text)
 	}
 	// cwd/.pi/SYSTEM.md 自定义系统提示（需在 cwd 内，天然可信）。
 	if sys := filepath.Join(abs, ".pi", "SYSTEM.md"); true {

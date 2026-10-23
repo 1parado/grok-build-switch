@@ -231,6 +231,39 @@ func TestFlattenTranscript(t *testing.T) {
 	}
 }
 
+func TestOpenAIMessageAcceptsContentParts(t *testing.T) {
+	const parts = `[{"role":"user","content":[{"type":"text","text":"hello from parts"},{"type":"input_text","text":"and more"},{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}]}]`
+	var msgs []OpenAIMessage
+	if err := json.Unmarshal([]byte(parts), &msgs); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].Role != "user" {
+		t.Fatalf("message = %+v", msgs)
+	}
+	out := FlattenTranscript(msgs)
+	hello := strings.Index(out, "hello from parts")
+	more := strings.Index(out, "and more")
+	if hello < 0 || more < 0 || more < hello {
+		t.Fatalf("content parts were dropped: %q", out)
+	}
+
+	var plain []OpenAIMessage
+	if err := json.Unmarshal([]byte(`[{"role":"system","content":"plain text"}]`), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if got := FlattenTranscript(plain); !strings.Contains(got, "[system]\nplain text") {
+		t.Fatalf("string content broke: %q", got)
+	}
+
+	var imageOnly []OpenAIMessage
+	if err := json.Unmarshal([]byte(`[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}]}]`), &imageOnly); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(imageOnly[0].Content) != "" {
+		t.Fatalf("image-only content = %q", imageOnly[0].Content)
+	}
+}
+
 func TestResolveModel(t *testing.T) {
 	m := ResolveModel("grok-4-reasoning")
 	if m.ModelName != "grok-4" || !m.IsReasoning {

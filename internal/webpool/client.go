@@ -234,6 +234,8 @@ func (m *Manager) Chat(ctx context.Context, opts ChatOptions, onEvent func(WebSt
 			}
 		} else if strings.Contains(chatErr.Error(), "网页流错误") {
 			// 流内 error（多为 RateLimitError）：该号大概率已到额度，换号。
+			// 不排除的话 ExcludeNext 每次都返回同一个账号。
+			excluded[accountID] = true
 			continue
 		}
 		return text, chatErr

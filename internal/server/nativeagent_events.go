@@ -31,7 +31,7 @@ type nativeEventTranslator struct {
 	turnID    string
 	registry  *tools.Registry
 
-	// 累积当前步的 assistant 文本/思考，turn 结束时一次性落盘。
+	// 累积当前步的 assistant 文本/思考，步结束时落盘。
 	mu           sync.Mutex
 	textBuf      strings.Builder
 	thinkBuf     strings.Builder
@@ -135,8 +135,9 @@ func (t *nativeEventTranslator) Dispatch(ev agentloop.Event) {
 				},
 			})
 		}
-	case agentloop.EventTurnEnd, agentloop.EventTurnInterrupt:
-		// flush 累积文本（一段 assistant 回复一次落盘）。
+	case agentloop.EventStepEnd, agentloop.EventTurnEnd, agentloop.EventTurnInterrupt:
+		// 每一步结束就落盘。拖到整个 turn 结束会把工具调用前的话
+		// 和后面的回答粘成一条，还排到工具结果后面。
 		t.mu.Lock()
 		text := t.textBuf.String()
 		think := t.thinkBuf.String()

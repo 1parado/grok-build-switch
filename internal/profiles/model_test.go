@@ -31,6 +31,25 @@ func TestNormalizeMigratesLegacyImageModelToIndependentConfig(t *testing.T) {
 	}
 }
 
+func TestNormalizeKeepsTheSelectedLegacyImageModel(t *testing.T) {
+	profile := Normalize(Profile{
+		BaseURL:  "https://chat.example/v1",
+		APIKey:   "sk-chat",
+		Features: map[string]bool{"image_gen": true},
+		MediaModels: map[string]string{
+			"grok-imagine-image": "vendor-image-v2",
+		},
+		Models: []ModelDef{
+			{Name: "grok-imagine-image", Model: "grok-imagine-image", BaseURL: "https://wrong.example/v1", APIKey: "sk-wrong"},
+			{Name: "vendor-image-v2", Model: "vendor-image-v2", BaseURL: "https://image.example/v1", APIKey: "sk-image", APIBackend: "responses"},
+		},
+	})
+	image := profile.ImageGeneration
+	if image == nil || image.Model != "vendor-image-v2" || image.BaseURL != "https://image.example/v1" || image.APIKey != "sk-image" {
+		t.Fatalf("selected image model was replaced: %#v", image)
+	}
+}
+
 func TestMatchesComparesIndependentImageConnection(t *testing.T) {
 	base := Profile{
 		BaseURL: "https://chat.example/v1", APIKey: "sk-chat",

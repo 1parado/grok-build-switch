@@ -70,7 +70,7 @@ func TestMatchCommand(t *testing.T) {
 	}
 	for _, c := range cases {
 		r, _ := Parse("bash("+c.pattern+")", Allow)
-		if got := matchArg(r, "bash", c.command); got != c.want {
+		if got := matchArg(r, "bash", c.command, ""); got != c.want {
 			t.Fatalf("matchCommand(%q,%q)=%v, want %v", c.pattern, c.command, got, c.want)
 		}
 	}

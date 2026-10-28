@@ -2,7 +2,6 @@ package permission
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 )
 
@@ -32,7 +31,7 @@ func argOf(tool string, args json.RawMessage) string {
 //   - 规则无参数部分（裸工具名）：匹配任何参数；
 //   - bash：命令前缀通配（"git *" 匹配 "git push -f"，"* rm" 不要求）；
 //   - 路径类：glob 匹配（** 跨目录）；参数为空视作不匹配（工具级规则除外）。
-func matchArg(rule parsedRule, tool, arg string) bool {
+func matchArg(rule parsedRule, tool, arg, base string) bool {
 	if !rule.hasArg {
 		return true
 	}
@@ -47,7 +46,7 @@ func matchArg(rule parsedRule, tool, arg string) bool {
 	case "bash":
 		return matchBash(rule, arg)
 	default:
-		return MatchGlob(pattern, arg) || MatchGlob(pattern, filepath.ToSlash(arg))
+		return matchPath(pattern, arg, base)
 	}
 }
 

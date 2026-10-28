@@ -185,7 +185,14 @@ func (s *Store) saveLocked(state persistedState) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.path, append(data, '\n'), atomicfile.Options{DirMode: 0o700, FileMode: 0o600})
+	if err := atomicfile.Write(s.path, append(data, '\n'), atomicfile.Options{DirMode: 0o700, FileMode: 0o600}); err != nil {
+		return err
+	}
+	// The session token is a fixed length, so a reset does not change the
+	// file size. The cache key is mtime plus size. A filesystem that does
+	// not advance mtime would keep authorizing the revoked token.
+	s.tokenValid = false
+	return nil
 }
 
 func snapshot(state persistedState) Snapshot {

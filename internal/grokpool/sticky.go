@@ -254,6 +254,11 @@ func (m *Manager) NextTokenStickyExcluding(ctx context.Context, sessionID, previ
 	for _, account := range ordered {
 		got, tokenErr := m.accountStore(account.ID).Token(ctx)
 		if tokenErr == nil {
+			// The pinned account could not produce a token, so this response
+			// id belongs to a different account than the one we are about to use.
+			if preferred != "" && account.ID != preferred && previousResponseID != "" {
+				lostContinuation = true
+			}
 			return got, account.ID, lostContinuation, nil
 		}
 		failures = append(failures, firstNonEmpty(account.Email, account.ID)+": "+tokenErr.Error())

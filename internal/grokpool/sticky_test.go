@@ -1,7 +1,9 @@
 package grokpool
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +85,58 @@ func TestPreviousResponseIDPinsAccountAndReportsLostContinuation(t *testing.T) {
 	}
 	if nextID == firstID {
 		t.Fatal("disabled sticky account was still selected")
+	}
+}
+
+func TestPinnedAccountTokenFailureDropsContinuation(t *testing.T) {
+	manager, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, err := manager.Import([]ImportFile{
+		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
+		{Name: "b.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-b","expired":%q,"email":"b@example.com"}`, expiry)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, pinnedID, _, err := manager.NextTokenSticky(t.Context(), "sess", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.BindResponse("resp_pinned", pinnedID)
+
+	credPath := manager.accountPath(pinnedID)
+	raw, err := os.ReadFile(credPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cred map[string]any
+	if err := json.Unmarshal(raw, &cred); err != nil {
+		t.Fatal(err)
+	}
+	cred["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	delete(cred, "refresh_token")
+	rewritten, err := json.Marshal(cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(credPath, rewritten, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	token, id, lost, err := manager.NextTokenSticky(t.Context(), "sess", "resp_pinned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == pinnedID {
+		t.Fatal("expired pinned account was still selected")
+	}
+	if token == "" {
+		t.Fatal("replacement token is empty")
+	}
+	if !lost {
+		t.Fatal("continuation id was kept after leaving the account that owns it")
 	}
 }
 

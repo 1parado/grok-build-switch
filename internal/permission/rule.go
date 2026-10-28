@@ -95,7 +95,8 @@ func invalidChars(p string) bool {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
 			r == '_', r == '-', r == '*', r == '(', r == ')', r == ' ',
-			r == '/', r == '.', r == '~', r == '?', r == '[', r == ']':
+			r == '/', r == '\\', r == '.', r == '~', r == '?', r == '[', r == ']',
+			r == ':': // Windows 盘符，如 C:/Users/me/.ssh/**
 		default:
 			return true
 		}

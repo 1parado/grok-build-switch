@@ -31,6 +31,12 @@ func TestParse(t *testing.T) {
 	if _, err := Parse("rm -rf; echo", Allow); err == nil {
 		t.Fatal("非法字符应报错（注入防护）")
 	}
+	if _, err := Parse(`write(C:/Users/me/.ssh/**)`, Deny); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(`write(C:\Users\me\.ssh\**)`, Deny); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMatchGlob(t *testing.T) {

@@ -180,6 +180,35 @@ func TestCtxMemoryTurnsAndRewind(t *testing.T) {
 	}
 }
 
+func TestRewindSkipsCompactionMarkers(t *testing.T) {
+	mem := NewCtxMemory()
+	user := func(text string) llm.Message {
+		return llm.Message{Role: llm.RoleUser, Parts: []llm.ContentPart{llm.TextPart{Text: text}}}
+	}
+	mem.AppendWithOrigin(user("task"), OriginUser)
+	mem.AppendWithOrigin(user(COMPACTION_ELISION_MARKER), OriginInjection)
+	mem.AppendWithOrigin(user(COMPACTION_SUMMARY_PREFIX+"\nsum"), OriginSummary)
+	mem.AppendWithOrigin(user("latest"), OriginUser)
+	mem.AppendWithOrigin(llm.Message{Role: llm.RoleAssistant, Parts: []llm.ContentPart{llm.TextPart{Text: "reply"}}}, OriginAssistant)
+
+	if mem.UserTurns() != 2 {
+		t.Fatalf("压实标记不应计入用户轮次: %d", mem.UserTurns())
+	}
+	if !mem.RewindToUserTurn(mem.UserTurns()) {
+		t.Fatal("rewind 应成功")
+	}
+	msgs, origins := mem.Snapshot()
+	if mem.UserTurns() != 1 || len(msgs) != 3 {
+		t.Fatalf("应保留任务、省略标记和摘要: turns=%d len=%d origins=%v", mem.UserTurns(), len(msgs), origins)
+	}
+	if origins[0] != OriginUser || origins[1] != OriginInjection || origins[2] != OriginSummary {
+		t.Fatalf("截断落在压实标记上: origins=%v texts=%q", origins, []string{msgs[0].Text(), msgs[1].Text(), msgs[2].Text()})
+	}
+	if msgs[0].Text() != "task" || !strings.HasPrefix(msgs[2].Text(), COMPACTION_SUMMARY_PREFIX) {
+		t.Fatalf("保留内容错误: %q / %q", msgs[0].Text(), msgs[2].Text())
+	}
+}
+
 func TestCtxMemoryRestoreFromRecords(t *testing.T) {
 	store, _ := NewStore(t.TempDir())
 	meta, _ := store.Create(SessionMeta{Cwd: "/tmp"})

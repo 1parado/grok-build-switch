@@ -123,6 +123,8 @@ func (m *CtxMemory) UserTurns() int {
 
 // RewindToUserTurn 删除第 n 轮用户消息及其后的全部内容。
 // 返回是否发生截断。n 为 1 起；n <= 0 无操作。
+// 轮次只认 OriginUser。压实摘要和省略标记也是 user 角色，但不是用户输入；
+// 按角色计数会把截断点提前到这些标记上，连同交接摘要一起丢掉。
 func (m *CtxMemory) RewindToUserTurn(n int) bool {
 	if n <= 0 {
 		return false
@@ -131,8 +133,8 @@ func (m *CtxMemory) RewindToUserTurn(n int) bool {
 	defer m.mu.Unlock()
 	seen := 0
 	cut := -1
-	for i, msg := range m.msgs {
-		if msg.Role == llm.RoleUser {
+	for i := range m.msgs {
+		if i < len(m.origins) && m.origins[i] == OriginUser {
 			seen++
 			if seen == n {
 				cut = i

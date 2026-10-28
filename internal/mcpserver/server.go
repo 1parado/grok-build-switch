@@ -8,8 +8,10 @@ package mcpserver
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,6 +32,7 @@ func Run(_ []string) int {
 		baseURL:    baseURL,
 		client:     &http.Client{Timeout: 150 * time.Second},
 		in:         bufio.NewReaderSize(os.Stdin, 1<<20),
+		stdin:      os.Stdin,
 		out:        bufio.NewWriterSize(os.Stdout, 1<<20),
 		serverName: "image_generator",
 		serverVer:  "1.0.0",
@@ -45,6 +48,8 @@ type server struct {
 	baseURL    string
 	client     *http.Client
 	in         *bufio.Reader
+	stdin      *os.File // 父进程关掉 stdin 时用来取消轮询；测试不填则不监视。
+	jobWait    time.Duration
 	out        *bufio.Writer
 	protocol   string
 	serverName string
@@ -223,8 +228,15 @@ func (s *server) generateImage(args json.RawMessage) ([]map[string]any, bool) {
 		"model":        model,
 		"aspect_ratio": aspect,
 	})
-	resp, err := s.client.Post(s.baseURL+"/api/imagine/generate", "application/json", bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), s.jobTimeout())
+	defer cancel()
+	stopWatch := watchStdinClosed(ctx, s.stdin, cancel)
+	defer stopWatch()
+	resp, err := s.postJSON(ctx, s.baseURL+"/api/imagine/generate", body)
 	if err != nil {
+		if ctx.Err() != nil {
+			return []map[string]any{textContent(imagineWaitErr(ctx).Error())}, true
+		}
 		return []map[string]any{textContent("生图服务不可用: " + err.Error())}, true
 	}
 	defer resp.Body.Close()
@@ -253,7 +265,7 @@ func (s *server) generateImage(args json.RawMessage) ([]map[string]any, bool) {
 	// /api/imagine/generate 现在立刻返回任务，图片在 /api/imagine/jobs 里。
 	// 只看这一次响应的话 images 为空，工具会把正在生成的图报成失败。
 	if result.OK && result.Job.ID != "" && len(result.Images) == 0 {
-		job, err := s.waitImagineJob(result.Job.ID)
+		job, err := s.waitImagineJob(ctx, result.Job.ID)
 		if err != nil {
 			return []map[string]any{textContent(err.Error())}, true
 		}
@@ -278,7 +290,7 @@ func (s *server) generateImage(args json.RawMessage) ([]map[string]any, bool) {
 	}
 
 	// 下载图片并转 base64，让模型在对话中直接看到结果。
-	data, err := s.fetchBytes(imageURL)
+	data, err := s.fetchBytes(ctx, imageURL)
 	if err != nil {
 		return []map[string]any{textContent("下载图片失败: " + err.Error())}, true
 	}
@@ -310,11 +322,17 @@ type imagineJobView struct {
 }
 
 // waitImagineJob 轮询任务直到结束。生成接口只负责建任务，图片要等终态才有。
-func (s *server) waitImagineJob(id string) (imagineJobView, error) {
-	deadline := time.Now().Add(140 * time.Second)
+// ctx 到期或父进程关掉 stdin 时停止，不再干等满 140 秒。
+func (s *server) waitImagineJob(ctx context.Context, id string) (imagineJobView, error) {
 	for {
-		resp, err := s.client.Get(s.baseURL + "/api/imagine/jobs")
+		if err := ctx.Err(); err != nil {
+			return imagineJobView{}, imagineWaitErr(ctx)
+		}
+		resp, err := s.get(ctx, s.baseURL+"/api/imagine/jobs")
 		if err != nil {
+			if ctx.Err() != nil {
+				return imagineJobView{}, imagineWaitErr(ctx)
+			}
 			return imagineJobView{}, err
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -337,22 +355,73 @@ func (s *server) waitImagineJob(id string) (imagineJobView, error) {
 			}
 			return job, nil
 		}
-		if !time.Now().Before(deadline) {
-			return imagineJobView{}, fmt.Errorf("生图任务超时")
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return imagineJobView{}, imagineWaitErr(ctx)
+		case <-timer.C:
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+func (s *server) jobTimeout() time.Duration {
+	if s.jobWait > 0 {
+		return s.jobWait
+	}
+	return 140 * time.Second
+}
+
+func imagineWaitErr(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("生图任务超时")
+	}
+	return fmt.Errorf("生图已取消")
+}
+
+// watchStdinClosed 在父进程关闭 stdin 时取消轮询。bufio.Reader 不能并发读，
+// 所以这里只监视挂起，不从缓冲里取字节。stdin 为空时不监视。
+func watchStdinClosed(ctx context.Context, stdin *os.File, cancel context.CancelFunc) func() {
+	if stdin == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		noticeStdinClosed(ctx, stdin, cancel)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func (s *server) postJSON(ctx context.Context, url string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return s.client.Do(req)
+}
+
+func (s *server) get(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	return s.client.Do(req)
 }
 
 func textContent(text string) map[string]any {
 	return map[string]any{"type": "text", "text": text}
 }
 
-func (s *server) fetchBytes(url string) ([]byte, error) {
+func (s *server) fetchBytes(ctx context.Context, url string) ([]byte, error) {
 	if !strings.HasPrefix(url, "/") {
 		return nil, fmt.Errorf("非本机图片路径: %s", url)
 	}
-	resp, err := s.client.Get(s.baseURL + url)
+	resp, err := s.get(ctx, s.baseURL+url)
 	if err != nil {
 		return nil, err
 	}

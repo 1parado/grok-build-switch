@@ -3,9 +3,11 @@ package mcpserver
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +59,14 @@ func TestGenerateImageWaitsForAsyncJob(t *testing.T) {
 	text, _ := contents[1]["text"].(string)
 	if text == "" {
 		t.Fatalf("missing text block: %#v", contents[1])
+	}
+}
+
+func TestWaitImagineJobStopsWhenContextCanceled(t *testing.T) {
+	s := &server{baseURL: "http://127.0.0.1:1", client: http.DefaultClient}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.waitImagineJob(ctx, "img-1"); err == nil || !strings.Contains(err.Error(), "生图已取消") {
+		t.Fatalf("err = %v", err)
 	}
 }

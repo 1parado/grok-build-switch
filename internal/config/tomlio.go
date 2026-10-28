@@ -108,7 +108,7 @@ func UseOfficialAuthText(data []byte) []byte {
 	lines := splitLines(string(data))
 	var out []string
 	for i := 0; i < len(lines); {
-		header := parseHeader(lines[i])
+		header := lineHeader(lines, i)
 		if header == "" {
 			out = append(out, lines[i])
 			i++
@@ -171,7 +171,7 @@ func ApplyPrivacyProtectionText(data []byte) []byte {
 	var out []string
 	seen := make(map[string]bool, len(settings))
 	for i := 0; i < len(lines); {
-		header := parseHeader(lines[i])
+		header := lineHeader(lines, i)
 		if header == "" {
 			out = append(out, lines[i])
 			i++
@@ -351,7 +351,7 @@ func ApplyProfileText(data []byte, profile profiles.Profile, opts ...ApplyOpts) 
 	seenSubagentsModels := false
 	seenFeatures := false
 	for i := 0; i < len(lines); {
-		header := parseHeader(lines[i])
+		header := lineHeader(lines, i)
 		if header == "" {
 			out = append(out, lines[i])
 			i++
@@ -744,7 +744,7 @@ func splitLines(text string) []string {
 }
 
 func parseHeader(line string) string {
-	trimmed := strings.TrimSpace(line)
+	trimmed := strings.TrimSpace(tomlCode(line))
 	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
 		return ""
 	}
@@ -752,9 +752,135 @@ func parseHeader(line string) string {
 	return strings.Trim(trimmed, " ")
 }
 
+// lineHeader 只承认字符串外面的表头。多行字符串里的 [models] 是正文，
+// 不能把它当成新的一段，否则切换供应商会改写这段正文。
+func lineHeader(lines []string, index int) string {
+	if index < 0 || index >= len(lines) {
+		return ""
+	}
+	if multilineOpenBefore(lines, index) {
+		return ""
+	}
+	return parseHeader(lines[index])
+}
+
+func multilineOpenBefore(lines []string, index int) bool {
+	basic, literal := false, false
+	if index > len(lines) {
+		index = len(lines)
+	}
+	for i := 0; i < index; i++ {
+		basic, literal = feedMultiline(lines[i], basic, literal)
+	}
+	return basic || literal
+}
+
+func feedMultiline(line string, basic, literal bool) (bool, bool) {
+	for i := 0; i < len(line); {
+		if basic {
+			if line[i] == '\\' && i+1 < len(line) {
+				i += 2
+				continue
+			}
+			if strings.HasPrefix(line[i:], `"""`) {
+				basic = false
+				i += 3
+				continue
+			}
+			i++
+			continue
+		}
+		if literal {
+			if strings.HasPrefix(line[i:], `'''`) {
+				literal = false
+				i += 3
+				continue
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(line[i:], `"""`) {
+			basic = true
+			i += 3
+			continue
+		}
+		if strings.HasPrefix(line[i:], `'''`) {
+			literal = true
+			i += 3
+			continue
+		}
+		if line[i] == '"' {
+			i++
+			for i < len(line) {
+				if line[i] == '\\' && i+1 < len(line) {
+					i += 2
+					continue
+				}
+				if line[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if line[i] == '\'' {
+			i++
+			for i < len(line) && line[i] != '\'' {
+				i++
+			}
+			if i < len(line) {
+				i++
+			}
+			continue
+		}
+		if line[i] == '#' {
+			break
+		}
+		i++
+	}
+	return basic, literal
+}
+
+// tomlCode 去掉行尾注释。引号里的 # 属于键或字符串，不是注释。
+func tomlCode(line string) string {
+	inBasic := false
+	inLiteral := false
+	for i := 0; i < len(line); i++ {
+		if inBasic {
+			if line[i] == '\\' && i+1 < len(line) {
+				i++
+				continue
+			}
+			if line[i] == '"' {
+				inBasic = false
+			}
+			continue
+		}
+		if inLiteral {
+			if line[i] == '\'' {
+				inLiteral = false
+			}
+			continue
+		}
+		if line[i] == '"' {
+			inBasic = true
+			continue
+		}
+		if line[i] == '\'' {
+			inLiteral = true
+			continue
+		}
+		if line[i] == '#' {
+			return strings.TrimSpace(line[:i])
+		}
+	}
+	return strings.TrimSpace(line)
+}
+
 func skipSection(lines []string, start int) int {
 	for start < len(lines) {
-		if parseHeader(lines[start]) != "" {
+		if lineHeader(lines, start) != "" {
 			return start
 		}
 		start++

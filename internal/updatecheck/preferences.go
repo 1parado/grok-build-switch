@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
+	"grok_switch/internal/atomicfile"
 	"grok_switch/internal/recovery"
 )
 
@@ -104,31 +103,5 @@ func (s *PreferenceStore) writeLocked(current Preferences) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, filepath.Base(s.path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		if runtime.GOOS == "windows" {
-			if removeErr := os.Remove(s.path); removeErr != nil && !os.IsNotExist(removeErr) {
-				return err
-			}
-			return os.Rename(tmpName, s.path)
-		}
-		return err
-	}
-	return nil
+	return atomicfile.Write(s.path, append(data, '\n'), atomicfile.Options{DirMode: 0o755})
 }

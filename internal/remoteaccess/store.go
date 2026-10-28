@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
+
+	"grok_switch/internal/atomicfile"
 )
 
 const pairingLifetime = 10 * time.Minute
@@ -185,36 +185,7 @@ func (s *Store) saveLocked(state persistedState) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), filepath.Base(s.path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		if runtime.GOOS == "windows" {
-			if removeErr := os.Remove(s.path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				return err
-			}
-			return os.Rename(tmpName, s.path)
-		}
-		return err
-	}
-	return nil
+	return atomicfile.Write(s.path, append(data, '\n'), atomicfile.Options{DirMode: 0o700, FileMode: 0o600})
 }
 
 func snapshot(state persistedState) Snapshot {

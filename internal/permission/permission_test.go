@@ -209,3 +209,85 @@ func TestBareToolRule(t *testing.T) {
 		t.Fatalf("其它工具应 ask, got %s", got)
 	}
 }
+
+func TestCompoundShellAllowAndDeny(t *testing.T) {
+	engine, err := NewEngine("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.AddUserRule("bash(git *)", Allow); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.AddUserRule("bash(rm *)", Deny); err != nil {
+		t.Fatal(err)
+	}
+
+	allow := []string{
+		`git status`,
+		`git push -f origin main`,
+		`git status && git diff`,
+		`git commit -m "a && b"`,
+	}
+	ask := []string{
+		`git status | sh`,
+		"git status\necho hi",
+		`git status; echo hi`,
+		`git status > ~/.ssh/authorized_keys`,
+		`git status $(date)`,
+		"git status `date`",
+	}
+	for _, command := range allow {
+		if got := engine.Check("bash", json.RawMessage(`{"command":`+quoteJSON(command)+`}`)); got != "allow" {
+			t.Fatalf("allow %q, got %s", command, got)
+		}
+	}
+	for _, command := range ask {
+		if got := engine.Check("bash", json.RawMessage(`{"command":`+quoteJSON(command)+`}`)); got != "ask" {
+			t.Fatalf("ask %q, got %s", command, got)
+		}
+	}
+
+	// Deny wins over a later segment, including inside a substitution, and
+	// still wins in yolo where only deny rules stop a command.
+	deny := []string{
+		`rm -rf x`,
+		`echo ok && rm -rf x`,
+		`echo ok; rm -rf x`,
+		`git status && rm -rf x`,
+		`git status; rm -rf /`,
+		"git status\nrm -rf /",
+		`echo $(rm -rf x)`,
+		"echo `rm -rf x`",
+		`echo <(rm -rf x)`,
+		`echo >(rm -rf x)`,
+		`{ rm -rf x; }`,
+		`eval rm -rf x`,
+		`sudo rm -rf x`,
+		`sudo -n rm -rf x`,
+		`FOO=1 rm -rf x`,
+		"git status \\\n&& rm -rf x",
+	}
+	for _, command := range deny {
+		if got := engine.Check("bash", json.RawMessage(`{"command":`+quoteJSON(command)+`}`)); got != "deny" {
+			t.Fatalf("deny %q, got %s", command, got)
+		}
+	}
+	engine.SetMode(ModeYolo)
+	if got := engine.Check("bash", json.RawMessage(`{"command":"echo ok && rm -rf x"}`)); got != "deny" {
+		t.Fatalf("yolo should still deny a hidden rm, got %s", got)
+	}
+	if got := engine.Check("bash", json.RawMessage(`{"command":"git status && git diff"}`)); got != "allow" {
+		t.Fatalf("yolo allows a command that is not denied, got %s", got)
+	}
+	if got := engine.Check("bash", json.RawMessage(`{"command":"echo ok '"}`)); got != "ask" {
+		t.Fatalf("yolo must ask when the command does not parse, got %s", got)
+	}
+}
+
+func quoteJSON(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}

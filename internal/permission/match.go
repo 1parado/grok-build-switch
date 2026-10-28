@@ -45,7 +45,7 @@ func matchArg(rule parsedRule, tool, arg string) bool {
 	}
 	switch tool {
 	case "bash":
-		return matchCommand(pattern, arg)
+		return matchBash(rule, arg)
 	default:
 		return MatchGlob(pattern, arg) || MatchGlob(pattern, filepath.ToSlash(arg))
 	}

@@ -11,8 +11,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-
-	"grok_switch/internal/atomicfile"
 )
 
 // Env 是一次工具执行的上下文：工作目录 + 环境抽象。
@@ -173,13 +171,11 @@ func sandboxReal(path string) (string, error) {
 
 // ReadText 读取文件（上限 maxBytes；0 表示默认 2MB）。
 func (e Env) ReadText(abs string, maxBytes int64) (string, error) {
-	if err := e.refuseEscapingSymlink(abs); err != nil {
-		return "", err
-	}
 	if maxBytes <= 0 {
 		maxBytes = 2 << 20
 	}
-	f, err := os.Open(abs)
+	// 打开动作和符号链接复查在同一目录描述符上完成，避免检查通过后路径被换掉。
+	f, err := e.openForRead(abs)
 	if err != nil {
 		return "", err
 	}
@@ -198,17 +194,14 @@ func (e Env) ReadText(abs string, maxBytes int64) (string, error) {
 	return string(buf), nil
 }
 
-// WriteText 原子写入：写临时文件后 rename。
+// WriteText 原子写入：在已核对的父目录里写临时文件，再替换最终目录项。
 func (e Env) WriteText(abs, content string) error {
-	if err := e.refuseEscapingSymlink(abs); err != nil {
-		return err
-	}
-	return atomicfile.Write(abs, []byte(content), atomicfile.Options{DirMode: 0o755})
+	return e.writeText(abs, content)
 }
 
 // ListDir 返回目录条目名（排序）。
 func (e Env) ListDir(abs string) ([]string, error) {
-	entries, err := os.ReadDir(abs)
+	entries, err := e.readDir(abs)
 	if err != nil {
 		return nil, err
 	}

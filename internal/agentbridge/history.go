@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -274,9 +275,18 @@ func readChatHistory(path string) ([]HistoryMessage, error) {
 	}
 	defer file.Close()
 	messages := make([]HistoryMessage, 0, 32)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
-	for scanner.Scan() {
+	reader := bufio.NewReaderSize(file, 64<<10)
+	for {
+		line, readErr := nextHistoryLine(reader, maxChatHistoryLine)
+		if len(bytes.TrimSpace(line)) == 0 {
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
+			continue
+		}
 		var entry struct {
 			Type       string          `json:"type"`
 			Content    json.RawMessage `json:"content"`
@@ -292,7 +302,13 @@ func readChatHistory(path string) ([]HistoryMessage, error) {
 				Text string `json:"text"`
 			} `json:"summary"`
 		}
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		if err := json.Unmarshal(line, &entry); err != nil {
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return nil, readErr
+			}
 			continue
 		}
 		switch entry.Type {
@@ -335,11 +351,44 @@ func readChatHistory(path string) ([]HistoryMessage, error) {
 				messages = append(messages, HistoryMessage{Role: "thought", Content: strings.Join(parts, "\n")})
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
 	}
 	return messages, nil
+}
+
+// maxChatHistoryLine is the largest JSONL record kept in memory.
+// bufio.Scanner stopped at 4 MiB and failed the whole file, so one long
+// tool result hid every other message in the session.
+const maxChatHistoryLine = 32 << 20
+
+// nextHistoryLine reads one JSONL record. A record longer than max is
+// discarded and the read continues at the next line.
+func nextHistoryLine(r *bufio.Reader, max int) ([]byte, error) {
+	var buf []byte
+	skipped := false
+	for {
+		frag, err := r.ReadSlice('\n')
+		if !skipped {
+			if max <= 0 || len(frag) > max || len(buf) > max-len(frag) {
+				skipped = true
+				buf = nil
+			} else {
+				buf = append(buf, frag...)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if skipped {
+			return nil, err
+		}
+		return bytes.TrimRight(buf, "\r\n"), err
+	}
 }
 
 func contentTextFromJSON(raw json.RawMessage) string {

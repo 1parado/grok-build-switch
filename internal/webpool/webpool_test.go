@@ -161,6 +161,35 @@ func TestChatFailsOverOn429(t *testing.T) {
 	}
 }
 
+func TestChatFailsOverOnStreamRateLimit(t *testing.T) {
+	// 流内 RateLimitError 走「网页流错误」分支。不把该账号排除时，
+	// 三次重试都打在第一个号上，第二个号不会被用到。
+	fake := newFakeGrokWeb(t, func(n int, w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Cookie"), "sso-stream-bad") {
+			w.Header().Set("Content-Type", "text/plain")
+			writeWebEvent(w, map[string]any{"error": "RateLimitError"})
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		writeWebEvent(w, map[string]any{"result": map[string]any{"response": map[string]any{"token": "第二个号", "isThinking": false}}})
+	})
+	m := newTestManager(t)
+	m.SetUpstreamBase(fake.srv.URL)
+	m.addTestAccount(t, "sso-stream-bad")
+	m.addTestAccount(t, "sso-stream-good")
+
+	text, err := m.Chat(context.Background(), ChatOptions{Model: "grok-4"}, func(WebStreamEvent) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "第二个号" {
+		t.Fatalf("流内限流后应改用下一个账号: %q", text)
+	}
+	if got := fake.requests.Load(); got != 2 {
+		t.Fatalf("应各请求一次，实际 %d 次", got)
+	}
+}
+
 func TestAccountIsolationAndRecovery(t *testing.T) {
 	now := time.Now()
 	limited := Account{Class: "rate_limited", RateLimitedAt: now}

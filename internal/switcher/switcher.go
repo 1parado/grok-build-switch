@@ -1,6 +1,7 @@
 package switcher
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -182,10 +183,8 @@ func (s *Switcher) Backup() (Backup, error) {
 	if err != nil {
 		return Backup{}, err
 	}
-	now := time.Now()
-	file := fmt.Sprintf("config-%s.toml", now.Format("20060102-150405"))
-	path := filepath.Join(s.BackupsDir, file)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	file, path, err := writeBackupFile(s.BackupsDir, data, backupNow())
+	if err != nil {
 		return Backup{}, err
 	}
 	if err := s.PruneBackups(10); err != nil {
@@ -196,6 +195,42 @@ func (s *Switcher) Backup() (Backup, error) {
 		return Backup{}, err
 	}
 	return Backup{File: file, Path: path, CreatedAt: info.ModTime(), Size: info.Size()}, nil
+}
+
+// backupNow is replaced by tests that need two backups inside one second.
+var backupNow = time.Now
+
+// writeBackupFile creates a new snapshot without truncating an existing one.
+// The stamp is only second-resolution, and a switch can back up twice before
+// the clock ticks, so a bare stamp would overwrite the earlier snapshot.
+func writeBackupFile(dir string, data []byte, now time.Time) (string, string, error) {
+	stamp := now.Format("20060102-150405")
+	for n := 1; n < 1000; n++ {
+		file := fmt.Sprintf("config-%s.toml", stamp)
+		if n > 1 {
+			file = fmt.Sprintf("config-%s-%d.toml", stamp, n)
+		}
+		path := filepath.Join(dir, file)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", "", err
+		}
+		_, werr := f.Write(data)
+		cerr := f.Close()
+		if werr != nil {
+			os.Remove(path)
+			return "", "", werr
+		}
+		if cerr != nil {
+			os.Remove(path)
+			return "", "", cerr
+		}
+		return file, path, nil
+	}
+	return "", "", fmt.Errorf("too many config backups in the same second")
 }
 
 func (s *Switcher) ListBackups() ([]Backup, error) {

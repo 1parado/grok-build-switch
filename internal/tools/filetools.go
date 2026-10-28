@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"grok_switch/internal/agentfs"
@@ -223,26 +224,46 @@ func (EditTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 		content = strings.ReplaceAll(content, "\r\n", "\n")
 	}
 	// 归一 blocks 的换行（模型可能用 \n 而文件是 \r\n，已在上步统一）。
-	updated := content
-	totalReplaced := 0
-	firstLine := 0
+	// 每一块都对着原文定位。顺序套用会让后一块改到前一块刚插入的文本，
+	// 或因为插入文本里出现了相同片段而误报“命中多处”。
+	type editSpan struct {
+		block      int
+		start, end int
+		newText    string
+	}
+	spans := make([]editSpan, 0, len(blocks))
 	for i, b := range blocks {
 		oldN := strings.ReplaceAll(b.OldString, "\r\n", "\n")
 		newN := strings.ReplaceAll(b.NewString, "\r\n", "\n")
-		count := strings.Count(updated, oldN)
+		if oldN == newN {
+			return ToolOutput{Text: fmt.Sprintf("第 %d 块 old_string 与 new_string 相同，无需编辑", i+1), IsError: true}
+		}
+		count := strings.Count(content, oldN)
 		switch count {
 		case 0:
 			return ToolOutput{Text: fmt.Sprintf("第 %d 块 old_string 在文件中未命中。请用 read 确认精确内容（注意缩进与换行）后再试。", i+1), IsError: true}
 		case 1:
-			// 定位首改行号用于回显。
-			if idx := strings.Index(updated, oldN); idx >= 0 && firstLine == 0 {
-				firstLine = strings.Count(updated[:idx], "\n") + 1
-			}
-			updated = strings.Replace(updated, oldN, newN, 1)
-			totalReplaced++
+			idx := strings.Index(content, oldN)
+			spans = append(spans, editSpan{block: i + 1, start: idx, end: idx + len(oldN), newText: newN})
 		default:
 			return ToolOutput{Text: fmt.Sprintf("第 %d 块 old_string 命中 %d 处，无法唯一定位。请在 old_string 中包含更多上下文使其唯一。", i+1, count), IsError: true}
 		}
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	for i := 1; i < len(spans); i++ {
+		if spans[i].start < spans[i-1].end {
+			return ToolOutput{Text: fmt.Sprintf("第 %d 块与第 %d 块 old_string 重叠。请拆开，或为每块补上互不重叠的上下文。", spans[i-1].block, spans[i].block), IsError: true}
+		}
+	}
+	updated := content
+	for i := len(spans) - 1; i >= 0; i-- {
+		sp := spans[i]
+		updated = updated[:sp.start] + sp.newText + updated[sp.end:]
+	}
+	totalReplaced := len(spans)
+	firstLine := 0
+	if len(spans) > 0 {
+		firstLine = strings.Count(content[:spans[0].start], "\n") + 1
 	}
 	// 写回时还原换行与 BOM。
 	if lineEnding != "\n" {

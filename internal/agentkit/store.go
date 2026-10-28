@@ -2,6 +2,7 @@ package agentkit
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -351,6 +352,62 @@ func (s *Store) LoadRecords(id string) ([]Record, error) {
 		out = append(out, rec)
 	}
 	return out, scanner.Err()
+}
+
+// TruncateBeforeLastUser 删除最后一条真实用户记录及其后的全部内容。
+// 重新生成和编辑重发都会回退内存里的上一轮；transcript 若留下那一轮，
+// 下次打开会话会把已回退的用户消息和回复装回来。
+// 压实提示是 OriginInjection，不算用户轮次，不能当成截断点。
+// 没有用户记录时返回 false，且不改文件。
+func (s *Store) TruncateBeforeLastUser(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records, err := s.LoadRecords(id)
+	if err != nil {
+		return false, err
+	}
+	cut := -1
+	for i, rec := range records {
+		if rec.Origin == OriginUser {
+			cut = i
+		}
+	}
+	if cut < 0 {
+		return false, nil
+	}
+	kept := records[:cut]
+	var buf bytes.Buffer
+	for _, rec := range kept {
+		b, err := json.Marshal(rec)
+		if err != nil {
+			return false, err
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	if err := atomicWriteJSON(s.transcriptPath(id), buf.Bytes()); err != nil {
+		return false, err
+	}
+	// 缓存是下一次 AppendRecord 的序号基数。截断后仍沿用旧值会跳号。
+	s.seqs[id] = int64(len(kept))
+	meta, err := s.readMetaLocked(id)
+	if err != nil {
+		return false, err
+	}
+	meta.MessageCount = len(kept)
+	meta.UpdatedAt = time.Now()
+	meta.Preview = ""
+	for _, rec := range kept {
+		if (rec.Origin == OriginUser || rec.Origin == OriginAssistant) && rec.Role != llm.RoleTool {
+			if preview := derivePreview(rec.Text); preview != "" {
+				meta.Preview = preview
+			}
+		}
+	}
+	if err := s.writeMetaLocked(meta); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RecordsToMessages 把记录投影成回放消息（server 层组装 SessionHistory 用）。

@@ -1,6 +1,8 @@
 package webpool
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -60,6 +62,104 @@ func ModelList() []map[string]any {
 type OpenAIMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+// UnmarshalJSON 同时接受字符串 content，以及
+// [{"type":"text","text":"..."}] 这种分段。文本分段照常拼接，
+// 图片分段留成可见占位，避免请求里的图被静默丢掉。
+func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	content, err := flattenOpenAIContent(raw.Content)
+	if err != nil {
+		return err
+	}
+	m.Role = raw.Role
+	m.Content = content
+	return nil
+}
+
+func flattenOpenAIContent(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", nil
+	}
+	switch raw[0] {
+	case '"':
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return "", err
+		}
+		return text, nil
+	case '[':
+		var parts []openAIContentPart
+		if err := json.Unmarshal(raw, &parts); err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for _, part := range parts {
+			text := openAIPartText(part)
+			if text == "" {
+				continue
+			}
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(text)
+		}
+		return b.String(), nil
+	default:
+		return "", fmt.Errorf("content 必须是字符串或文本分段")
+	}
+}
+
+type openAIContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text"`
+	URL      string          `json:"url"`
+	ImageURL json.RawMessage `json:"image_url"`
+}
+
+// openAIPartText 保留文本分段；图片分段写成「[图片]」并带上能找到的地址。
+func openAIPartText(part openAIContentPart) string {
+	switch strings.ToLower(strings.TrimSpace(part.Type)) {
+	case "image", "image_url", "input_image":
+		if url := openAIImageURL(part); url != "" {
+			return "[图片] " + url
+		}
+		return "[图片]"
+	default:
+		return strings.TrimSpace(part.Text)
+	}
+}
+
+func openAIImageURL(part openAIContentPart) string {
+	if url := strings.TrimSpace(part.URL); url != "" {
+		return url
+	}
+	raw := bytes.TrimSpace(part.ImageURL)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var url string
+		if err := json.Unmarshal(raw, &url); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(url)
+	}
+	var obj struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(obj.URL)
 }
 
 // maxTranscriptChars 超长转录截断（v1 不做文件上传，见设计文档「明确不做」）。

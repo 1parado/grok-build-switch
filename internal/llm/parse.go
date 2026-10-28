@@ -21,6 +21,10 @@ func parseRetrySeconds(v string) (int64, error) {
 		}
 	}
 	for _, r := range v {
+		if r == '.' {
+			// 小数部分不是额外的整数位。1.5 是 1 秒，不是 15 秒。
+			break
+		}
 		if r >= '0' && r <= '9' {
 			n = n*10 + int64(r-'0')
 		}

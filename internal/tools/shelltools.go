@@ -105,7 +105,7 @@ func truncateBashTailWithEnv(s string, env agentfs.Env) string {
 		_ = spilled
 		return out
 	}
-	return s[len(s)-bashOutputBudget:] + "\n\n[输出超长已截断，保留尾部]"
+	return suffixText(s, bashOutputBudget) + "\n\n[输出超长已截断，保留尾部]"
 }
 
 // truncateBashTail 兼容旧调用（无 env 时落 /tmp，模型不可读，仅保尾）。
@@ -118,7 +118,7 @@ func spillBashOutputWithEnv(s string, env agentfs.Env) (bool, string) {
 	if len(s) <= bashOutputBudget {
 		return false, s
 	}
-	tail := s[len(s)-25000:]
+	tail := suffixText(s, 25000)
 	// 按行边界对齐，避免半行。
 	if idx := strings.Index(tail, "\n"); idx >= 0 && idx < 500 {
 		tail = tail[idx+1:]

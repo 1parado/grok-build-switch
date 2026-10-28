@@ -99,7 +99,7 @@ func (ReadTool) Execute(ctx context.Context, args json.RawMessage, env agentfs.E
 	for i := start; i <= end; i++ {
 		line := lines[i-1]
 		if len(line) > readMaxLineLen {
-			line = line[:readMaxLineLen] + "…[行截断]"
+			line = prefixText(line, readMaxLineLen) + "…[行截断]"
 		}
 		fmt.Fprintf(&b, "%6d\t%s\n", i, line)
 	}

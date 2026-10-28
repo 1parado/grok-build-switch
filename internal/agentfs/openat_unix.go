@@ -9,10 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -198,34 +195,6 @@ func confirmInode(fd int, expect string) error {
 		return &SandboxError{Path: expect}
 	}
 	return nil
-}
-
-func fdPath(fd int) (string, error) {
-	switch runtime.GOOS {
-	case "linux":
-		p, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
-		if err != nil {
-			return "", err
-		}
-		if !filepath.IsAbs(p) {
-			return "", fmt.Errorf("agentfs: fd path %q", p)
-		}
-		return p, nil
-	case "darwin":
-		return darwinFDPath(fd)
-	default:
-		return "", errors.New("agentfs: fd path unavailable")
-	}
-}
-
-func darwinFDPath(fd int) (string, error) {
-	buf := make([]byte, 1024)
-	_, _, errno := unix.Syscall(unix.SYS_FCNTL, uintptr(fd), uintptr(unix.F_GETPATH), uintptr(unsafe.Pointer(&buf[0])))
-	runtime.KeepAlive(buf)
-	if errno != 0 {
-		return "", errno
-	}
-	return unix.ByteSliceToString(buf), nil
 }
 
 func safeFinalName(base string) bool {

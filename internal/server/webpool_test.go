@@ -84,10 +84,11 @@ func TestWebV1ChatCompletionsStream(t *testing.T) {
 	}
 
 	var reasonings, contents []string
-	// 帧是 JSON 行（非 data: 前缀），逐行解析。
-	for _, line := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") {
+	sawDone := false
+	// 内置 ChatCompletionsProvider 只消费 data: 字段。裸 JSON 行会被丢掉。
+	for _, payload := range sseDataPayloads(rec.Body.String()) {
+		if payload == "[DONE]" {
+			sawDone = true
 			continue
 		}
 		var frame struct {
@@ -102,8 +103,8 @@ func TestWebV1ChatCompletionsStream(t *testing.T) {
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if err := json.Unmarshal([]byte(line), &frame); err != nil {
-			continue
+		if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+			t.Fatalf("SSE 帧不是 JSON: %q", payload)
 		}
 		if frame.Error != nil {
 			t.Fatalf("流内错误: %s", frame.Error.Message)
@@ -124,6 +125,9 @@ func TestWebV1ChatCompletionsStream(t *testing.T) {
 	}
 	if strings.Join(contents, "") != "答案是2" {
 		t.Fatalf("content 错误: %v", contents)
+	}
+	if !sawDone {
+		t.Fatal("流缺少 data: [DONE]")
 	}
 }
 
@@ -193,6 +197,32 @@ func TestWebV1DisabledReturns503(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("未启用应 503: %d", rec.Code)
 	}
+}
+
+// sseDataPayloads 按 chat/completions 的 SSE 规则取出 data 字段。
+func sseDataPayloads(body string) []string {
+	var data strings.Builder
+	var out []string
+	flush := func() {
+		if data.Len() == 0 {
+			return
+		}
+		out = append(out, data.String())
+		data.Reset()
+	}
+	for _, line := range strings.Split(body, "\n") {
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, "data:"):
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	flush()
+	return out
 }
 
 func writeLines(w http.ResponseWriter, lines ...string) {

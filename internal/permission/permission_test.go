@@ -258,6 +258,14 @@ func TestCompoundShellAllowAndDeny(t *testing.T) {
 		"git status\nrm -rf /",
 		`echo $(rm -rf x)`,
 		"echo `rm -rf x`",
+		`echo <(rm -rf x)`,
+		`echo >(rm -rf x)`,
+		`{ rm -rf x; }`,
+		`eval rm -rf x`,
+		`sudo rm -rf x`,
+		`sudo -n rm -rf x`,
+		`FOO=1 rm -rf x`,
+		"git status \\\n&& rm -rf x",
 	}
 	for _, command := range deny {
 		if got := engine.Check("bash", json.RawMessage(`{"command":`+quoteJSON(command)+`}`)); got != "deny" {
@@ -270,6 +278,9 @@ func TestCompoundShellAllowAndDeny(t *testing.T) {
 	}
 	if got := engine.Check("bash", json.RawMessage(`{"command":"git status && git diff"}`)); got != "allow" {
 		t.Fatalf("yolo allows a command that is not denied, got %s", got)
+	}
+	if got := engine.Check("bash", json.RawMessage(`{"command":"echo ok '"}`)); got != "ask" {
+		t.Fatalf("yolo must ask when the command does not parse, got %s", got)
 	}
 }
 

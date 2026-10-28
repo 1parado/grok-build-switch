@@ -67,6 +67,13 @@ func (e *Engine) Check(tool string, args json.RawMessage) string {
 			return "deny"
 		}
 	}
+	// A bash line that does not segment (unclosed quote, unclosed $(...))
+	// hides commands from deny rules. Do not auto-run it.
+	if tool == "bash" {
+		if cmd := strings.TrimSpace(argOf(tool, args)); cmd != "" && !shellParses(cmd) {
+			return "ask"
+		}
+	}
 	// 2. 模式短路。
 	switch mode {
 	case ModeAuto:

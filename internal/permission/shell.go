@@ -35,7 +35,17 @@ func scanShell(command string) shellScan {
 			continue
 		}
 		if c == '\\' && i+1 < len(command) {
-			b.WriteByte(command[i+1])
+			next := command[i+1]
+			// A backslash-newline is a line continuation, not a separator and
+			// not part of the command text.
+			if next == '\n' || next == '\r' {
+				i++
+				if next == '\r' && i+1 < len(command) && command[i+1] == '\n' {
+					i++
+				}
+				continue
+			}
+			b.WriteByte(next)
 			i++
 			continue
 		}
@@ -77,6 +87,19 @@ func scanShell(command string) shellScan {
 			continue
 		}
 		if !inDouble && (c == '>' || c == '<') {
+			// <(cmd) and >(cmd) run cmd. Treat them as substitutions so a
+			// deny rule sees the inner command, and an allow rule does not
+			// treat the outer program as the whole line.
+			if i+1 < len(command) && command[i+1] == '(' {
+				inner, next, ok := scanCommandSubst(command, i+1)
+				if !ok {
+					return shellScan{ok: false}
+				}
+				subs = append(subs, inner)
+				b.WriteString("$()")
+				i = next
+				continue
+			}
 			redirect = true
 			b.WriteByte(c)
 			if i+1 < len(command) && (command[i+1] == c || (c == '>' && command[i+1] == '&')) {
@@ -150,7 +173,8 @@ func unrestricted(pattern string) bool {
 // and rejects "git status; rm -rf /". An explicit "*" / "**" pattern still
 // matches the whole line.
 //
-// Deny matches when the whole line, any segment, or any substitution body
+// Deny matches when the whole line, any segment, any wrapper
+// (eval, sudo, env assignment, brace group), or any substitution body
 // matches, so a yolo session cannot hide "rm" behind "echo ok &&".
 func matchBash(rule parsedRule, command string) bool {
 	if !rule.hasArg {
@@ -169,8 +193,10 @@ func matchBash(rule parsedRule, command string) bool {
 			return false
 		}
 		for _, seg := range scanned.segments {
-			if matchCommand(pattern, seg) {
-				return true
+			for _, body := range commandBodies(seg) {
+				if matchCommand(pattern, body) {
+					return true
+				}
 			}
 		}
 		for _, sub := range scanned.subs {
@@ -185,6 +211,98 @@ func matchBash(rule parsedRule, command string) bool {
 	}
 	for _, seg := range scanned.segments {
 		if !matchCommand(pattern, seg) {
+			return false
+		}
+	}
+	return true
+}
+
+// shellParses reports whether the line can be segmented. Callers that would
+// otherwise auto-run a bash command ask instead when this is false: a deny
+// rule cannot see through an unclosed quote.
+func shellParses(command string) bool {
+	return scanShell(command).ok
+}
+
+// commandBodies lists the commands a segment may run. Deny rules match any
+// of them. "FOO=1 sudo rm -rf x" therefore matches "rm *", and so does
+// "{ rm -rf x; }" and "eval rm -rf x".
+func commandBodies(seg string) []string {
+	rest := strings.TrimSpace(seg)
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for rest != "" {
+		rest = stripGroupMarks(rest)
+		if rest == "" {
+			break
+		}
+		add(rest)
+		field, next := splitFirstField(rest)
+		next = strings.TrimSpace(next)
+		switch field {
+		case "eval", "exec", "source", "command", "builtin", "time", "nohup", "nice", ".":
+			rest = next
+		case "sudo":
+			rest = stripSudoFlags(next)
+		default:
+			if isEnvAssign(field) {
+				rest = next
+				continue
+			}
+			return out
+		}
+	}
+	return out
+}
+
+func stripGroupMarks(s string) string {
+	s = strings.TrimSpace(s)
+	for strings.HasPrefix(s, "{ ") || strings.HasPrefix(s, "{\t") || s == "{" {
+		s = strings.TrimSpace(s[1:])
+	}
+	for strings.HasSuffix(s, " }") || s == "}" {
+		s = strings.TrimSpace(strings.TrimSuffix(s, "}"))
+	}
+	return strings.TrimSpace(s)
+}
+
+func splitFirstField(s string) (field, rest string) {
+	s = strings.TrimSpace(s)
+	i := strings.IndexAny(s, " \t")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], s[i+1:]
+}
+
+func stripSudoFlags(s string) string {
+	rest := strings.TrimSpace(s)
+	for rest != "" {
+		field, next := splitFirstField(rest)
+		if !strings.HasPrefix(field, "-") {
+			return rest
+		}
+		rest = strings.TrimSpace(next)
+	}
+	return rest
+}
+
+func isEnvAssign(field string) bool {
+	eq := strings.IndexByte(field, '=')
+	if eq <= 0 {
+		return false
+	}
+	name := field[:eq]
+	for _, r := range name {
+		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
 			return false
 		}
 	}

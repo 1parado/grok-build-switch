@@ -33,8 +33,13 @@ func TestTildeRuleMatchesHomePath(t *testing.T) {
 	if got := engine.Check("write", pathArg(sibling)); got != "allow" {
 		t.Fatalf("write %s = %s, want allow", sibling, got)
 	}
+	// No session directory: a relative path stays literal and does not match.
 	if got := engine.Check("write", json.RawMessage(`{"path":"../.ssh/id_ed25519"}`)); got != "allow" {
-		t.Fatalf("relative path = %s, want allow", got)
+		t.Fatalf("relative path without a base = %s, want allow", got)
+	}
+	unclean := filepath.Join(home, "work") + string(filepath.Separator) + ".." + string(filepath.Separator) + ".ssh" + string(filepath.Separator) + "id_ed25519"
+	if got := engine.Check("write", pathArg(unclean)); got != "deny" {
+		t.Fatalf("write %s = %s, want deny", unclean, got)
 	}
 
 	engine.SetMode(ModeManual)
@@ -48,6 +53,28 @@ func TestTildeRuleMatchesHomePath(t *testing.T) {
 	other := filepath.Join(home, "projects-other", "a.go")
 	if got := engine.Check("write", pathArg(other)); got != "ask" {
 		t.Fatalf("write %s = %s, want ask", other, got)
+	}
+}
+
+func TestRelativePathUsesSessionBase(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(filepath.Join(t.TempDir(), "permissions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.AddUserRule("write(~/.ssh/**)", Deny); err != nil {
+		t.Fatal(err)
+	}
+	engine.SetMode(ModeYolo)
+	engine.SetPathBase(filepath.Join(home, "work"))
+	if got := engine.Check("write", json.RawMessage(`{"path":"../.ssh/id_ed25519"}`)); got != "deny" {
+		t.Fatalf("relative path from the session = %s, want deny", got)
+	}
+	if got := engine.Check("write", json.RawMessage(`{"path":"notes/a.go"}`)); got != "allow" {
+		t.Fatalf("unrelated relative path = %s, want allow", got)
 	}
 }
 

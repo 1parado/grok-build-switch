@@ -580,7 +580,9 @@ func (g *nativePermGate) Check(call llm.ToolCall) agentloop.Decision {
 	// 规则引擎优先：deny > 模式 > allow > ask（D5 决策顺序）。
 	// autoAppr 映射为 ModeAuto；手动模式走规则表。
 	if g.svc.perm != nil {
-		if g.svc.Status().SessionAutoApprove {
+		status := g.svc.Status()
+		g.svc.perm.SetPathBase(status.Cwd)
+		if status.SessionAutoApprove {
 			g.svc.perm.SetMode(permission.ModeAuto)
 		} else {
 			g.svc.perm.SetMode(permission.ModeManual)

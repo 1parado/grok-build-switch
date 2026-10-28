@@ -8,10 +8,11 @@ import (
 
 // matchPath applies a path rule. A leading "~" or "~/" is the user home, so
 // write(~/.ssh/**) also matches the absolute path under that home. A tilde
-// anywhere else stays literal. Relative paths are not resolved.
-func matchPath(pattern, arg string) bool {
-	for _, p := range pathForms(pattern) {
-		for _, a := range pathForms(arg) {
+// anywhere else stays literal. When base is set, a relative arg is joined to
+// it before the comparison, and ".." in an absolute arg is cleaned away.
+func matchPath(pattern, arg, base string) bool {
+	for _, p := range pathForms(pattern, "") {
+		for _, a := range pathForms(arg, base) {
 			if MatchGlob(p, a) {
 				return true
 			}
@@ -20,13 +21,28 @@ func matchPath(pattern, arg string) bool {
 	return false
 }
 
-func pathForms(p string) []string {
+func pathForms(p, base string) []string {
+	p = strings.TrimSpace(p)
 	forms := []string{p, filepath.ToSlash(p)}
-	expanded, ok := expandHomePrefix(p)
-	if !ok {
-		return forms
+	add := func(v string) {
+		if v == "" {
+			return
+		}
+		forms = append(forms, v, filepath.ToSlash(v))
 	}
-	return append(forms, expanded, filepath.ToSlash(expanded))
+	if expanded, ok := expandHomePrefix(p); ok {
+		add(expanded)
+	}
+	if filepath.IsAbs(p) {
+		if cleaned := filepath.Clean(p); cleaned != p {
+			add(cleaned)
+		}
+	}
+	slash := filepath.ToSlash(p)
+	if base != "" && p != "" && !filepath.IsAbs(p) && slash != "~" && !strings.HasPrefix(slash, "~/") {
+		add(filepath.Clean(filepath.Join(base, p)))
+	}
+	return forms
 }
 
 func expandHomePrefix(p string) (string, bool) {

@@ -16,7 +16,8 @@ type Engine struct {
 	session []parsedRule
 	user    []parsedRule
 
-	path string // user 规则持久化文件；空 = 不持久化（测试）
+	path     string // user 规则持久化文件；空 = 不持久化（测试）
+	pathBase string // 会话工作目录。相对路径先接到这里再跟 ~/ 规则比较。
 }
 
 // NewEngine 构造引擎。path 非空时加载既有 user 规则。
@@ -28,6 +29,14 @@ func NewEngine(path string) (*Engine, error) {
 		}
 	}
 	return e, nil
+}
+
+// SetPathBase 设置相对路径的解析根，通常是当前会话的工作目录。
+// 空字符串表示不解析相对路径。
+func (e *Engine) SetPathBase(dir string) {
+	e.mu.Lock()
+	e.pathBase = strings.TrimSpace(dir)
+	e.mu.Unlock()
 }
 
 // SetMode 切换姿态。
@@ -53,6 +62,7 @@ func (e *Engine) Check(tool string, args json.RawMessage) string {
 	tool = lower(tool)
 	e.mu.RLock()
 	mode := e.mode
+	base := e.pathBase
 	// Copy while holding the read lock: AddSessionRule and RemoveUserRule may
 	// mutate the backing arrays as soon as the lock is released.
 	session := append([]parsedRule(nil), e.session...)
@@ -60,10 +70,11 @@ func (e *Engine) Check(tool string, args json.RawMessage) string {
 	e.mu.RUnlock()
 
 	rules := append(append([]parsedRule{}, user...), session...)
+	arg := argOf(tool, args)
 
 	// 1. deny 规则永远优先（任何模式）。
 	for _, r := range rules {
-		if r.decision == Deny && r.tool == tool && matchArg(r, tool, argOf(tool, args)) {
+		if r.decision == Deny && r.tool == tool && matchArg(r, tool, arg, base) {
 			return "deny"
 		}
 	}
@@ -76,7 +87,7 @@ func (e *Engine) Check(tool string, args json.RawMessage) string {
 	}
 	// 3. allow 规则。
 	for _, r := range rules {
-		if r.decision == Allow && r.tool == tool && matchArg(r, tool, argOf(tool, args)) {
+		if r.decision == Allow && r.tool == tool && matchArg(r, tool, arg, base) {
 			return "allow"
 		}
 	}
@@ -90,7 +101,7 @@ func (e *Engine) DenyReason(tool string, args json.RawMessage) string {
 	defer e.mu.RUnlock()
 	rules := append(append([]parsedRule{}, e.user...), e.session...)
 	for _, r := range rules {
-		if r.decision == Deny && r.tool == tool && matchArg(r, tool, argOf(tool, args)) {
+		if r.decision == Deny && r.tool == tool && matchArg(r, tool, argOf(tool, args), e.pathBase) {
 			if r.reason != "" {
 				return r.reason
 			}

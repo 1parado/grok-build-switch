@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -28,17 +29,33 @@ func (e Env) Resolve(path string) (string, error) {
 	if p == "" {
 		return e.Cwd, nil
 	}
-	if p == "~" || strings.HasPrefix(p, "~/") {
+	if rest, ok := homeRest(p); ok {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		p = filepath.Join(home, strings.TrimPrefix(p[1:], "/"))
+		p = filepath.Join(home, filepath.FromSlash(rest))
 	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(e.Cwd, p)
 	}
 	return filepath.Clean(p), nil
+}
+
+// homeRest reports the path under the user home. On Windows, ~\foo is the
+// same path as ~/foo. A backslash stays literal on other systems.
+func homeRest(p string) (string, bool) {
+	normalized := p
+	if runtime.GOOS == "windows" {
+		normalized = strings.ReplaceAll(p, `\`, `/`)
+	}
+	if normalized == "~" {
+		return "", true
+	}
+	if !strings.HasPrefix(normalized, "~/") {
+		return "", false
+	}
+	return strings.TrimPrefix(normalized[1:], "/"), true
 }
 
 // WithinSandbox 判断绝对路径是否落在允许范围内（Cwd 或 SandboxExtra 的前缀内）。

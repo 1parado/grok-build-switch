@@ -243,7 +243,7 @@ func TestOpenAIMessageAcceptsContentParts(t *testing.T) {
 	out := FlattenTranscript(msgs)
 	hello := strings.Index(out, "hello from parts")
 	more := strings.Index(out, "and more")
-	if hello < 0 || more < 0 || more < hello {
+	if hello < 0 || more < 0 || more < hello || !strings.Contains(out, "[图片] https://example.test/a.png") {
 		t.Fatalf("content parts were dropped: %q", out)
 	}
 
@@ -259,7 +259,7 @@ func TestOpenAIMessageAcceptsContentParts(t *testing.T) {
 	if err := json.Unmarshal([]byte(`[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}]}]`), &imageOnly); err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(imageOnly[0].Content) != "" {
+	if imageOnly[0].Content != "[图片] https://example.test/a.png" {
 		t.Fatalf("image-only content = %q", imageOnly[0].Content)
 	}
 }

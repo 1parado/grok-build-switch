@@ -10,10 +10,7 @@ import (
 )
 
 func TestStickySessionPinsTheSameAccount(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -48,10 +45,7 @@ func TestStickySessionPinsTheSameAccount(t *testing.T) {
 }
 
 func TestPreviousResponseIDPinsAccountAndReportsLostContinuation(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -89,10 +83,7 @@ func TestPreviousResponseIDPinsAccountAndReportsLostContinuation(t *testing.T) {
 }
 
 func TestPinnedAccountTokenFailureDropsContinuation(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -141,10 +132,7 @@ func TestPinnedAccountTokenFailureDropsContinuation(t *testing.T) {
 }
 
 func TestBindSessionSweepsExpiredBindings(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	now := time.Now()
 	manager.mu.Lock()
 	for i := 0; i < stickySweepThreshold+10; i++ {
@@ -172,10 +160,7 @@ func TestBindSessionSweepsExpiredBindings(t *testing.T) {
 }
 
 func TestNextTokenStickyExcludingSkipsFailedAccounts(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -204,10 +189,7 @@ func TestNextTokenStickyExcludingSkipsFailedAccounts(t *testing.T) {
 }
 
 func TestNextTokenStickyExcludingReportsLostContinuationForExcludedPin(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -234,11 +216,8 @@ func TestNextTokenStickyExcludingReportsLostContinuationForExcludedPin(t *testin
 }
 
 func TestStickyBindingsSurviveRestart(t *testing.T) {
-	dir := t.TempDir()
-	m1, err := NewManager(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := tempDir(t)
+	m1 := newManager(t, dir)
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := m1.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -261,10 +240,7 @@ func TestStickyBindingsSurviveRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m2, err := NewManager(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	m2 := newManager(t, dir)
 	token, id, lost, err := m2.NextTokenSticky(t.Context(), "sess-restart", "")
 	if err != nil || lost || token == "" {
 		t.Fatalf("after restart NextTokenSticky() = %q lost=%v err=%v", id, lost, err)
@@ -285,10 +261,7 @@ func TestStickyBindingsSurviveRestart(t *testing.T) {
 }
 
 func TestNoAvailableAccountErrorExplainsReasons(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	if _, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -304,7 +277,7 @@ func TestNoAvailableAccountErrorExplainsReasons(t *testing.T) {
 	manager.ObserveResponse(ids[1].ID, 429, `{"code":"free-usage-exhausted","message":"You have used all the included free usage"}`)
 	manager.ObserveResponse(ids[2].ID, 401, `{"code":"unauthorized","error":"token has been invalidated"}`)
 
-	_, _, _, err = manager.NextTokenSticky(t.Context(), "", "")
+	_, _, _, err := manager.NextTokenSticky(t.Context(), "", "")
 	if err == nil {
 		t.Fatal("expected error when every account is unavailable")
 	}

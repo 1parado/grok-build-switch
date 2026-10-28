@@ -15,10 +15,7 @@ import (
 )
 
 func TestImportPersistsMetadataWithoutTokensAndKeepsStableKey(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	result, err := manager.Import([]ImportFile{
 		{Name: "a.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"secret-access-a","refresh_token":"secret-refresh-a","expired":%q,"email":"a@example.com"}`, expiry)},
@@ -78,14 +75,11 @@ func TestAutomaticInspectionClassifiesAndRoutesOnlyAvailableAccount(t *testing.T
 	}))
 	defer upstream.Close()
 
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	manager.client.Store(upstream.Client())
 	manager.upstreamURL = upstream.URL
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
-	_, err = manager.Import([]ImportFile{
+	_, err := manager.Import([]ImportFile{
 		{Name: "healthy.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"healthy-token","expired":%q,"email":"healthy@example.com"}`, expiry)},
 		{Name: "quota.json", Content: fmt.Sprintf(`{"type":"xai","access_token":"quota-token","expired":%q,"email":"quota@example.com"}`, expiry)},
 	})
@@ -124,16 +118,13 @@ func TestAutomaticInspectionClassifiesAndRoutesOnlyAvailableAccount(t *testing.T
 }
 
 func TestNewManagerRecoversCorruptPoolIndex(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempDir(t)
 	path := filepath.Join(dir, "pool.json")
 	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	manager, err := NewManager(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, dir)
 	status := manager.Status()
 	if status.LocalAPIKey == "" || len(status.Accounts) != 0 {
 		t.Fatalf("recovered status = %#v", status)
@@ -156,12 +147,9 @@ func TestGeneric429DoesNotIsolateAccount(t *testing.T) {
 }
 
 func TestObserveResponseReactivelyIsolatesExhaustedAccount(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
-	_, err = manager.Import([]ImportFile{{
+	_, err := manager.Import([]ImportFile{{
 		Name:    "quota.json",
 		Content: fmt.Sprintf(`{"type":"xai","access_token":"quota-token","expired":%q,"email":"quota@example.com"}`, expiry),
 	}})
@@ -177,10 +165,7 @@ func TestObserveResponseReactivelyIsolatesExhaustedAccount(t *testing.T) {
 }
 
 func TestSettingsValidation(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	if _, err := manager.UpdateSettings(Settings{Enabled: true, IntervalMinutes: 1, Workers: 4}); err == nil {
 		t.Fatal("expected interval validation error")
 	}
@@ -190,10 +175,7 @@ func TestSettingsValidation(t *testing.T) {
 }
 
 func TestBulkDisableAndDeleteOnlyInspectedAbnormalAccounts(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	files := make([]ImportFile, 0, 4)
 	for _, name := range []string{"healthy", "probe", "quota", "pending"} {
@@ -251,11 +233,8 @@ func TestBulkDisableAndDeleteOnlyInspectedAbnormalAccounts(t *testing.T) {
 }
 
 func TestBulkDeleteRemovesAbnormalSourceAuthFiles(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	authDir := filepath.Join(t.TempDir(), "auths")
+	manager := newManager(t, tempDir(t))
+	authDir := filepath.Join(tempDir(t), "auths")
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -366,10 +345,7 @@ func TestInspectionUsesConfiguredHTTPProxy(t *testing.T) {
 	}))
 	defer proxy.Close()
 
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	if _, err := manager.UpdateSettings(Settings{
 		Enabled:         false,
 		IntervalMinutes: 360,
@@ -441,10 +417,7 @@ func TestEmptyProxyInspectionDoesNotPanic(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	if _, err := manager.UpdateSettings(Settings{
 		Enabled:         false,
 		IntervalMinutes: 360,
@@ -476,10 +449,7 @@ func TestEmptyProxyInspectionDoesNotPanic(t *testing.T) {
 }
 
 func TestEnsureMigratesMissingCredentialWithoutResettingExistingResult(t *testing.T) {
-	manager, err := NewManager(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	manager := newManager(t, tempDir(t))
 	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	file := ImportFile{
 		Name:    "legacy.json",
@@ -501,5 +471,44 @@ func TestEnsureMigratesMissingCredentialWithoutResettingExistingResult(t *testin
 	status := manager.Status()
 	if len(status.Accounts) != 1 || status.Accounts[0].Classification != "healthy" {
 		t.Fatalf("Ensure() reset existing account: %#v", status)
+	}
+}
+
+// cancelPauseTrip blocks inside the HTTP call until Close cancels it, then
+// stays there long enough that a Close which does not wait would return first.
+type cancelPauseTrip struct {
+	entered chan struct{}
+	started atomic.Bool
+}
+
+func (c *cancelPauseTrip) RoundTrip(req *http.Request) (*http.Response, error) {
+	if c.started.CompareAndSwap(false, true) {
+		close(c.entered)
+	}
+	<-req.Context().Done()
+	time.Sleep(300 * time.Millisecond)
+	return nil, req.Context().Err()
+}
+
+func TestCloseWaitsForImportInspection(t *testing.T) {
+	entered := make(chan struct{})
+	manager := newManager(t, tempDir(t))
+	manager.client.Store(&http.Client{Transport: &cancelPauseTrip{entered: entered}})
+	expiry := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if _, err := manager.Import([]ImportFile{{
+		Name:    "a.json",
+		Content: fmt.Sprintf(`{"type":"xai","access_token":"token-a","expired":%q,"email":"a@example.com"}`, expiry),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("import inspection did not start")
+	}
+	started := time.Now()
+	manager.Close()
+	if time.Since(started) < 250*time.Millisecond {
+		t.Fatal("Close returned before the in-flight import inspection finished")
 	}
 }

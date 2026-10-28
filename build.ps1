@@ -82,7 +82,29 @@ try {
 	if ($Version -ne "dev" -and $Version -notmatch '^v?\d+(\.\d+)+([+-][0-9A-Za-z.-]+)?$') {
 		throw "Invalid build version: $Version"
 	}
-  go test ./...
+  # Windows 上刚写完的临时文件可能被 Defender 占住，go test 的 TempDir
+  # 清理会报 directory is not empty，而且标准库不重试这个错误。只有失败
+  # 行全部是这条清理信息时才重跑，其它失败照常中止。
+  $previousNativeError = $PSNativeCommandUseErrorActionPreference
+  $PSNativeCommandUseErrorActionPreference = $false
+  try {
+    $testAttempts = 3
+    for ($testAttempt = 1; $testAttempt -le $testAttempts; $testAttempt++) {
+      $testLog = Join-Path $env:TEMP ("grok-switch-go-test-" + [guid]::NewGuid().ToString("N") + ".log")
+      & go test ./... *> $testLog
+      Get-Content -LiteralPath $testLog
+      if ($LASTEXITCODE -eq 0) { break }
+      $loggedFailures = @(Select-String -LiteralPath $testLog -Pattern '^\s+\S+\.go:\d+:' | ForEach-Object { $_.Line })
+      $unrelated = @($loggedFailures | Where-Object { $_ -notmatch 'TempDir RemoveAll cleanup' })
+      $tempDirFlake = $loggedFailures.Count -gt 0 -and $unrelated.Count -eq 0
+      if (-not $tempDirFlake -or $testAttempt -eq $testAttempts) {
+        throw "go test ./... failed"
+      }
+      Write-Warning "go test hit the Windows TempDir cleanup flake; retrying ($testAttempt/$testAttempts)."
+    }
+  } finally {
+    $PSNativeCommandUseErrorActionPreference = $previousNativeError
+  }
   if (Get-Command magick -ErrorAction SilentlyContinue) {
     $temporaryIcon = Join-Path $env:TEMP ("grok-switch-icon-" + [guid]::NewGuid().ToString("N") + ".ico")
     try {

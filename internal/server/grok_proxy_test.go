@@ -230,6 +230,7 @@ func newFailoverTestPool(t *testing.T, tokens ...string) *grokpool.Manager {
 	if _, err := pool.Import(files); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	return pool
 }
 

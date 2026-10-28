@@ -86,6 +86,7 @@ func TestGrokAuthImportAlsoAddsCredentialToUnifiedPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	server := &Server{
 		ActualPort: 19292,
 		Profiles:   profileStore,

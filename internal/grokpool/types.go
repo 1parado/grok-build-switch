@@ -134,6 +134,10 @@ type Manager struct {
 	done           chan struct{}
 	runCancel      context.CancelFunc
 	runWG          sync.WaitGroup
+	closed         bool
+	inspectCtx     context.Context
+	inspectCancel  context.CancelFunc
+	inspectWG      sync.WaitGroup
 	roundRobin     atomic.Uint64
 	stores         map[string]*grokauth.Store
 	sticky         map[string]stickyBinding

@@ -24,6 +24,7 @@ func TestGrokPoolImportCreatesPoolBackedProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	server := &Server{
 		ActualPort: 19191,
 		Profiles:   profileStore,
@@ -72,6 +73,7 @@ func TestGrokProxyFallsBackToSingleAuthWhenPoolHasNoAvailableAccount(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	// Import 会立刻触发后台巡检：先把上游指向本地 httptest，巡检结束后
 	// 才允许下面对 http.DefaultTransport 全局变量做替换，避免数据竞争。
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +141,7 @@ func TestGrokProxyFallbackDropsContinuationFromPoolAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {

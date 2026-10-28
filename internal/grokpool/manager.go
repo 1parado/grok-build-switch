@@ -31,6 +31,7 @@ func NewManager(dir string) (*Manager, error) {
 		watchHashes: make(map[string]string),
 		sticky:      make(map[string]stickyBinding),
 	}
+	m.inspectCtx, m.inspectCancel = context.WithCancel(context.Background())
 	m.client.Store(&http.Client{Timeout: 25 * time.Second})
 	if err := m.load(); err != nil {
 		return nil, err
@@ -51,7 +52,7 @@ func NewManager(dir string) (*Manager, error) {
 
 func (m *Manager) Start() {
 	m.mu.Lock()
-	if m.started {
+	if m.closed || m.started {
 		m.mu.Unlock()
 		return
 	}
@@ -73,15 +74,28 @@ func (m *Manager) SetOnAuthDirImport(fn func(ImportResult)) {
 
 func (m *Manager) Close() {
 	m.mu.Lock()
-	if !m.started {
+	if m.closed {
 		m.mu.Unlock()
 		return
 	}
+	m.closed = true
+	started := m.started
 	m.started = false
-	if m.runCancel != nil {
-		m.runCancel()
-	}
+	runCancel := m.runCancel
+	inspectCancel := m.inspectCancel
 	m.mu.Unlock()
+	// 导入触发的巡检不依赖 Start。先取消并等它写完，再拆临时目录，
+	// 否则 Windows 上会留下未关闭的 pool.json，RemoveAll 报目录非空。
+	if inspectCancel != nil {
+		inspectCancel()
+	}
+	if runCancel != nil {
+		runCancel()
+	}
+	m.inspectWG.Wait()
+	if !started {
+		return
+	}
 	select {
 	case <-m.stop:
 	default:
@@ -191,7 +205,19 @@ func (m *Manager) importFiles(files []ImportFile, onlyMissing bool) (ImportResul
 	// 原来的 signalWake + nextRun=now 会遍历整个号池，网络波动时
 	// 容易把好账号误判为异常（reauth/delete），搞坏已有账号。
 	if changed > 0 && len(importedIDs) > 0 {
-		go m.inspectAccountsOnly(importedIDs)
+		m.mu.Lock()
+		closed := m.closed
+		if !closed {
+			m.inspectWG.Add(1)
+		}
+		m.mu.Unlock()
+		if !closed {
+			ids := append([]string(nil), importedIDs...)
+			go func() {
+				defer m.inspectWG.Done()
+				m.inspectAccountsOnly(ids)
+			}()
+		}
 	}
 	return result, nil
 }
@@ -200,7 +226,11 @@ func (m *Manager) importFiles(files []ImportFile, onlyMissing bool) (ImportResul
 // the rest of the pool. Used after import to verify only the new/updated
 // credentials instead of running a full-pool sweep.
 func (m *Manager) inspectAccountsOnly(ids []string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	parent := m.inspectCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
 	for _, id := range ids {
 		if ctx.Err() != nil {

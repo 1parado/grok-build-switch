@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 type SkillEntry struct {
@@ -113,23 +114,34 @@ func parseSkillDirective(line string) (name, remainder string, ok bool) {
 		return "", "", false
 	}
 	command = strings.TrimSpace(strings.TrimPrefix(command, "/"))
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	first, rest, found := cutSkillField(command)
+	if !found {
 		return "", "", false
 	}
-	if strings.EqualFold(fields[0], "skills") {
-		if len(fields) < 2 {
+	if strings.EqualFold(first, "skills") {
+		// The name is the next field. Searching the whole line for that
+		// text hits the keyword first: "ls" sits inside "skills", and
+		// "skill" is its prefix, so the arguments came back corrupted.
+		name, rest, found = cutSkillField(rest)
+		if !found {
 			return "", "", false
 		}
-		name = fields[1]
-		idx := strings.Index(command, name)
-		remainder = strings.TrimSpace(command[idx+len(name):])
-		return name, remainder, true
+		return name, strings.TrimSpace(rest), true
 	}
-	name = fields[0]
-	idx := strings.Index(command, name)
-	remainder = strings.TrimSpace(command[idx+len(name):])
-	return name, remainder, true
+	return first, strings.TrimSpace(rest), true
+}
+
+// cutSkillField returns the next whitespace-delimited token and the raw text after it.
+func cutSkillField(s string) (field, rest string, ok bool) {
+	s = strings.TrimLeftFunc(s, unicode.IsSpace)
+	if s == "" {
+		return "", "", false
+	}
+	i := strings.IndexFunc(s, unicode.IsSpace)
+	if i < 0 {
+		return s, "", true
+	}
+	return s[:i], s[i:], true
 }
 
 func loadSkillInstructions(roots []string, name string) (string, bool, error) {

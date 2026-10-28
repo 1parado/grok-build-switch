@@ -296,16 +296,22 @@ func sameProjectPath(a, b string) bool {
 
 // looksLikeGarbledPath detects mojibake folder names from legacy code-page
 // corruption (e.g. 测试 → æµ‹è¯• style replacement glyphs).
+// One accented letter is a real name (Café, Århus). Mojibake of a CJK
+// name stacks several of those glyphs, so a single marker is not enough.
 func looksLikeGarbledPath(name string) bool {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false
 	}
-	// Common UTF-8-as-Latin1 artifacts for CJK.
+	seen := map[rune]struct{}{}
 	for _, r := range name {
-		if r == 'Ã' || r == 'Â' || r == 'æ' || r == 'å' || r == 'è' || r == 'é' || r == 'ø' || r == '�' {
+		if r == '�' {
 			return true
 		}
+		switch r {
+		case 'Ã', 'Â', 'æ', 'å', 'è', 'é', 'ø':
+			seen[r] = struct{}{}
+		}
 	}
-	return false
+	return len(seen) >= 2
 }

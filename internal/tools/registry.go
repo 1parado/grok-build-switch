@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"unicode/utf8"
 
 	"grok_switch/internal/agentfs"
 	"grok_switch/internal/llm"
@@ -140,10 +141,25 @@ func (r *Registry) ExecuteTool(ctx context.Context, call llm.ToolCall) ToolOutpu
 		out.Text = "(无输出)"
 	}
 	if len(out.Text) > ResultBudget {
-		out.Text = out.Text[:ResultBudget] + "\n\n[输出超过预算被截断]"
+		out.Text = limitText(out.Text, ResultBudget) + "\n\n[输出超过预算被截断]"
 		out.Truncated = true
 	}
 	return out
+}
+
+// limitText 按字节预算截断，并停在 UTF-8 字符边界上。
+func limitText(s string, max int) string {
+	if max < 0 {
+		max = 0
+	}
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // argHelp 构造参数解析错误信息（带期望字段，帮模型自纠）。

@@ -29,7 +29,8 @@ func (s *Server) NewNativeAgentService() (AgentService, error) {
 		// DefaultCwd 惰性读取：rememberAgentCwd 会在运行中更新
 		// settings.AgentDefaultCwd，静态快照会把构造时的旧目录固化成
 		// 兜底 cwd（重启回落 Downloads 的根因之一）。
-		DefaultCwd: s.agentDefaultCwd,
+		DefaultCwd:     s.agentDefaultCwd,
+		AttachmentRoot: s.Paths.DataDir + "/attachments",
 	})
 }
 

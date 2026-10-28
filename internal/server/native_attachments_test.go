@@ -27,7 +27,7 @@ func TestBuildUserMessageReadsPathAttachments(t *testing.T) {
 	msg := buildUserMessage("看一下", []agentbridge.Attachment{
 		{Kind: "text_file", Name: "note.txt", Path: note},
 		{Kind: "image", Name: "pic.png", Path: img, MimeType: "image/png"},
-	})
+	}, []string{dir})
 
 	var sawText, sawNotePath, sawImage bool
 	for _, part := range msg.Parts {
@@ -63,7 +63,7 @@ func TestBuildUserMessageReadsTextyPathAndInlineText(t *testing.T) {
 	msg := buildUserMessage("", []agentbridge.Attachment{
 		{Kind: "path", Name: "notes.md", Path: note},
 		{Kind: "text_file", Name: "paste.txt", Text: "粘贴的正文"},
-	})
+	}, []string{dir})
 	var sawFile, sawPaste bool
 	for _, part := range msg.Parts {
 		p, ok := part.(llm.TextPart)
@@ -94,7 +94,7 @@ func TestBuildUserMessageCutsAttachmentOnRuneBoundary(t *testing.T) {
 	}
 	msg := buildUserMessage("", []agentbridge.Attachment{
 		{Kind: "text_file", Name: "long.txt", Path: note},
-	})
+	}, []string{dir})
 	var snippet string
 	for _, part := range msg.Parts {
 		p, ok := part.(llm.TextPart)
@@ -111,11 +111,12 @@ func TestBuildUserMessageCutsAttachmentOnRuneBoundary(t *testing.T) {
 }
 
 func TestBuildUserMessageFallsBackWhenImageIsMissing(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "gone.png")
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "gone.png")
 	msg := buildUserMessage("看图", []agentbridge.Attachment{
 		{Kind: "image", Name: "gone.png", Path: missing, MimeType: "image/png"},
 		{Kind: "image", Data: "aaaa", MimeType: "image/png"},
-	})
+	}, []string{dir})
 	var sawPath, sawInline bool
 	for _, part := range msg.Parts {
 		switch p := part.(type) {
@@ -134,5 +135,104 @@ func TestBuildUserMessageFallsBackWhenImageIsMissing(t *testing.T) {
 	}
 	if !sawPath || !sawInline {
 		t.Fatalf("parts = %#v", msg.Parts)
+	}
+}
+
+func TestBuildUserMessageDoesNotReadOutsideRoots(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret-token"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg := buildUserMessage("", []agentbridge.Attachment{
+		{Kind: "text_file", Name: "secret.txt", Path: secret},
+	}, []string{dir})
+	for _, part := range msg.Parts {
+		p, ok := part.(llm.TextPart)
+		if ok && strings.Contains(p.Text, "secret-token") {
+			t.Fatalf("read a file outside the session: %q", p.Text)
+		}
+	}
+
+	inside := filepath.Join(dir, "local.txt")
+	if err := os.WriteFile(inside, []byte("local-secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg = buildUserMessage("", []agentbridge.Attachment{
+		{Kind: "text_file", Name: "local.txt", Path: inside},
+	}, nil)
+	for _, part := range msg.Parts {
+		p, ok := part.(llm.TextPart)
+		if ok && (strings.Contains(p.Text, "secret-token") || strings.Contains(p.Text, "local-secret")) {
+			t.Fatalf("empty roots still read the file: %q", p.Text)
+		}
+	}
+}
+
+func TestBuildUserMessageDoesNotFollowSymlinkOut(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("secret-token"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "note.txt")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skip("symlink: " + err.Error())
+	}
+	msg := buildUserMessage("", []agentbridge.Attachment{
+		{Kind: "text_file", Name: "note.txt", Path: link},
+	}, []string{dir})
+	for _, part := range msg.Parts {
+		p, ok := part.(llm.TextPart)
+		if ok && strings.Contains(p.Text, "secret-token") {
+			t.Fatalf("followed a symlink out of the session: %q", p.Text)
+		}
+	}
+}
+
+func TestBuildUserMessageReadsUploadRoot(t *testing.T) {
+	cwd := t.TempDir()
+	uploads := t.TempDir()
+	note := filepath.Join(uploads, "up.txt")
+	if err := os.WriteFile(note, []byte("上传正文"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	msg := buildUserMessage("", []agentbridge.Attachment{
+		{Kind: "text_file", Name: "up.txt", Path: note},
+	}, attachmentRoots(cwd, uploads))
+	var saw bool
+	for _, part := range msg.Parts {
+		p, ok := part.(llm.TextPart)
+		if ok && strings.Contains(p.Text, "上传正文") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("upload root was not readable: %#v", msg.Parts)
+	}
+}
+
+func TestBuildUserMessageSkipsOversizedImage(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "big.png")
+	f, err := os.Create(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxUploadImageBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	msg := buildUserMessage("", []agentbridge.Attachment{
+		{Kind: "image", Name: "big.png", Path: img, MimeType: "image/png"},
+	}, []string{dir})
+	for _, part := range msg.Parts {
+		if _, ok := part.(llm.ImagePart); ok {
+			t.Fatal("oversized image was inlined")
+		}
 	}
 }

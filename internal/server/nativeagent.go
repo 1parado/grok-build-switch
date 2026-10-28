@@ -41,6 +41,9 @@ type EngineDeps struct {
 	// rememberAgentCwd 会在运行中更新 settings.AgentDefaultCwd，快照会
 	// 把构造时的旧目录固化成永久兜底。
 	DefaultCwd func() string
+	// AttachmentRoot 是上传文件目录。路径附件只读会话 cwd 和这里，
+	// 两者都空时不读磁盘。
+	AttachmentRoot string
 }
 
 // permissionOptionFor 构造与 acp 桥一致的审批选项。
@@ -368,8 +371,8 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 	n.mu.Unlock()
 	n.broadcastStatus()
 
-	// 组装用户消息（文本 + 附件）。
-	userMsg := buildUserMessage(text, attachments)
+	// 组装用户消息（文本 + 附件）。只读会话目录和上传目录里的路径。
+	userMsg := buildUserMessage(text, attachments, attachmentRoots(env.Cwd, n.deps.AttachmentRoot))
 	mem.AppendWithOrigin(userMsg, agentkit.OriginUser)
 	n.persist(sessionID, agentkit.Record{
 		Origin: agentkit.OriginUser, Role: llm.RoleUser,
@@ -472,15 +475,26 @@ func (n *nativeAgentService) Prompt(text string, attachments []agentbridge.Attac
 	return nil
 }
 
-func buildUserMessage(text string, attachments []agentbridge.Attachment) llm.Message {
+func buildUserMessage(text string, attachments []agentbridge.Attachment, roots []string) llm.Message {
 	msg := llm.Message{Role: llm.RoleUser}
 	if strings.TrimSpace(text) != "" {
 		msg.Parts = append(msg.Parts, llm.TextPart{Text: text})
 	}
 	for _, a := range attachments {
-		msg.Parts = append(msg.Parts, nativeAttachmentParts(a)...)
+		msg.Parts = append(msg.Parts, nativeAttachmentParts(a, roots)...)
 	}
 	return msg
+}
+
+func attachmentRoots(cwd, uploadRoot string) []string {
+	var roots []string
+	if cwd = strings.TrimSpace(cwd); cwd != "" {
+		roots = append(roots, cwd)
+	}
+	if uploadRoot = strings.TrimSpace(uploadRoot); uploadRoot != "" {
+		roots = append(roots, uploadRoot)
+	}
+	return roots
 }
 
 func attachmentsToMediaRefs(attachments []agentbridge.Attachment) []agentkit.MediaRef {

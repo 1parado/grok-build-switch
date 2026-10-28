@@ -16,7 +16,7 @@ import (
 const nativeAttachTextRunes = 20000
 
 // nativeAttachmentParts 在本机读取路径附件。浏览器只传路径，不读的话模型只能看见文件名。
-func nativeAttachmentParts(a agentbridge.Attachment) []llm.ContentPart {
+func nativeAttachmentParts(a agentbridge.Attachment, roots []string) []llm.ContentPart {
 	kind := strings.ToLower(strings.TrimSpace(a.Kind))
 	path := strings.TrimSpace(a.Path)
 	name := strings.TrimSpace(a.Name)
@@ -28,23 +28,27 @@ func nativeAttachmentParts(a agentbridge.Attachment) []llm.ContentPart {
 		if kind == "" {
 			kind = nativeAttachKind(path, mime)
 		}
-		return nativePathParts(kind, name, path, mime)
+		return nativePathParts(kind, name, path, mime, roots)
 	}
 	return nativeInlineParts(kind, name, mime, a.Data, a.Text)
 }
 
-func nativePathParts(kind, name, path, mime string) []llm.ContentPart {
+func nativePathParts(kind, name, path, mime string, roots []string) []llm.ContentPart {
 	line := llm.TextPart{Text: fmt.Sprintf("[附件 %s: %s]", name, path)}
+	real, ok := nativeRealPath(path, roots)
+	if !ok {
+		return []llm.ContentPart{line}
+	}
 	switch kind {
 	case "image":
-		if part, ok := nativeImageFromPath(path, mime); ok {
+		if part, ok := nativeImageFromPath(real, mime); ok {
 			return []llm.ContentPart{part}
 		}
 		return []llm.ContentPart{line}
 	case "text_file", "path":
 		var parts []llm.ContentPart
-		if kind == "text_file" || nativeTextyPath(path, mime) {
-			if snippet, err := nativeTextSnippet(path); err == nil && snippet != "" {
+		if kind == "text_file" || nativeTextyPath(real, mime) {
+			if snippet, err := nativeTextSnippet(real); err == nil && snippet != "" {
 				parts = append(parts, llm.TextPart{Text: fmt.Sprintf("【附件：%s】\n%s", name, snippet)})
 			}
 		}
@@ -53,6 +57,49 @@ func nativePathParts(kind, name, path, mime string) []llm.ContentPart {
 	default:
 		return []llm.ContentPart{line}
 	}
+}
+
+// nativeRealPath 只接受落在允许根目录里的真实路径。根目录为空、
+// 目标不存在，或符号链接指向根外时，调用方退回路径文本，不读文件。
+func nativeRealPath(path string, roots []string) (string, bool) {
+	if len(roots) == 0 {
+		return "", false
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+	real = filepath.Clean(real)
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		rootReal := filepath.Clean(rootAbs)
+		if resolved, err := filepath.EvalSymlinks(rootAbs); err == nil {
+			rootReal = filepath.Clean(resolved)
+		}
+		if nativeWithin(rootReal, real) {
+			return real, true
+		}
+	}
+	return "", false
+}
+
+func nativeWithin(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
 func nativeInlineParts(kind, name, mime, data, text string) []llm.ContentPart {
@@ -81,8 +128,12 @@ func nativeInlineParts(kind, name, mime, data, text string) []llm.ContentPart {
 }
 
 func nativeImageFromPath(path, mime string) (llm.ImagePart, bool) {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() || st.Size() <= 0 || st.Size() > maxUploadImageBytes {
+		return llm.ImagePart{}, false
+	}
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) == 0 {
+	if err != nil || len(data) == 0 || int64(len(data)) > maxUploadImageBytes {
 		return llm.ImagePart{}, false
 	}
 	if mime == "" {
